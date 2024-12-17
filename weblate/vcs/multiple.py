@@ -22,7 +22,7 @@ class MultipleRepositories(Repository):
         local: bool = False,
         skip_init: bool = False,
     ):
-        super().__init__(path, branch, component, local, skip_init)
+        super().__init__(path, branch=branch, component=component, local=local, skip_init=skip_init)
         self.repositories: list[Repository] = []
 
     @classmethod
