@@ -8,18 +8,16 @@ import os
 import subprocess
 from contextlib import suppress
 from itertools import chain
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils.functional import cached_property
 from django.utils.translation import gettext
 
-from weblate.addons.events import AddonEvent
-from weblate.addons.forms import BaseAddonForm
-from weblate.addons.tasks import postconfigure_addon
+from weblate.addons.events import POST_CONFIGURE_EVENTS, AddonEvent
 from weblate.trans.exceptions import FileParseError
-from weblate.trans.tasks import perform_update
+from weblate.trans.models import Component
 from weblate.trans.util import get_clean_env
 from weblate.utils import messages
 from weblate.utils.errors import report_error
@@ -29,25 +27,33 @@ from weblate.utils.validators import validate_filename
 if TYPE_CHECKING:
     from django_stubs_ext import StrOrPromise
 
+    from weblate.addons.forms import BaseAddonForm
     from weblate.addons.models import Addon
-    from weblate.auth.models import User
+    from weblate.auth.models import AuthenticatedHttpRequest, User
     from weblate.formats.base import TranslationFormat
-    from weblate.trans.models import Component, Project, Translation, Unit
+    from weblate.trans.models import Project, Translation, Unit
+
+
+class CompatDict(TypedDict, total=False):
+    vcs: set[str]
+    file_format: set[str]
+    edit_template: set[bool]
 
 
 class BaseAddon:
     """Base class for Weblate add-ons."""
 
-    events: tuple[AddonEvent, ...] = ()
-    settings_form: None | type[BaseAddonForm] = None
+    events: set[AddonEvent] = set()
+    settings_form: type[BaseAddonForm] | None = None
     name = ""
-    compat: dict[str, set[str]] = {}
+    compat: CompatDict = {}
     multiple = False
     verbose: StrOrPromise = "Base add-on"
     description: StrOrPromise = "Base add-on"
     icon = "cog.svg"
     project_scope = False
     repo_scope = False
+    needs_component = False
     has_summary = False
     alert: str = ""
     trigger_update = False
@@ -152,6 +158,8 @@ class BaseAddon:
         self.post_configure()
 
     def post_configure(self, run: bool = True) -> None:
+        from weblate.addons.tasks import postconfigure_addon
+
         self.instance.log_debug("configuring events for %s add-on", self.name)
 
         # Configure events to current status
@@ -177,14 +185,16 @@ class BaseAddon:
     def post_configure_run_component(self, component) -> None:
         # Trigger post configure event for a VCS component
         previous = component.repository.last_revision
+        if not (POST_CONFIGURE_EVENTS & self.events):
+            return
 
         if AddonEvent.EVENT_POST_COMMIT in self.events:
             component.log_debug("running post_commit add-on: %s", self.name)
-            self.post_commit(component)
+            self.post_commit(component, True)
         if AddonEvent.EVENT_POST_UPDATE in self.events:
             component.log_debug("running post_update add-on: %s", self.name)
             component.commit_pending("add-on", None)
-            self.post_update(component, "", False, False)
+            self.post_update(component, "", False)
         if AddonEvent.EVENT_COMPONENT_UPDATE in self.events:
             component.log_debug("running component_update add-on: %s", self.name)
             self.component_update(component)
@@ -213,7 +223,8 @@ class BaseAddon:
     def can_install(cls, component: Component, user: User | None):  # noqa: ARG003
         """Check whether add-on is compatible with given component."""
         return all(
-            getattr(component, key) in values for key, values in cls.compat.items()
+            getattr(component, key) in cast("set", values)
+            for key, values in cls.compat.items()
         )
 
     def pre_push(self, component: Component) -> None:
@@ -229,7 +240,7 @@ class BaseAddon:
         # To be implemented in a subclass
 
     def post_update(
-        self, component: Component, previous_head: str, skip_push: bool, child: bool
+        self, component: Component, previous_head: str, skip_push: bool
     ) -> None:
         """
         Event handler after repository is updated from upstream.
@@ -243,11 +254,13 @@ class BaseAddon:
         """
         # To be implemented in a subclass
 
-    def pre_commit(self, translation: Translation, author: User) -> None:
+    def pre_commit(
+        self, translation: Translation, author: str, store_hash: bool
+    ) -> None:
         """Event handler before changes are committed to the repository."""
         # To be implemented in a subclass
 
-    def post_commit(self, component: Component) -> None:
+    def post_commit(self, component: Component, store_hash: bool) -> None:
         """Event handler after changes are committed to the repository."""
         # To be implemented in a subclass
 
@@ -259,7 +272,9 @@ class BaseAddon:
         """Event handler before new unit is created."""
         # To be implemented in a subclass
 
-    def store_post_load(self, translation: Unit, store: TranslationFormat) -> None:
+    def store_post_load(
+        self, translation: Translation, store: TranslationFormat
+    ) -> None:
         """
         Event handler after a file is parsed.
 
@@ -279,7 +294,7 @@ class BaseAddon:
         # To be implemented in a subclass
 
     def execute_process(
-        self, component: Component, cmd: list[str], env: None | dict[str, str] = None
+        self, component: Component, cmd: list[str], env: dict[str, str] | None = None
     ) -> None:
         component.log_debug("%s add-on exec: %s", self.name, " ".join(cmd))
         try:
@@ -304,7 +319,7 @@ class BaseAddon:
                     "error": str(err),
                 }
             )
-            report_error(cause="Add-on script error", project=component.project)
+            report_error("Add-on script error", project=component.project)
 
     def trigger_alerts(self, component: Component) -> None:
         if self.alerts:
@@ -371,10 +386,14 @@ class BaseAddon:
         return filename
 
     @classmethod
-    def pre_install(cls, component: Component, request) -> None:
-        if cls.trigger_update:
-            perform_update.delay("Component", component.pk, auto=True)
-            if component.repo_needs_merge():
+    def pre_install(
+        cls, obj: Component | Project | None, request: AuthenticatedHttpRequest
+    ) -> None:
+        from weblate.trans.tasks import perform_update
+
+        if cls.trigger_update and isinstance(obj, Component):
+            perform_update.delay("Component", obj.pk, auto=True)
+            if obj.repo_needs_merge():
                 messages.warning(
                     request,
                     gettext(
@@ -389,22 +408,12 @@ class BaseAddon:
         from weblate.auth.models import User
 
         if not self.user_name or not self.user_verbose:
-            raise ValueError(
-                f"{self.__class__.__name__} is missing user_name and user_verbose!"
-            )
+            msg = f"{self.__class__.__name__} is missing user_name and user_verbose!"
+            raise ValueError(msg)
 
         return User.objects.get_or_create_bot(
             "addon", self.user_name, self.user_verbose
         )
-
-
-class TestAddon(BaseAddon):
-    """Testing add-on doing nothing."""
-
-    settings_form = BaseAddonForm
-    name = "weblate.base.test"
-    verbose = "Test add-on"
-    description = "Test add-on"
 
 
 class UpdateBaseAddon(BaseAddon):
@@ -414,7 +423,9 @@ class UpdateBaseAddon(BaseAddon):
     It hooks to post update and commits all changed translations.
     """
 
-    events: tuple[AddonEvent, ...] = (AddonEvent.EVENT_POST_UPDATE,)
+    events: set[AddonEvent] = {
+        AddonEvent.EVENT_POST_UPDATE,
+    }
 
     @staticmethod
     def iterate_translations(component: Component):
@@ -426,36 +437,19 @@ class UpdateBaseAddon(BaseAddon):
         raise NotImplementedError
 
     def post_update(
-        self, component: Component, previous_head: str, skip_push: bool, child: bool
+        self, component: Component, previous_head: str, skip_push: bool
     ) -> None:
         # Ignore file parse error, it will be properly tracked as an alert
-        with suppress(FileParseError):
-            self.update_translations(component, previous_head)
-        self.commit_and_push(component, skip_push=skip_push)
-
-
-class TestError(Exception):
-    pass
-
-
-class TestCrashAddon(UpdateBaseAddon):
-    """Testing add-on doing nothing."""
-
-    name = "weblate.base.crash"
-    verbose = "Crash test add-on"
-    description = "Crash test add-on"
-
-    def update_translations(self, component: Component, previous_head: str) -> None:
-        if previous_head:
-            raise TestError("Test error")
-
-    @classmethod
-    def can_install(cls, component: Component, user: User | None) -> bool:  # noqa: ARG003
-        return False
+        with component.repository.lock:
+            with suppress(FileParseError):
+                self.update_translations(component, previous_head)
+            self.commit_and_push(component, skip_push=skip_push)
 
 
 class StoreBaseAddon(BaseAddon):
     """Base class for add-ons tweaking store."""
 
-    events: tuple[AddonEvent, ...] = (AddonEvent.EVENT_STORE_POST_LOAD,)
+    events: set[AddonEvent] = {
+        AddonEvent.EVENT_STORE_POST_LOAD,
+    }
     icon = "wrench.svg"

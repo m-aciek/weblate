@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TypedDict
 
 import dateutil.parser
 from appconf import AppConf
@@ -17,7 +17,7 @@ from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy
 
-from weblate.auth.models import User
+from weblate.auth.models import AuthenticatedHttpRequest, User
 from weblate.trans.models import Component, Project
 from weblate.utils.backup import (
     BackupError,
@@ -34,9 +34,6 @@ from weblate.utils.site import get_site_url
 from weblate.utils.stats import GlobalStats
 from weblate.utils.validators import validate_backup_path
 from weblate.vcs.ssh import ensure_ssh_key
-
-if TYPE_CHECKING:
-    from django.http import HttpRequest
 
 
 class WeblateConf(AppConf):
@@ -79,6 +76,9 @@ class ConfigurationErrorManager(models.Manager["ConfigurationError"]):
             "weblate.E034",
             "weblate.C035",
             "weblate.C036",
+            "weblate.C037",
+            "weblate.C038",
+            "weblate.C040",
         }
         removals = []
         existing = {error.name: error for error in self.all()}
@@ -187,7 +187,7 @@ class SupportStatus(models.Model):
         ssh_key = ensure_ssh_key()
         if ssh_key:
             data["ssh_key"] = ssh_key["key"]
-        response = request("post", settings.SUPPORT_API_URL, data=data, timeout=30)
+        response = request("post", settings.SUPPORT_API_URL, data=data, timeout=360)
         response.raise_for_status()
         payload = response.json()
         self.name = payload["name"]
@@ -263,12 +263,16 @@ class BackupService(models.Model):
     def ensure_init(self) -> None:
         if not self.paperkey:
             try:
-                log = initialize(self.repository, self.passphrase)
-                self.backuplog_set.create(event="init", log=log)
                 self.paperkey = get_paper_key(self.repository)
-                self.save()
-            except BackupError as error:
-                self.backuplog_set.create(event="error", log=str(error))
+                self.save(update_fields=["paperkey"])
+            except BackupError:
+                try:
+                    log = initialize(self.repository, self.passphrase)
+                    self.backuplog_set.create(event="init", log=log)
+                    self.paperkey = get_paper_key(self.repository)
+                    self.save()
+                except BackupError as error:
+                    self.backuplog_set.create(event="error", log=str(error))
 
     def backup(self) -> None:
         try:
@@ -317,9 +321,14 @@ class BackupLog(models.Model):
         return f"{self.service}:{self.event}"
 
 
-def get_support_status(request: HttpRequest) -> SupportStatus:
-    if hasattr(request, "_weblate_support_status"):
-        support_status = request._weblate_support_status
+class SupportStatusDict(TypedDict):
+    has_support: bool
+    in_limits: bool
+
+
+def get_support_status(request: AuthenticatedHttpRequest) -> SupportStatusDict:
+    if hasattr(request, "weblate_support_status"):
+        support_status: SupportStatusDict = request.weblate_support_status
     else:
         support_status = cache.get(SUPPORT_STATUS_CACHE_KEY)
         if support_status is None:
@@ -329,5 +338,5 @@ def get_support_status(request: HttpRequest) -> SupportStatus:
                 "in_limits": support_status_instance.in_limits,
             }
             cache.set(SUPPORT_STATUS_CACHE_KEY, support_status, 86400)
-        request._weblate_support_status = support_status
+        request.weblate_support_status = support_status
     return support_status

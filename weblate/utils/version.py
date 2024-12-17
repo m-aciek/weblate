@@ -25,7 +25,7 @@ def get_root_dir():
 
 
 # Weblate version
-VERSION = "5.6-dev"
+VERSION = "5.9.2-dev"
 
 # Version string without suffix
 VERSION_BASE = VERSION.replace("-dev", "").replace("-rc", "")
@@ -35,6 +35,11 @@ USER_AGENT = f"Weblate/{VERSION}"
 
 # Git tag name for this release
 TAG_NAME = f"weblate-{VERSION_BASE}"
+
+# Type annotations
+GIT_VERSION: str
+GIT_REVISION: str | None
+GIT_LINK: str | None
 
 # Grab some information from git
 try:
@@ -93,7 +98,7 @@ def get_version_info() -> list[Release]:
     try:
         result = cache.get(CACHE_KEY)
     except AttributeError:
-        # TODO: Remove try/except in Weblate 5.7
+        # TODO: Remove try/except in Weblate 6
         # Can happen on upgrade to 5.4 when unpickling fails because
         # of the Release class was moved between modules
         result = None

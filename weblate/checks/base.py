@@ -5,11 +5,11 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
 from django.http import Http404
-from django.utils.html import conditional_escape, format_html, format_html_join
+from django.utils.html import format_html, format_html_join
 from django.utils.translation import gettext
 from lxml import etree
 from siphashc import siphash
@@ -22,10 +22,14 @@ if TYPE_CHECKING:
 
     from django_stubs_ext import StrOrPromise
 
-    from weblate.trans.models import Unit
+    from weblate.auth.models import AuthenticatedHttpRequest, User
+    from weblate.trans.models import Component, Unit
+
+    from .flags import Flags
+    from .models import Check
 
 
-class Check:
+class BaseCheck:
     """Basic class for checks."""
 
     check_id = ""
@@ -33,6 +37,7 @@ class Check:
     description: StrOrPromise = ""
     target = False
     source = False
+    glossary = False
     ignore_untranslated = True
     default_disabled = False
     propagates: bool = False
@@ -41,13 +46,15 @@ class Check:
     batch_project_wide = False
     skip_suggestions = False
 
-    def get_identifier(self):
+    def get_identifier(self) -> str:
         return self.check_id
 
-    def get_propagated_value(self, unit) -> None:
+    def get_propagated_value(self, unit: Unit) -> str | None:
         return None
 
-    def get_propagated_units(self, unit, target: str | None = None):
+    def get_propagated_units(
+        self, unit: Unit, target: str | None = None
+    ) -> Iterable[Unit]:
         from weblate.trans.models import Unit
 
         return Unit.objects.none()
@@ -59,10 +66,10 @@ class Check:
         self.enable_string = id_dash
         self.ignore_string = f"ignore-{id_dash}"
 
-    def is_ignored(self, all_flags):
+    def is_ignored(self, all_flags: Flags) -> bool:
         return self.ignore_string in all_flags or "ignore-all-checks" in all_flags
 
-    def should_skip(self, unit) -> bool:
+    def should_skip(self, unit: Unit) -> bool:
         """Check whether we should skip processing this unit."""
         all_flags = unit.all_flags
         # Is this check ignored
@@ -72,7 +79,7 @@ class Check:
         # Is this disabled by default
         return bool(self.default_disabled and self.enable_string not in all_flags)
 
-    def should_display(self, unit):
+    def should_display(self, unit: Unit) -> bool:
         """Display the check always, not only when failing."""
         if self.ignore_untranslated and not unit.state:
             return False
@@ -81,7 +88,7 @@ class Check:
         # Display if enabled and the check is not triggered
         return self.always_display and self.check_id not in unit.all_checks_names
 
-    def check_target(self, sources, targets, unit):
+    def check_target(self, sources: list[str], targets: list[str], unit: Unit) -> bool:
         """Check target strings."""
         # No checking of untranslated units (but we do check needs editing ones)
         if self.ignore_untranslated and (not unit.state or unit.readonly):
@@ -95,7 +102,9 @@ class Check:
         )
         return result
 
-    def check_target_unit(self, sources, targets, unit):
+    def check_target_unit(
+        self, sources: list[str], targets: list[str], unit: Unit
+    ) -> bool:
         """Check single unit, handling plurals."""
         from weblate.lang.models import PluralMapper
 
@@ -111,21 +120,21 @@ class Check:
             for source, target in plural_mapper.zip(sources, targets, unit)
         )
 
-    def check_single(self, source, target, unit) -> bool:
+    def check_single(self, source: str, target: str, unit: Unit) -> bool:
         """Check for single phrase, not dealing with plurals."""
         raise NotImplementedError
 
-    def check_source(self, source, unit):
+    def check_source(self, sources: list[str], unit: Unit) -> bool:
         """Check source strings."""
         if self.should_skip(unit):
             return False
-        return self.check_source_unit(source, unit)
+        return self.check_source_unit(sources, unit)
 
-    def check_source_unit(self, source, unit) -> bool:
+    def check_source_unit(self, sources: list[str], unit: Unit) -> bool:
         """Check source string."""
         raise NotImplementedError
 
-    def check_chars(self, source, target, pos, chars):
+    def check_chars(self, source: str, target: str, pos: int, chars: set[str]) -> bool:
         """Check whether characters are present."""
         try:
             src = source[pos]
@@ -135,11 +144,11 @@ class Check:
 
         return (src in chars) != (tgt in chars)
 
-    def get_doc_url(self, user=None):
+    def get_doc_url(self, user: User | None = None) -> str:
         """Return link to documentation."""
         return get_doc_url("user/checks", self.doc_id, user=user)
 
-    def check_highlight(self, source, unit):
+    def check_highlight(self, source: str, unit: Unit):
         """
         Return parts of the text that match to highlight them.
 
@@ -148,16 +157,17 @@ class Check:
         """
         return []
 
-    def get_description(self, check_obj):
+    def get_description(self, check_obj: Check) -> StrOrPromise:
         return self.description
 
-    def get_fixup(self, unit) -> None:
+    def get_fixup(self, unit: Unit) -> Iterable[tuple[str, str, str]] | None:
         return None
 
-    def render(self, request, unit) -> StrOrPromise:
-        raise Http404("Not supported")
+    def render(self, request: AuthenticatedHttpRequest, unit: Unit) -> StrOrPromise:
+        msg = "Not supported"
+        raise Http404(msg)
 
-    def get_cache_key(self, unit, pos: int):
+    def get_cache_key(self, unit: Unit, pos: int) -> str:
         return "check:{}:{}:{}:{}".format(
             self.check_id,
             unit.pk,
@@ -165,15 +175,15 @@ class Check:
             pos,
         )
 
-    def get_replacement_function(self, unit):
-        def strip_xml(content):
+    def get_replacement_function(self, unit: Unit):
+        def strip_xml(content: str) -> str:
             try:
                 tree = parse_xml(f"<x>{content}</x>")
             except etree.XMLSyntaxError:
                 return content
             return etree.tostring(tree, encoding="unicode", method="text")
 
-        def noop(content):
+        def noop(content: str) -> str:
             return content
 
         flags = unit.all_flags
@@ -199,19 +209,19 @@ class Check:
         )
 
 
-class BatchCheckMixin(Check):
-    def handle_batch(self, unit, component):
+class BatchCheckMixin(BaseCheck):
+    def handle_batch(self, unit: Unit, component: Component) -> bool:
         component.batched_checks.add(self.check_id)
         return self.check_id in unit.all_checks_names
 
-    def check_component(self, component) -> Iterable[Unit]:
+    def check_component(self, component: Component) -> Iterable[Unit]:
         raise NotImplementedError
 
-    def perform_batch(self, component) -> None:
-        with sentry_sdk.start_span(op="check.perform_batch", description=self.check_id):
+    def perform_batch(self, component: Component) -> None:
+        with sentry_sdk.start_span(op="check.perform_batch", name=self.check_id):
             self._perform_batch(component)
 
-    def _perform_batch(self, component) -> None:
+    def _perform_batch(self, component: Component) -> None:
         from weblate.checks.models import Check
         from weblate.trans.models import Component
 
@@ -261,20 +271,20 @@ class BatchCheckMixin(Check):
             current.invalidate_cache()
 
 
-class TargetCheck(Check):
+class TargetCheck(BaseCheck):
     """Basic class for target checks."""
 
     target = True
 
-    def check_source_unit(self, source, unit) -> bool:
+    def check_source_unit(self, sources: list[str], unit: Unit) -> bool:
         """We don't check source strings here."""
         return False
 
-    def check_single(self, source, target, unit) -> bool:
+    def check_single(self, source: str, target: str, unit: Unit) -> bool:
         """Check for single phrase, not dealing with plurals."""
         raise NotImplementedError
 
-    def format_value(self, value: str):
+    def format_value(self, value: str) -> StrOrPromise:
         from weblate.trans.templatetags.translations import Formatter
 
         fmt = Formatter(0, value, None, None, None, None, None)
@@ -283,34 +293,37 @@ class TargetCheck(Check):
             """<span class="hlcheck" data-value="{}">{}</span>""", value, fmt.format()
         )
 
-    def get_values_text(self, message: str, values: Iterable[str]):
-        return format_html_join(
-            ", ",
-            conditional_escape(message),
-            ((self.format_value(value),) for value in sorted(values)),
+    def get_values_text(self, message: str, values: Iterable[str]) -> StrOrPromise:
+        return format_html(
+            message,
+            format_html_join(
+                ", ",
+                "{}",
+                ((self.format_value(value),) for value in sorted(values)),
+            ),
         )
 
-    def get_missing_text(self, values: Iterable[str]):
+    def get_missing_text(self, values: Iterable[str]) -> StrOrPromise:
         return self.get_values_text(
             gettext("The following format strings are missing: {}"), values
         )
 
-    def get_extra_text(self, values: Iterable[str]):
+    def get_extra_text(self, values: Iterable[str]) -> StrOrPromise:
         return self.get_values_text(
             gettext("The following format strings are extra: {}"), values
         )
 
 
-class SourceCheck(Check):
+class SourceCheck(BaseCheck):
     """Basic class for source checks."""
 
     source = True
 
-    def check_single(self, source, target, unit) -> bool:
+    def check_single(self, source: str, target: str, unit: Unit) -> bool:
         """Target strings are checked in check_target_unit."""
         return False
 
-    def check_source_unit(self, source, unit) -> bool:
+    def check_source_unit(self, sources: list[str], unit: Unit) -> bool:
         """Check source string."""
         raise NotImplementedError
 
@@ -320,13 +333,15 @@ class TargetCheckParametrized(TargetCheck):
 
     default_disabled = True
 
-    def get_value(self, unit):
+    def get_value(self, unit: Unit) -> Any:  # noqa: ANN401
         return unit.all_flags.get_value(self.enable_string)
 
-    def has_value(self, unit):
+    def has_value(self, unit: Unit) -> bool:
         return unit.all_flags.has_value(self.enable_string)
 
-    def check_target_unit(self, sources, targets, unit):
+    def check_target_unit(
+        self, sources: list[str], targets: list[str], unit: Unit
+    ) -> bool:
         """Check flag value."""
         if unit.all_flags.has_value(self.enable_string):
             return self.check_target_params(
@@ -334,10 +349,16 @@ class TargetCheckParametrized(TargetCheck):
             )
         return False
 
-    def check_target_params(self, sources, targets, unit, value) -> bool:
+    def check_target_params(
+        self,
+        sources: list[str],
+        targets: list[str],
+        unit: Unit,
+        value: Any,  # noqa: ANN401
+    ) -> bool:
         raise NotImplementedError
 
-    def check_single(self, source, target, unit) -> bool:
+    def check_single(self, source: str, target: str, unit: Unit) -> bool:
         """We don't check single phrase here."""
         return False
 
@@ -347,7 +368,7 @@ class CountingCheck(TargetCheck):
 
     string = ""
 
-    def check_single(self, source, target, unit):
+    def check_single(self, source: str, target: str, unit: Unit) -> bool:
         if not target or not source:
             return False
         return source.count(self.string) != target.count(self.string)

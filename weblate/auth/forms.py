@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 from crispy_forms.helper import FormHelper
 from django import forms
 from django.core.exceptions import ValidationError
@@ -10,7 +12,13 @@ from django.utils.translation import gettext
 from weblate.accounts.forms import UniqueEmailMixin
 from weblate.accounts.models import AuditLog
 from weblate.auth.data import GLOBAL_PERM_NAMES, SELECTION_MANUAL
-from weblate.auth.models import Group, Invitation, Role, User
+from weblate.auth.models import (
+    AuthenticatedHttpRequest,
+    Group,
+    Invitation,
+    Role,
+    User,
+)
 from weblate.trans.models import Change
 from weblate.utils import messages
 from weblate.utils.forms import UserField
@@ -39,7 +47,7 @@ class InviteUserForm(forms.ModelForm):
             if field in self.fields:
                 self.fields[field].required = True
 
-    def save(self, request, commit: bool = True) -> None:
+    def save(self, request: AuthenticatedHttpRequest, commit: bool = True) -> None:
         self.instance.author = author = request.user
         # Migrate to user if e-mail matches
         if self.instance.email:
@@ -103,7 +111,14 @@ class UserEditForm(forms.ModelForm):
 class BaseTeamForm(forms.ModelForm):
     class Meta:
         model = Group
-        fields = ["name", "roles", "language_selection", "languages", "components"]
+        fields = [
+            "name",
+            "roles",
+            "language_selection",
+            "languages",
+            "components",
+            "enforced_2fa",
+        ]
 
     internal_fields = [
         "name",
@@ -169,4 +184,5 @@ class SitewideTeamForm(BaseTeamForm):
             "componentlists",
             "language_selection",
             "languages",
+            "enforced_2fa",
         ]

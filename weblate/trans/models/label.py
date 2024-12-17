@@ -7,7 +7,7 @@ from django.utils.html import format_html
 from django.utils.translation import gettext_lazy
 
 from weblate.checks.flags import Flags
-from weblate.utils.colors import COLOR_CHOICES
+from weblate.utils.colors import ColorChoices
 
 TRANSLATION_LABELS = {"Automatically translated"}
 
@@ -20,9 +20,15 @@ class Label(models.Model):
     color = models.CharField(
         verbose_name=gettext_lazy("Color"),
         max_length=30,
-        choices=COLOR_CHOICES,
+        choices=ColorChoices.choices,
         blank=False,
         default=None,
+    )
+    description = models.CharField(
+        verbose_name=gettext_lazy("Label description"),
+        default="",
+        max_length=250,
+        blank=True,
     )
 
     class Meta:

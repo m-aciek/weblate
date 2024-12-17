@@ -20,16 +20,23 @@ permissions:
 
 jobs:
   rundev:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: Test development Docker
     env:
       PYTHONUNBUFFERED: 1
     steps:
     - uses: actions/checkout@v4
+    - uses: actions/cache@v4
+      with:
+        path: /tmp/cache/tesseract
+        key: tesseract-data
+    - uses: astral-sh/setup-uv@v4
     - run: ./rundev.sh build
     - run: ./rundev.sh start
     - run: ./rundev.sh wait
     - run: ./rundev.sh check
-    - run: ./rundev.sh test --failfast weblate.vcs
+    - run: ./rundev.sh compilemessages
+    - run: ./rundev.sh test --failfast weblate
     - run: ./rundev.sh logs
+      if: always()
     - run: ./rundev.sh stop

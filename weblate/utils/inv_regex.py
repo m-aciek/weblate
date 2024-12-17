@@ -5,6 +5,8 @@
 #
 # Based on https://github.com/pyparsing/pyparsing/blob/master/examples/inv_regex.py
 
+import string
+
 from pyparsing import (
     Combine,
     Empty,
@@ -135,7 +137,8 @@ def handle_repetition(toks):
                 opt = OptionalEmitter(GroupEmitter([toks[0], opt]))
             return GroupEmitter([toks[0]] * mincount + [opt])
         return [toks[0]] * mincount
-    raise ParseFatalException("", 0, f"Unsupported repetition {toks!r}")
+    msg = ""
+    raise ParseFatalException(msg, 0, f"Unsupported repetition {toks!r}")
 
 
 def handle_literal(toks):
@@ -154,12 +157,13 @@ def handle_literal(toks):
 def handle_macro(toks):
     macro_char = toks[0][1]
     if macro_char == "d":
-        return CharacterRangeEmitter("0123456789")
+        return CharacterRangeEmitter(string.digits)
     if macro_char == "w":
         return CharacterRangeEmitter(srange("[A-Za-z0-9_]"))
     if macro_char in {"s", "W"}:
         return LiteralEmitter(" ")
-    raise ParseFatalException("", 0, f"unsupported macro character ({macro_char})")
+    msg = ""
+    raise ParseFatalException(msg, 0, f"unsupported macro character ({macro_char})")
 
 
 def handle_boundary(toks):
@@ -246,6 +250,6 @@ def invert_re(regex):
     try:
         invre = GroupEmitter(RE_PARSER.parse_string(regex)).make_generator()
     except ParseException:
-        report_error(cause="Regexp parser")
+        report_error("Regexp parser")
         return []
     return invre()

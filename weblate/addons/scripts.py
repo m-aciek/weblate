@@ -5,10 +5,14 @@
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 from weblate.addons.base import BaseAddon
 from weblate.utils.render import render_template
 from weblate.utils.site import get_site_url
+
+if TYPE_CHECKING:
+    from weblate.trans.models import Component, Translation
 
 
 class BaseScriptAddon(BaseAddon):
@@ -16,7 +20,7 @@ class BaseScriptAddon(BaseAddon):
 
     icon = "script.svg"
     script: str
-    add_file: None | str = None
+    add_file: str | None = None
     alert = "AddonScriptError"
 
     def run_script(self, component=None, translation=None, env=None) -> None:
@@ -51,20 +55,20 @@ class BaseScriptAddon(BaseAddon):
     def post_push(self, component) -> None:
         self.run_script(component)
 
-    def post_update(
-        self, component, previous_head: str, skip_push: bool, child: bool
-    ) -> None:
+    def post_update(self, component, previous_head: str, skip_push: bool) -> None:
         self.run_script(component, env={"WL_PREVIOUS_HEAD": previous_head})
 
-    def post_commit(self, component) -> None:
+    def post_commit(self, component: Component, store_hash: bool) -> None:
         self.run_script(component=component)
 
-    def pre_commit(self, translation, author) -> None:
+    def pre_commit(
+        self, translation: Translation, author: str, store_hash: bool
+    ) -> None:
         self.run_script(translation=translation)
 
         if self.add_file:
             filename = os.path.join(
-                self.instance.component.full_path,
+                translation.component.full_path,
                 render_template(self.add_file, translation=translation),
             )
             translation.addon_commit_files.append(filename)

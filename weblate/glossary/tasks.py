@@ -4,10 +4,15 @@
 
 from __future__ import annotations
 
+from django.db import transaction
+from django.db.models import F
+
+from weblate.auth.models import get_anonymous
 from weblate.lang.models import Language
-from weblate.trans.models import Component
+from weblate.trans.models import Component, Project, Translation
 from weblate.utils.celery import app
 from weblate.utils.lock import WeblateLockTimeoutError
+from weblate.utils.stats import prefetch_stats
 
 
 @app.task(
@@ -37,7 +42,51 @@ def sync_glossary_languages(pk: int, component: Component | None = None) -> None
             needs_create = True
 
     if needs_create:
-        component.create_translations(request=None)
+        component.create_translations_task()
+
+
+@app.task(trail=False, autoretry_for=(Project.DoesNotExist, WeblateLockTimeoutError))
+def cleanup_stale_glossaries(project: int | Project) -> None:
+    """
+    Delete stale glossaries.
+
+    A glossary translation is considered stale when it meets the following conditions:
+    - glossary.language is not used in any other non-glossary components
+    - glossary.language is different from glossary.component.source_language
+    - It has no translation
+
+    Stale glossary is not removed if:
+    - the component only has one glossary component
+    - if is managed outside weblate (i.e repo != 'local:')
+    """
+    if isinstance(project, int):
+        project = Project.objects.get(pk=project)
+
+    languages_in_non_glossary_components: set[int] = set(
+        Translation.objects.filter(
+            component__project=project, component__is_glossary=False
+        ).values_list("language_id", flat=True)
+    )
+
+    glossary_translations = prefetch_stats(
+        Translation.objects.filter(
+            component__project=project, component__is_glossary=True
+        )
+        .prefetch()
+        .exclude(language__id__in=languages_in_non_glossary_components)
+        .exclude(language=F("component__source_language"))
+    )
+
+    component_to_check = []
+
+    for glossary in glossary_translations:
+        if glossary.can_be_deleted():
+            glossary.remove(get_anonymous())
+            if glossary.component not in component_to_check:
+                component_to_check.append(glossary.component)
+
+    for component in component_to_check:
+        transaction.on_commit(component.schedule_update_checks)
 
 
 @app.task(

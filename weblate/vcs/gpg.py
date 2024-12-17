@@ -13,11 +13,11 @@ from siphashc import siphash
 from weblate.trans.util import get_clean_env
 from weblate.utils.errors import report_error
 
-GPG_ERRORS = {}
+GPG_ERRORS: dict[str, str] = {}
 
 
 def gpg_error(name: str, error: Exception, silent: bool = False) -> None:
-    report_error(cause=name)
+    report_error(name)
 
     if not silent:
         GPG_ERRORS[name] = "{}\n{}\n{}".format(

@@ -203,7 +203,7 @@ The Borg session might look like this:
 
    $ borg list /tmp/xxx
    Enter passphrase for key /tmp/xxx:
-   2019-09-26T14:56:08                  Thu, 2019-09-26 14:56:08 [de0e0f13643635d5090e9896bdaceb92a023050749ad3f3350e788f1a65576a5]
+   2019-09-26T14:56:08 Thu, 2019-09-26 14:56:08 [de0e0f13643635d5090e9896bdaceb92a023050749ad3f3350e788f1a65576a5]
    $ borg extract /tmp/xxx::2019-09-26T14:56:08
    Enter passphrase for key /tmp/xxx:
 
@@ -307,7 +307,7 @@ backups. The files are updated daily (requires a running Celery beats server, se
 The database backups are saved as plain text by default, but they can also be compressed
 or entirely skipped using :setting:`DATABASE_BACKUP`.
 
-To restore the database backup load it using database tools, for example:
+To restore the database backup, load it using database tools, for example:
 
 .. code-block:: shell
 
@@ -322,7 +322,7 @@ The version control repositories contain a copy of your upstream repositories
 with Weblate changes. If you have :ref:`component-push_on_commit` enabled for all your
 translation components, all Weblate changes are included upstream. No need to
 back up the repositories on the Weblate side as they can be cloned
-again from the upstream location(s) with no data loss.
+again from the upstream location with no data loss.
 
 SSH and GPG keys
 ++++++++++++++++

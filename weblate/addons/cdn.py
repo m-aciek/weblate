@@ -2,14 +2,16 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 import json
 import os
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.functional import cached_property
-from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy
 
 from weblate.addons.base import BaseAddon
@@ -18,13 +20,17 @@ from weblate.addons.forms import CDNJSForm
 from weblate.addons.tasks import cdn_parse_html
 from weblate.utils.state import STATE_TRANSLATED
 
+if TYPE_CHECKING:
+    from weblate.auth.models import User
+    from weblate.trans.models import Component
+
 
 class CDNJSAddon(BaseAddon):
-    events = (
+    events = {
         AddonEvent.EVENT_DAILY,
         AddonEvent.EVENT_POST_COMMIT,
         AddonEvent.EVENT_POST_UPDATE,
-    )
+    }
     name = "weblate.cdn.cdnjs"
     verbose = gettext_lazy("JavaScript localization CDN")
     description = gettext_lazy(
@@ -44,7 +50,7 @@ class CDNJSAddon(BaseAddon):
         return super().create_object(component=component, **kwargs)
 
     @classmethod
-    def can_install(cls, component, user):
+    def can_install(cls, component, user: User | None):
         if (
             not settings.LOCALIZE_CDN_URL
             or not settings.LOCALIZE_CDN_PATH
@@ -65,7 +71,7 @@ class CDNJSAddon(BaseAddon):
             settings.LOCALIZE_CDN_URL, self.instance.state["uuid"], "weblate.js"
         )
 
-    def post_commit(self, component) -> None:
+    def post_commit(self, component: Component, store_hash: bool) -> None:
         # Get list of applicable translations
         threshold = self.instance.configuration["threshold"]
         translations = [
@@ -88,34 +94,15 @@ class CDNJSAddon(BaseAddon):
                 render_to_string(
                     "addons/js/weblate.js.template",
                     {
-                        # `mark_safe(json.dumps(` is NOT safe in HTML files. Only JS.
-                        # See `django.utils.html.json_script`
-                        "languages": mark_safe(  # noqa: S308
-                            json.dumps(
-                                sorted(
-                                    translation.language.code
-                                    for translation in translations
-                                )
-                            )
+                        "languages": sorted(
+                            translation.language.code for translation in translations
                         ),
-                        "url": mark_safe(  # noqa: S308
-                            json.dumps(
-                                os.path.join(
-                                    settings.LOCALIZE_CDN_URL,
-                                    self.instance.state["uuid"],
-                                )
-                            )
+                        "url": os.path.join(
+                            settings.LOCALIZE_CDN_URL,
+                            self.instance.state["uuid"],
                         ),
-                        "cookie_name": mark_safe(  # noqa: S308
-                            json.dumps(
-                                self.instance.configuration["cookie_name"],
-                            )
-                        ),
-                        "css_selector": mark_safe(  # noqa: S308
-                            json.dumps(
-                                self.instance.configuration["css_selector"],
-                            )
-                        ),
+                        "cookie_name": self.instance.configuration["cookie_name"],
+                        "css_selector": self.instance.configuration["css_selector"],
                     },
                 )
             )
@@ -145,7 +132,5 @@ class CDNJSAddon(BaseAddon):
             component.id,
         )
 
-    def post_update(
-        self, component, previous_head: str, skip_push: bool, child: bool
-    ) -> None:
+    def post_update(self, component, previous_head: str, skip_push: bool) -> None:
         self.daily(component)

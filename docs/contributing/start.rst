@@ -31,14 +31,14 @@ sources.
 
    .. code-block:: sh
 
-      virtualenv .venv
-      . .venv/bin/activate
+      uv venv .venv
+      source .venv/bin/activate
 
 3. Install Weblate (for this you need some system dependencies, see :doc:`../admin/install/source`) and all dependencies useful for development:
 
    .. code-block:: sh
 
-      pip install -e '.[all,dev,ci,test,mypy,lint]'
+      uv pip install -e '.[dev]'
 
 3. Start a development server:
 
@@ -112,11 +112,10 @@ To stop the background containers, run:
 
 Running the script without arguments will re-create the Docker container and restart it.
 
-.. note::
+.. warning::
 
-   This is not a suitable setup for production, as it includes several hacks which
-   are insecure, but they make development easier.
-
+   This container is not suitable for production use. Security is sacrificed to
+   make the development easier.
 
 Bootstrapping your devel instance
 ---------------------------------

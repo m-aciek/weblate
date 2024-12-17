@@ -31,7 +31,7 @@ This page provides an overview of Weblate configuration and performance status.
 
 :guilabel:`Configuration errors` indicate issues present in your environment.
 It covers missing optional dependencies (see :ref:`python-deps`), configuration
-issues or delayed processing of background tasks  (see :ref:`celery`).
+issues or delayed processing of background tasks (see :ref:`celery`).
 
 :guilabel:`System checks` lists possible configuration issues. These can be
 silenced using :setting:`django:SILENCED_SYSTEM_CHECKS`, see also
@@ -61,6 +61,8 @@ Appearance customization
    when choosing them.
 
 Colors, fonts, and page appearance can be customized here.
+
+.. image:: /screenshots/appearance-settings.webp
 
 If you are looking for more customization, see :doc:`/admin/customize`.
 

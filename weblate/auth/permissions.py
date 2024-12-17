@@ -1,6 +1,9 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 from django.utils.translation import gettext
@@ -17,7 +20,14 @@ from weblate.trans.models import (
 )
 from weblate.utils.stats import CategoryLanguage, ProjectLanguage
 
-SPECIALS = {}
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from django.db.models import Model
+
+    from weblate.auth.models import User
+
+SPECIALS: dict[str, Callable[[User, str, Model], bool | PermissionResult]] = {}
 
 
 class PermissionResult:
@@ -47,14 +57,19 @@ def register_perm(*perms):
     return wrap_perm
 
 
-def check_global_permission(user, permission: str) -> bool:
+def check_global_permission(user: User, permission: str) -> bool:
     """Check whether user has a global permission."""
     if user.is_superuser:
         return True
     return permission in user.global_permissions
 
 
-def check_permission(user, permission, obj):
+def check_enforced_2fa(user: User, project: Project) -> bool:
+    """Check whether the user has 2FA configured, in case it is enforced by the project."""
+    return not project.enforced_2fa or user.profile.has_2fa
+
+
+def check_permission(user: User, permission: str, obj: Model):
     """Check whether user has a object-specific permission."""
     if user.is_superuser:
         return True
@@ -68,59 +83,65 @@ def check_permission(user, permission, obj):
         return any(
             permission in permissions
             for permissions, _langs in user.get_project_permissions(obj)
-        )
+        ) and check_enforced_2fa(user, obj)
     if isinstance(obj, ComponentList):
         return all(
             check_permission(user, permission, component)
+            and check_enforced_2fa(user, component.project)
             for component in obj.components.iterator()
         )
     if isinstance(obj, Component):
         return (
-            not obj.restricted
-            and any(
-                permission in permissions
-                for permissions, _langs in user.get_project_permissions(obj.project)
+            (
+                not obj.restricted
+                and any(
+                    permission in permissions
+                    for permissions, _langs in user.get_project_permissions(obj.project)
+                )
             )
-        ) or any(
-            permission in permissions
-            for permissions, _langs in user.component_permissions[obj.pk]
-        )
+            or any(
+                permission in permissions
+                for permissions, _langs in user.component_permissions[obj.pk]
+            )
+        ) and check_enforced_2fa(user, obj.project)
     if isinstance(obj, Unit):
         obj = obj.translation
     if isinstance(obj, Translation):
         lang = obj.language_id
         return (
-            not obj.component.restricted
-            and any(
-                permission in permissions and (langs is None or lang in langs)
-                for permissions, langs in user.get_project_permissions(
-                    obj.component.project
+            (
+                not obj.component.restricted
+                and any(
+                    permission in permissions and (langs is None or lang in langs)
+                    for permissions, langs in user.get_project_permissions(
+                        obj.component.project
+                    )
                 )
             )
-        ) or any(
-            permission in permissions and (langs is None or lang in langs)
-            for permissions, langs in user.component_permissions[obj.component_id]
-        )
-    raise TypeError(
-        f"Permission {permission} does not support: {obj.__class__}: {obj!r}"
-    )
+            or any(
+                permission in permissions and (langs is None or lang in langs)
+                for permissions, langs in user.component_permissions[obj.component_id]
+            )
+        ) and check_enforced_2fa(user, obj.component.project)
+    msg = f"Permission {permission} does not support: {obj.__class__}: {obj!r}"
+    raise TypeError(msg)
 
 
 @register_perm("comment.resolve", "comment.delete", "suggestion.delete")
-def check_delete_own(user, permission, obj):
+def check_delete_own(user: User, permission: str, obj: Model):
     if user.is_authenticated and obj.user == user:
         return True
     return check_permission(user, permission, obj.unit.translation)
 
 
 @register_perm("unit.check")
-def check_ignore_check(user, permission, check):
+def check_ignore_check(user: User, permission, check):
     if check.is_enforced():
         return False
     return check_permission(user, permission, check.unit.translation)
 
 
-def check_can_edit(user, permission, obj, is_vote=False):  # noqa: C901
+def check_can_edit(user: User, permission: str, obj: Model, is_vote=False):  # noqa: C901
     translation = component = None
 
     if isinstance(obj, Translation):
@@ -139,12 +160,22 @@ def check_can_edit(user, permission, obj, is_vote=False):  # noqa: C901
     elif isinstance(obj, CategoryLanguage):
         project = obj.category.project
     else:
-        raise TypeError(f"Unknown object for permission check: {obj.__class__}")
+        msg = f"Unknown object for permission check: {obj.__class__}"
+        raise TypeError(msg)
 
     # Email is needed for user to be able to edit
     if user.is_authenticated and not user.email:
         return Denied(
             gettext("Can not perform this operation without an e-mail address.")
+        )
+
+    if project and not check_enforced_2fa(user, project):
+        # This would later fail in check_permission, but we can give a nicer error
+        # message here when checking this specifically.
+        return Denied(
+            gettext(
+                "This project requires two-factor authentication; configure it in your profile."
+            )
         )
 
     if component:
@@ -205,7 +236,7 @@ def check_can_edit(user, permission, obj, is_vote=False):  # noqa: C901
 
 
 @register_perm("unit.review")
-def check_unit_review(user, permission, obj, skip_enabled=False):
+def check_unit_review(user: User, permission: str, obj: Model, skip_enabled=False):
     if not skip_enabled:
         if isinstance(obj, Unit):
             obj = obj.translation
@@ -230,7 +261,7 @@ def check_unit_review(user, permission, obj, skip_enabled=False):
 
 
 @register_perm("unit.edit", "suggestion.accept")
-def check_edit_approved(user, permission, obj):
+def check_edit_approved(user: User, permission: str, obj: Model):
     component = None
     if isinstance(obj, Unit):
         unit = obj
@@ -241,8 +272,12 @@ def check_edit_approved(user, permission, obj):
             if not unit.source_unit.translated:
                 return Denied(gettext("The source string needs review."))
             return Denied(gettext("The string is read only."))
-        if unit.approved and not check_unit_review(
-            user, "unit.review", obj, skip_enabled=True
+        # Ignore approved state if review is not disabled. This might
+        # happen after disabling them.
+        if (
+            unit.approved
+            and obj.enable_review
+            and not check_unit_review(user, "unit.review", obj, skip_enabled=True)
         ):
             return Denied(
                 gettext(
@@ -279,7 +314,7 @@ def check_manage_units(
 
 
 @register_perm("unit.delete")
-def check_unit_delete(user, permission, obj):
+def check_unit_delete(user: User, permission: str, obj: Model):
     if isinstance(obj, Unit):
         if (
             obj.translation.component.is_glossary
@@ -308,7 +343,7 @@ def check_unit_delete(user, permission, obj):
 
 
 @register_perm("unit.add")
-def check_unit_add(user, permission, translation):
+def check_unit_add(user: User, permission, translation):
     component = translation.component
     # Check if adding is generally allowed
     can_manage = check_manage_units(translation, component)
@@ -326,7 +361,7 @@ def check_unit_add(user, permission, translation):
 
 
 @register_perm("translation.add")
-def check_translation_add(user, permission, component):
+def check_translation_add(user: User, permission, component):
     if component.new_lang == "none" and not component.can_add_new_language(
         user, fast=True
     ):
@@ -337,7 +372,7 @@ def check_translation_add(user, permission, component):
 
 
 @register_perm("translation.auto")
-def check_autotranslate(user, permission, translation):
+def check_autotranslate(user: User, permission, translation):
     if isinstance(translation, Translation) and (
         (translation.is_source and not translation.component.intermediate)
         or translation.is_readonly
@@ -347,14 +382,14 @@ def check_autotranslate(user, permission, translation):
 
 
 @register_perm("suggestion.vote")
-def check_suggestion_vote(user, permission, obj):
+def check_suggestion_vote(user: User, permission: str, obj: Model):
     if isinstance(obj, Unit):
         obj = obj.translation
     return check_can_edit(user, permission, obj, is_vote=True)
 
 
 @register_perm("suggestion.add")
-def check_suggestion_add(user, permission, obj):
+def check_suggestion_add(user: User, permission: str, obj: Model):
     if isinstance(obj, Unit):
         obj = obj.translation
     if not obj.enable_suggestions or obj.is_readonly:
@@ -368,7 +403,7 @@ def check_suggestion_add(user, permission, obj):
 
 
 @register_perm("upload.perform")
-def check_contribute(user, permission, translation):
+def check_contribute(user: User, permission, translation):
     # Bilingual source translations
     if translation.is_source and not translation.is_template:
         return hasattr(
@@ -389,7 +424,7 @@ def check_contribute(user, permission, translation):
 
 
 @register_perm("machinery.view")
-def check_machinery(user, permission, obj):
+def check_machinery(user: User, permission: str, obj: Model):
     # No machinery for source without intermediate language
     if (
         isinstance(obj, Translation)
@@ -409,21 +444,21 @@ def check_machinery(user, permission, obj):
 
 
 @register_perm("translation.delete")
-def check_translation_delete(user, permission, obj):
+def check_translation_delete(user: User, permission: str, obj: Model):
     if obj.is_source:
         return False
     return check_permission(user, permission, obj)
 
 
 @register_perm("reports.view", "change.download")
-def check_possibly_global(user, permission, obj):
+def check_possibly_global(user: User, permission: str, obj: Model):
     if obj is None or isinstance(obj, Language):
         return user.is_superuser
     return check_permission(user, permission, obj)
 
 
 @register_perm("meta:vcs.status")
-def check_repository_status(user, permission, obj):
+def check_repository_status(user: User, permission: str, obj: Model):
     return (
         check_permission(user, "vcs.push", obj)
         or check_permission(user, "vcs.commit", obj)
@@ -433,7 +468,7 @@ def check_repository_status(user, permission, obj):
 
 
 @register_perm("meta:team.edit")
-def check_team_edit(user, permission, obj):
+def check_team_edit(user: User, permission: str, obj: Model):
     return (
         check_global_permission(user, "group.edit")
         or (
@@ -445,14 +480,14 @@ def check_team_edit(user, permission, obj):
 
 
 @register_perm("meta:team.users")
-def check_team_edit_users(user, permission, obj):
+def check_team_edit_users(user: User, permission: str, obj: Model):
     return (
         check_team_edit(user, permission, obj) or obj.pk in user.administered_group_ids
     )
 
 
 @register_perm("billing.view")
-def check_billing_view(user, permission, obj):
+def check_billing_view(user: User, permission: str, obj: Model):
     if hasattr(obj, "all_projects"):
         if user.has_perm("billing.manage") or obj.owners.filter(pk=user.pk).exists():
             return True
@@ -462,7 +497,7 @@ def check_billing_view(user, permission, obj):
 
 
 @register_perm("billing:project.permissions")
-def check_billing(user, permission, obj):
+def check_billing(user: User, permission: str, obj: Model):
     if "weblate.billing" in settings.INSTALLED_APPS and not any(
         billing.plan.change_access_control for billing in obj.billings
     ):
@@ -473,7 +508,7 @@ def check_billing(user, permission, obj):
 
 # This does not exist for real
 @register_perm("announcement.delete")
-def check_announcement_delete(user, permission, obj):
+def check_announcement_delete(user: User, permission: str, obj: Model):
     return (
         user.is_superuser
         or (obj.component and check_permission(user, "component.edit", obj.component))
@@ -483,7 +518,7 @@ def check_announcement_delete(user, permission, obj):
 
 # This does not exist for real
 @register_perm("unit.flag")
-def check_unit_flag(user, permission, obj):
+def check_unit_flag(user: User, permission: str, obj: Model):
     if isinstance(obj, Unit):
         obj = obj.translation
     if not obj.component.is_glossary:
@@ -493,7 +528,7 @@ def check_unit_flag(user, permission, obj):
 
 
 @register_perm("memory.edit", "memory.delete")
-def check_memory_perms(user, permission, memory):
+def check_memory_perms(user: User, permission, memory):
     from weblate.memory.models import Memory
 
     if isinstance(memory, Memory):

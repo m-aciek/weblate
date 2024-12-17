@@ -2,8 +2,6 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-version: '3'
-
 ##########
 # WARNING!
 # This docker-compose file is meant to be used in the development process
@@ -22,7 +20,7 @@ services:
         USER_ID: ${USER_ID}
         GROUP_ID: ${GROUP_ID}
     ports:
-    - ${WEBLATE_HOST}:8080
+    - ${WEBLATE_PORT}:8080
     user: $USER_ID:$GROUP_ID
     userns_mode: host
     tmpfs:
@@ -33,7 +31,7 @@ services:
       # Local data directory
     - $PWD/data:/app/data
       # Override Weblate with local dir
-    - $PWD/../weblate:/app/venv/lib/python${DOCKER_PYTHON}/site-packages/weblate
+    - $PWD/..:/app/src
     restart: always
     depends_on:
     - database
@@ -44,7 +42,7 @@ services:
     env_file:
     - ./environment
   database:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     env_file:
     - ./environment
     volumes:

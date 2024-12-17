@@ -11,21 +11,19 @@ import os
 import shutil
 from collections import defaultdict
 from io import BytesIO
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, NoReturn
 from zipfile import ZipFile
 
 from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy
 from translate.convert.po2html import po2html
 from translate.convert.po2idml import translate_idml, write_idml
-from translate.convert.po2md import MarkdownTranslator
 from translate.convert.po2rc import rerc
 from translate.convert.po2txt import po2txt
 from translate.convert.rc2po import rc2po
 from translate.convert.xliff2odf import translate_odf, write_odf
 from translate.storage.html import htmlfile
 from translate.storage.idml import INLINE_ELEMENTS, NO_TRANSLATE_ELEMENTS, open_idml
-from translate.storage.markdown import MarkdownFile
 from translate.storage.odf_io import open_odf
 from translate.storage.odf_shared import inline_elements, no_translate_content_elements
 from translate.storage.po import pofile
@@ -119,7 +117,7 @@ class ConvertFormat(TranslationFormat):
     can_delete_unit = False
     can_edit_base: bool = False
     unit_class: type[TranslationUnit] = ConvertPoUnit
-    autoaddon = {"weblate.flags.same_edit": {}}
+    autoaddon = {"weblate.flags.same_edit": {}, "weblate.cleanup.generic": {}}
     create_style = "copy"
     units: list[TranslateToolkitUnit]
     store: TranslationStore
@@ -132,7 +130,7 @@ class ConvertFormat(TranslationFormat):
         """Save underlying store to disk."""
         self.save_atomic(self.storefile, self.save_content)
 
-    def convertfile(self, storefile, template_store):
+    def convertfile(self, storefile, template_store) -> NoReturn:
         raise NotImplementedError
 
     @staticmethod
@@ -166,7 +164,8 @@ class ConvertFormat(TranslationFormat):
     ) -> None:
         """Handle creation of new translation file."""
         if not base:
-            raise ValueError("Not supported")
+            msg = "Not supported"
+            raise ValueError(msg)
         # Copy file
         shutil.copy(base, filename)
 
@@ -187,15 +186,15 @@ class ConvertFormat(TranslationFormat):
         except Exception as exception:
             if errors is not None:
                 errors.append(exception)
-            report_error(cause="File parse error")
+            report_error("File-parsing error")
             return False
         return True
 
-    def add_unit(self, ttkit_unit) -> None:
-        self.store.addunit(ttkit_unit)
+    def add_unit(self, unit: TranslationUnit) -> None:
+        self.store.addunit(unit.unit)
 
     @classmethod
-    def get_class(cls):
+    def get_class(cls) -> None:
         return None
 
     def create_unit(
@@ -203,8 +202,9 @@ class ConvertFormat(TranslationFormat):
         key: str,
         source: str | list[str],
         target: str | list[str] | None = None,
-    ):
-        raise ValueError("Not supported")
+    ) -> NoReturn:
+        msg = "Not supported"
+        raise ValueError(msg)
 
     def cleanup_unused(self) -> list[str]:
         """
@@ -315,12 +315,18 @@ class MarkdownFormat(ConvertFormat):
     check_flags = ("safe-html", "strict-same", "md-text")
 
     def convertfile(self, storefile, template_store):
+        # Lazy import as mistletoe is expensive
+        from translate.storage.markdown import MarkdownFile
+
         # Fake input file with a blank filename
         mdparser = MarkdownFile(inputfile=NamedBytesIO("", storefile.read()))
         return self.convert_to_po(mdparser, template_store, use_location=False)
 
     def save_content(self, handle) -> None:
         """Store content to file."""
+        # Lazy import as mistletoe is expensive
+        from translate.convert.po2md import MarkdownTranslator
+
         converter = MarkdownTranslator(
             inputstore=self.store, includefuzzy=True, outputthreshold=None, maxlength=80
         )
@@ -522,7 +528,7 @@ class WindowsRCFormat(ConvertFormat):
                 sublang=sublang,
                 charset=encoding,
             )
-            outputrclines = converter.convertstore(self.store)
+            outputrclines = converter.convertstore(self.store, includefuzzy=True)
             try:
                 handle.write(outputrclines.encode(encoding))
             except UnicodeEncodeError:

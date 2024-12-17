@@ -69,6 +69,8 @@ Architecture overview
             style=dotted];
          sentry	[label="Sentry\nError collection",
             style=dotted];
+         graylog	[label="Graylog\nLog collection",
+            style=dotted];
          mail	[label="E-mail server"];
          auth	[label="SSO\nAuthentication provider",
             style=dotted];
@@ -111,12 +113,14 @@ Architecture overview
       web -> fs;
       celery -> mt	[style=dotted];
       celery -> sentry	[style=dotted];
+      celery -> graylog	[style=dotted];
       celery -> mail;
       celery -> redis;
       celery -> db;
       celery -> fs;
       wsgi -> mt	[style=dotted];
       wsgi -> sentry	[style=dotted];
+      wsgi -> graylog	[style=dotted];
       wsgi -> auth	[style=dotted];
       wsgi -> redis;
       wsgi -> db;
@@ -178,7 +182,7 @@ Python dependencies
 +++++++++++++++++++
 
 Weblate is written in `Python <https://www.python.org/>`_ and supports Python
-3.10 or newer. You can install dependencies using pip or from your
+3.11 or newer. You can install dependencies using pip or from your
 distribution packages, full list is available in :file:`requirements.txt`.
 
 Most notable dependencies:
@@ -202,85 +206,96 @@ Django REST Framework
      :header-rows: 1
 
      * - pip extra
-       - Python Package
+       - Python Packages
        - Weblate feature
 
-
      * - ``alibaba``
-       - `aliyun-python-sdk-alimt <https://pypi.org/project/aliyun-python-sdk-alimt>`_
+       - | `aliyun-python-sdk-alimt <https://pypi.org/project/aliyun-python-sdk-alimt>`_
+         | `aliyun-python-sdk-core <https://pypi.org/project/aliyun-python-sdk-core>`_
        - :ref:`mt-alibaba`
 
      * - ``amazon``
-       - `boto3 <https://pypi.org/project/boto3>`_
+       - | `boto3 <https://pypi.org/project/boto3>`_
        - :ref:`mt-aws`
 
-
      * - ``antispam``
-       - `python-akismet <https://pypi.org/project/python-akismet>`_
+       - | `python-akismet <https://pypi.org/project/python-akismet>`_
        - :ref:`spam-protection`
 
+     * - ``gelf``
+       - | `logging-gelf <https://pypi.org/project/logging-gelf>`_
+       - :ref:`graylog`
 
      * - ``gerrit``
-       - `git-review <https://pypi.org/project/git-review>`_
+       - | `git-review <https://pypi.org/project/git-review>`_
        - :ref:`vcs-gerrit`
 
-
      * - ``google``
-       - `google-cloud-translate <https://pypi.org/project/google-cloud-translate>`_
-       - :ref:`mt-google-translate-api-v3`
-
+       - | `google-cloud-translate <https://pypi.org/project/google-cloud-translate>`_
+         | `google-cloud-storage <https://pypi.org/project/google-cloud-storage>`_
+       - :ref:`mt-google-translate-api-v3` with glossary support
 
      * - ``ldap``
-       - `django-auth-ldap <https://pypi.org/project/django-auth-ldap>`_
+       - | `django-auth-ldap <https://pypi.org/project/django-auth-ldap>`_
        - :ref:`ldap-auth`
 
-
-
      * - ``mercurial``
-       - `mercurial <https://pypi.org/project/mercurial>`_
+       - | `mercurial <https://pypi.org/project/mercurial>`_
        - :ref:`vcs-mercurial`
 
-
      * - ``mysql``
-       - `mysqlclient <https://pypi.org/project/mysqlclient>`_
+       - | `mysqlclient <https://pypi.org/project/mysqlclient>`_
        - MySQL or MariaDB, see :ref:`database-setup`
 
-
      * - ``openai``
-       - `openai <https://pypi.org/project/openai>`_
+       - | `openai <https://pypi.org/project/openai>`_
        - :ref:`mt-openai`
 
      * - ``postgres``
-       - `psycopg <https://pypi.org/project/psycopg>`_
+       - | `psycopg <https://pypi.org/project/psycopg>`_
        - PostgreSQL, see :ref:`database-setup`
 
-
-
      * - ``saml``
-       - `python3-saml <https://pypi.org/project/python3-saml>`_
+       - | `python3-saml <https://pypi.org/project/python3-saml>`_
        - :ref:`saml-auth`
 
+     * - ``saml2idp``
+       - | `djangosaml2idp <https://pypi.org/project/djangosaml2idp>`_
+       - Integrating SAML 2 IDP into Weblate
+
+     * - ``wlhosted``
+       - | `wlhosted <https://pypi.org/project/wlhosted>`_
+       - Hosted Weblate integration
+
+     * - ``wllegal``
+       - | `wllegal <https://pypi.org/project/wllegal>`_
+       - Hosted Weblate integration
+
+     * - ``wsgi``
+       - | `gunicorn <https://pypi.org/project/gunicorn>`_
+       - wsgi server for Weblate
+
      * - ``zxcvbn``
-       - `django-zxcvbn-password <https://pypi.org/project/django-zxcvbn-password>`_
+       - | `django-zxcvbn-password <https://pypi.org/project/django-zxcvbn-password>`_
        - :ref:`password-authentication`
 
 When installing using pip, you can directly specify desired features when installing:
 
 .. code-block:: sh
 
-   pip install "Weblate[Postgres,Amazon,SAML]"
+   uv pip install "weblate[Postgres,Amazon,SAML]"
 
 Or you can install Weblate with all optional features:
 
 .. code-block:: sh
 
-   pip install "Weblate[all]"
+   uv pip install "weblate[all]"
 
 Or you can install Weblate without any optional features:
 
 .. code-block:: sh
 
-   pip install Weblate
+   uv pip install weblate
 
 Other system requirements
 +++++++++++++++++++++++++
@@ -290,7 +305,7 @@ The following dependencies have to be installed on the system:
 ``Git``
     https://git-scm.com/
 Pango, Cairo and related header files and GObject introspection data
-    https://cairographics.org/, https://pango.gnome.org/, see :ref:`pangocairo`
+    https://cairographics.org/, https://www.gtk.org/docs/architecture/pango, see :ref:`pangocairo`
 ``git-review`` (optional for Gerrit support)
     https://pypi.org/project/git-review/
 ``git-svn`` (optional for Subversion support)
@@ -343,7 +358,7 @@ signature of the 5.4 release:
 
 .. code-block:: sh
 
-   sigstore verify github  \
+   sigstore verify github \
       --cert-identity https://github.com/WeblateOrg/weblate/.github/workflows/setup.yml@refs/tags/weblate-5.4 \
       --bundle Weblate-5.4-py3-none-any.whl.sigstore \
       Weblate-5.4-py3-none-any.whl
@@ -493,8 +508,7 @@ The :file:`settings.py` snippet for PostgreSQL:
             "NAME": "weblate",
             # Database user
             "USER": "weblate",
-            # Name of role to alter to set parameters in PostgreSQL,
-            # use in case role name is different than user used for authentication.
+            # Configures name of the PostgreSQL role to alter during the database migration
             # "ALTER_ROLE": "weblate",
             # Database password
             "PASSWORD": "password",
@@ -509,13 +523,13 @@ The :file:`settings.py` snippet for PostgreSQL:
     }
 
 The database migration performs `ALTER ROLE
-<https://www.postgresql.org/docs/12/sql-alterrole.html>`_ on database role used
-by Weblate. In most cases the name of the role matches username. In more
-complex setups the role name is different than username and you will get error
+<https://www.postgresql.org/docs/16/sql-alterrole.html>`_ on the database role used
+by Weblate. In most cases, the name of the role matches the username. In more
+complex setups the role name is different from the username, and you will get an error
 about non-existing role during the database migration
 (``psycopg2.errors.UndefinedObject: role "weblate@hostname" does not exist``).
 This is known to happen with Azure Database for PostgreSQL, but it's not
-limited to this environment. Please set ``ALTER_ROLE`` to change name of the
+limited to this environment. Please set ``ALTER_ROLE`` to change the name of the
 role Weblate should alter during the database migration.
 
 .. seealso::
@@ -1216,6 +1230,15 @@ documentation for more details (for example on debian this can be done by
 placing the CA certificate into :file:`/usr/local/share/ca-certificates/` and
 running :command:`update-ca-certificates`).
 
+.. hint::
+
+   The Weblate container does not include it in the search path, you need to
+   specify full path to execute it. For example:
+
+   .. code-block:: sh
+
+      docker compose exec -u root weblate /usr/sbin/update-ca-certificates
+
 Once this is done, system tools will trust the certificate and this includes
 Git.
 
@@ -1305,7 +1328,7 @@ Running web server
 ++++++++++++++++++
 
 Running Weblate is not different from running any other Django based
-program. Django is usually executed as uWSGI or fcgi (see examples for
+program. Django is usually executed as WSGI or fcgi (see examples for
 different webservers below).
 
 For testing purposes, you can use the built-in web server in Django:
@@ -1374,6 +1397,7 @@ configuration, but this might need customization for your environment.
     :setting:`CSP_CONNECT_SRC`,
     :setting:`CSP_STYLE_SRC`,
     :setting:`CSP_FONT_SRC`
+    :setting:`CSP_FORM_SRC`
 
 .. _uwsgi:
 
@@ -1383,7 +1407,7 @@ Sample configuration for NGINX and uWSGI
 
 To run production webserver, use the WSGI wrapper installed with Weblate (in
 virtual env case it is installed as
-:file:`~/weblate-env/lib/python3.9/site-packages/weblate/wsgi.py`).  Don't
+:file:`~/weblate-env/lib/python3.9/site-packages/weblate/wsgi.py`). Don't
 forget to set the Python search path to your virtualenv as well (for example
 using ``virtualenv = /home/user/weblate-env`` in uWSGI).
 
@@ -1598,6 +1622,8 @@ Weblate processes. All Celery tasks can be executed in a single process using:
 
    celery --app=weblate.utils worker --beat --queues=celery,notify,memory,translate,backup --pool=solo
 
+An installation using Docker can be configured to use a single-process Celery setup by setting :envvar:`CELERY_SINGLE_PROCESS`.
+
 .. warning::
 
    This will have a noticeable performance impact on Weblate.
@@ -1646,7 +1672,9 @@ and profiles for defined percentage of operations. This can be configured using
 .. seealso::
 
    `Sentry Performance Monitoring <https://docs.sentry.io/product/performance/>`_,
-   `Sentry Profiling <https://docs.sentry.io/product/profiling/>`_
+   `Sentry Profiling <https://docs.sentry.io/product/explore/profiling/>`_
+
+.. _rollbar-errors:
 
 Rollbar
 +++++++
@@ -1667,7 +1695,6 @@ In short, you need to adjust :file:`settings.py`:
     # Configure client access
     ROLLBAR = {
         "access_token": "POST_SERVER_ITEM_ACCESS_TOKEN",
-        "client_token": "POST_CLIENT_ITEM_ACCESS_TOKEN",
         "environment": "development" if DEBUG else "production",
         "branch": "main",
         "root": "/absolute/path/to/code/root",
@@ -1680,6 +1707,19 @@ and client side errors.
 
     Error logging also includes exceptions that were gracefully handled, but
     might indicate a problem - such as failed parsing of an uploaded file.
+
+.. _graylog:
+
+Graylog log management
+++++++++++++++++++++++
+
+.. versionadded:: 5.9
+
+Weblate can be configured to log using the GELF TCP protocol. This was developed
+for Graylog integration, but can be used with any compliant logging platform.
+
+The configuration boilerplate is included in :ref:`sample-configuration`, for
+Docker this can be configured using :envvar:`WEBLATE_LOG_GELF_HOST`.
 
 Migrating Weblate to another server
 -----------------------------------

@@ -4,9 +4,10 @@
 
 """Test for translation views."""
 
+from __future__ import annotations
+
 import time
-from typing import NoReturn
-from unittest import SkipTest
+from typing import TYPE_CHECKING, cast
 
 from django.urls import reverse
 
@@ -17,6 +18,9 @@ from weblate.trans.tests.test_views import ViewTestCase
 from weblate.trans.util import join_plural
 from weblate.utils.hash import hash_to_checksum
 from weblate.utils.state import STATE_FUZZY, STATE_TRANSLATED
+
+if TYPE_CHECKING:
+    from weblate.checks.base import BaseCheck
 
 
 class EditTest(ViewTestCase):
@@ -178,6 +182,110 @@ class EditTest(ViewTestCase):
 
         # Make sure writing out pending units works
         self.component.commit_pending("test", None)
+
+    def test_edit_new_unit(self) -> None:
+        if (
+            not self.component.has_template()
+            or not self.component.file_format_cls.can_add_unit
+        ):
+            self.skipTest("Not supported")
+
+        test_target = "TEST TRANSLATION"
+
+        def check_translated():
+            self.assertTrue(
+                Unit.objects.filter(
+                    translation__language__code="cs",
+                    source=self.new_source_string,
+                    target=test_target,
+                    state=STATE_TRANSLATED,
+                ).exists()
+            )
+
+        self.make_manager()
+
+        # Add string
+        self.component.manage_units = True
+        self.component.save()
+        response = self.add_unit("key")
+        self.assertContains(response, "New string has been added")
+
+        # Edit translation
+        self.edit_unit(self.new_source_string, test_target)
+        check_translated()
+
+        # Make sure writing out pending units works
+        self.component.commit_pending("test", None)
+        check_translated()
+
+    def add_plural_unit(self, args=None, language="en"):
+        if args is None:
+            args = {
+                "context": "test-plural",
+                "source_0": "%(count)s test",
+                "source_1": "%(count)s tests",
+            }
+
+        return self.client.post(
+            reverse(
+                "new-unit",
+                kwargs={
+                    "path": [self.component.project.slug, self.component.slug, language]
+                },
+            ),
+            args,
+            follow=True,
+        )
+
+    def test_new_plural_unit(self, args=None, language="en") -> None:
+        """Test the implementation of adding a new plural unit."""
+        response = self.add_plural_unit(args, language)
+        self.assertEqual(response.status_code, 403)
+
+        self.make_manager()
+
+        self.component.manage_units = False
+        self.component.save()
+        response = self.add_plural_unit(args, language)
+        self.assertEqual(response.status_code, 403)
+
+        self.component.manage_units = True
+        self.component.save()
+        response = self.add_plural_unit(args, language)
+        if not self.component.file_format_cls.can_add_unit:
+            self.assertEqual(response.status_code, 403)
+            return
+        if not self.component.file_format_cls.supports_plural:
+            self.assertContains(
+                response, "Plurals are not supported by the file format"
+            )
+            return
+        self.assertContains(response, "New string has been added")
+
+        # Duplicate string
+        response = self.add_plural_unit(args)
+        self.assertContains(response, "This string seems to already exist.")
+
+        self.component.commit_pending("test", None)
+
+    def test_bilingual_new_plural_unit(self) -> None:
+        """Test the implementation of adding a bilingual new plural unit."""
+        if (
+            not self.component.has_template()
+            and self.component.file_format_cls.can_add_unit
+        ):
+            args = {
+                "context": "new-bilingual-plural-unit",
+                "source_0": "%(count)s word",
+                "source_1": "%(count)s words",
+                "target_0": "%(count)s slovo",
+                "target_1": "%(count)s slova",
+                "target_2": "%(count)s slov",
+            }
+
+            self.test_new_plural_unit(args, language="cs")
+        else:
+            self.skipTest("Not supported")
 
 
 class EditValidationTest(ViewTestCase):
@@ -435,11 +543,6 @@ class EditIphoneTest(EditTest):
     def create_component(self):
         return self.create_iphone()
 
-    def test_new_unit(self) -> NoReturn:
-        # Most likely the test is wrong here it is using monolingual format as bilingual
-        # and duplicates source into context
-        raise SkipTest("Not supported")
-
 
 class EditJSONTest(EditTest):
     has_plurals = False
@@ -467,10 +570,6 @@ class EditDTDTest(EditTest):
 
     def create_component(self):
         return self.create_dtd()
-
-    def test_new_unit(self) -> NoReturn:
-        # Most likely there is a bug in the format and adding is broken
-        raise SkipTest("Not supported")
 
 
 class EditJSONMonoTest(EditTest):
@@ -533,11 +632,6 @@ class EditXliffComplexTest(EditTest):
         self.edit_unit("Hello, world!\n", "Nazdar & svete!\n")
         self.assert_backend(1)
 
-    def test_new_unit(self) -> NoReturn:
-        # The group handling is broken, see
-        # https://github.com/translate/translate/issues/4186
-        raise SkipTest("Not supported")
-
 
 class EditXliffResnameTest(EditTest):
     has_plurals = False
@@ -560,11 +654,6 @@ class EditXliffMonoTest(EditTest):
 
     def create_component(self):
         return self.create_xliff_mono()
-
-    def test_new_unit(self) -> NoReturn:
-        # The group handling is broken, see
-        # https://github.com/translate/translate/issues/4186
-        raise SkipTest("Not supported")
 
 
 class EditLinkTest(EditTest):
@@ -836,7 +925,9 @@ class EditComplexTest(ViewTestCase):
         self.assertEqual(unit.translation.stats.allchecks, 0)
 
         # Ignore check for all languages
-        ignore_flag = Check.objects.get(pk=int(check_id)).check_obj.ignore_string
+        check_obj = Check.objects.get(pk=int(check_id)).check_obj
+        self.assertIsNotNone(check_obj)
+        ignore_flag = cast("BaseCheck", check_obj).ignore_string
         ignore_url = reverse("js-ignore-check-source", kwargs={"check_id": check_id})
         response = self.client.post(ignore_url)
         self.assertEqual(response.status_code, 403)

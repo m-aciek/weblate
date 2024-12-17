@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 import django.contrib.sitemaps.views
 import django.views.i18n
 import django.views.static
@@ -11,6 +13,7 @@ from django.urls import include, path, re_path
 from django.views.decorators.cache import cache_control, cache_page
 from django.views.decorators.vary import vary_on_cookie
 from django.views.generic import RedirectView, TemplateView
+from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView
 
 import weblate.accounts.urls
 import weblate.accounts.views
@@ -51,10 +54,7 @@ from weblate.configuration.views import CustomCSSView
 from weblate.sitemaps import SITEMAPS
 from weblate.trans.feeds import ChangesFeed, LanguageChangesFeed, TranslationChangesFeed
 from weblate.trans.views.changes import ChangesCSVView, ChangesView, show_change
-from weblate.utils.urls import register_weblate_converters
 from weblate.utils.version import VERSION
-
-register_weblate_converters()
 
 handler400 = weblate.trans.views.error.bad_request
 handler403 = weblate.trans.views.error.denied
@@ -388,8 +388,8 @@ real_patterns = [
     ),
     path(
         "progress/<object_path:path>/",
-        weblate.trans.views.settings.component_progress,
-        name="component_progress",
+        weblate.trans.views.settings.show_progress,
+        name="show_progress",
     ),
     # Announcements
     path(
@@ -772,6 +772,7 @@ real_patterns = [
     path("admin/", admin.site.urls),
     # Weblate management interface
     path("manage/", weblate.wladmin.views.manage, name="manage"),
+    path("manage/support/", weblate.wladmin.views.support_form, name="manage-support"),
     path(
         "manage/addons/", weblate.addons.views.AddonList.as_view(), name="manage-addons"
     ),
@@ -811,10 +812,16 @@ real_patterns = [
         weblate.wladmin.views.performance,
         name="manage-performance",
     ),
-    # Auth
+    # Accounts
     path("accounts/", include(weblate.accounts.urls)),
     # Auth
     path("api/", include((weblate.api.urls, "weblate.api"), namespace="api")),
+    # OpenAPI schema
+    path("api/schema/", SpectacularAPIView.as_view(), name="api-schema"),
+    # API documentation
+    path(
+        "api/docs/", SpectacularRedocView.as_view(url_name="api-schema"), name="redoc"
+    ),
     # Static pages
     path("contact/", weblate.accounts.views.contact, name="contact"),
     path("hosting/", weblate.accounts.views.hosting, name="hosting"),
@@ -988,50 +995,50 @@ if "weblate.gitexport" in settings.INSTALLED_APPS:
 
 # Legal integartion
 if "weblate.legal" in settings.INSTALLED_APPS:
-    import weblate.legal.views
-
-    real_patterns += [
-        path(
-            "legal/",
-            include(("weblate.legal.urls", "weblate.legal"), namespace="legal"),
-        ),
-        path(
-            "security.txt",
-            TemplateView.as_view(
-                template_name="security.txt", content_type="text/plain"
+    real_patterns.extend(
+        (
+            path(
+                "legal/",
+                include(("weblate.legal.urls", "weblate.legal"), namespace="legal"),
             ),
-        ),
-    ]
+            path(
+                "security.txt",
+                TemplateView.as_view(
+                    template_name="security.txt", content_type="text/plain"
+                ),
+            ),
+        )
+    )
 
 # Serving media files in DEBUG mode
 if settings.DEBUG:
-    real_patterns += [
+    real_patterns.append(
         path(
             "media/<path:path>",
             django.views.static.serve,
             {"document_root": settings.MEDIA_ROOT},
         )
-    ]
+    )
 
 # Django debug toolbar integration
 if settings.DEBUG and "debug_toolbar" in settings.INSTALLED_APPS:
-    import debug_toolbar
-
-    real_patterns += [path("__debug__/", include(debug_toolbar.urls))]
+    real_patterns.append(
+        path("__debug__/", include("debug_toolbar.urls")),
+    )
 
 # Hosted Weblate integration
 if "wlhosted.integrations" in settings.INSTALLED_APPS:
     from wlhosted.integrations.views import CreateBillingView
 
-    real_patterns += [
-        path("create/billing/", CreateBillingView.as_view(), name="create-billing")
-    ]
+    real_patterns.append(
+        path("create/billing/", CreateBillingView.as_view(), name="create-billing"),
+    )
 
 # Django SAML2 Identity Provider
 if "djangosaml2idp" in settings.INSTALLED_APPS:
-    real_patterns += [
+    real_patterns.append(
         path("idp/", include("djangosaml2idp.urls")),
-    ]
+    )
 
 # Handle URL prefix configuration
 if not URL_PREFIX:

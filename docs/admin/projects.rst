@@ -200,6 +200,16 @@ Configure per project access control, see :ref:`acl` for more details.
 
 The default value can be changed by :setting:`DEFAULT_ACCESS_CONTROL`.
 
+.. _project-enforced_2fa:
+
+Enforced two-factor authentication
+++++++++++++++++++++++++++++++++++
+
+.. versionadded:: 5.7
+
+Enforce :ref:`2fa` for all contributors. Users won’t be allowed
+to perform any operations within the project without having it configured.
+
 .. _project-translation_review:
 
 Enable reviews
@@ -572,7 +582,7 @@ translating, sometimes it's desirable to have make use of a translation more tha
 It's usually a good idea to turn this off for monolingual translations, unless
 you are using the same IDs across the whole project.
 
-Default value can be changed by :setting:`DEFAULT_TRANSLATION_PROPAGATION`.
+The default value can be changed by :setting:`DEFAULT_TRANSLATION_PROPAGATION`.
 
 .. seealso::
 
@@ -794,7 +804,7 @@ Merge without fast-forward
    commit every time (even when fast-forward would be possible). Every Weblate
    change will appear as a merge commit in Weblate repository.
 
-Default value can be changed by :setting:`DEFAULT_MERGE_STYLE`.
+The default value can be changed by :setting:`DEFAULT_MERGE_STYLE`.
 
 .. _component-commit_message:
 .. _component-add_message:
@@ -808,7 +818,7 @@ Commit, add, delete, merge, add-on, and merge request messages
 
 Message used when committing a translation, see :ref:`markup`.
 
-Default value can be changed by :setting:`DEFAULT_ADD_MESSAGE`,
+The default value can be changed by :setting:`DEFAULT_ADD_MESSAGE`,
 :setting:`DEFAULT_ADDON_MESSAGE`, :setting:`DEFAULT_COMMIT_MESSAGE`,
 :setting:`DEFAULT_DELETE_MESSAGE`, :setting:`DEFAULT_MERGE_MESSAGE`,
 :setting:`DEFAULT_PULL_MESSAGE`.
@@ -834,7 +844,7 @@ background task or the :wladmin:`commit_pending` management command. All
 changes in a component are committed once there is at least one change
 older than this period.
 
-Default value can be changed by :setting:`COMMIT_PENDING_HOURS`.
+The default value can be changed by :setting:`COMMIT_PENDING_HOURS`.
 
 .. hint::
 
@@ -899,6 +909,35 @@ Some examples of filtering:
 +-------------------------------+-----------------------+
 | Include all files (default)   | ``^[^.]+$``           |
 +-------------------------------+-----------------------+
+
+
+.. _component-key_filter:
+
+Key filter
+++++++++++
+
+.. versionadded:: 5.8
+
+A regular expression that is used to filter units by their keys. It displays only
+those units whose keys match the regular expression that was set
+as the value of this field.
+
+Some examples of filtering:
+
++-------------------------------+----------------------------+
+| Filter description            | Regular expression         |
++===============================+============================+
+| Selected keys only            | ``^(one|two|other)$``      |
++-------------------------------+----------------------------+
+| Exclude app store changelogs  | ``^(?!changelogs/.*$).+$`` |
++-------------------------------+----------------------------+
+| Filter prefixed strings       | ``^translatable``          |
++-------------------------------+----------------------------+
+
+.. note::
+
+    This filter is only available for components with monolingual file formats.
+
 
 .. _component-variant_regex:
 
@@ -991,7 +1030,11 @@ order to allow adding new words to them.
 Glossary color
 ++++++++++++++
 
-Display color for a glossary used when showing word matches.
+Color used when displaying terms from this glossary. Useful to distinguish glossaries when using more of them.
+
+.. seealso::
+
+   :ref:`glossary`
 
 .. _category:
 
@@ -1018,7 +1061,7 @@ Currently it is used in:
     * :ref:`addon-weblate.generate.generate`
     * :ref:`addon-script`
 
-There following variables are available in the component templates:
+The following variables are available in the component templates:
 
 ``{{ language_code }}``
     Language code
@@ -1101,9 +1144,9 @@ There are also additional filter to manipulate with filenames:
     Directory of a file: {{ filename|dirname }}
     File without extension: {{ filename|stripext }}
     File in parent dir: {{ filename|parentdir }}
-    It can be used multiple times:  {{ filename|parentdir|parentdir }}
+    It can be used multiple times: {{ filename|parentdir|parentdir }}
 
-...and other Django template features.
+…and other Django template features.
 
 .. _import-speed:
 

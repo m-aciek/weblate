@@ -25,8 +25,10 @@ class AppStoreFormatTest(BaseFormatTest):
     FIND_CONTEXT = "short_description.txt:1"
     FIND_MATCH = "Hello world"
     MATCH = None
-    BASE = APPSTORE_FILE
+    BASE = os.path.dirname(APPSTORE_FILE)
     EXPECTED_FLAGS = "max-length:80"
 
     def parse_file(self, filename):
-        return self.FORMAT(os.path.dirname(filename))
+        if not os.path.isdir(filename):
+            filename = os.path.dirname(filename)
+        return self.FORMAT(filename)

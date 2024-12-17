@@ -5,7 +5,7 @@
 (() => {
   const EditorBase = WLT.Editor.Base;
 
-  const TM_SERVICE_NAME = "weblate-translation-memory";
+  const tmServiceName = "weblate-translation-memory";
 
   const $window = $(window);
 
@@ -25,8 +25,8 @@
       const raw = $el.parent().parent().data("raw");
 
       // biome-ignore lint/complexity/noForEach: TODO
-      raw.plural_forms.forEach((plural_form) => {
-        $(this.$translationArea.get(plural_form)).replaceValue(raw.text);
+      raw.plural_forms.forEach((pluralForm) => {
+        $(this.$translationArea.get(pluralForm)).replaceValue(raw.text);
       });
       autosize.update(this.$translationArea);
       WLT.Utils.markFuzzy(this.$translationForm);
@@ -38,8 +38,8 @@
       const raw = $el.parent().parent().data("raw");
 
       // biome-ignore lint/complexity/noForEach: TODO
-      raw.plural_forms.forEach((plural_form) => {
-        $(this.$translationArea.get(plural_form)).replaceValue(raw.text);
+      raw.plural_forms.forEach((pluralForm) => {
+        $(this.$translationArea.get(pluralForm)).replaceValue(raw.text);
       });
       autosize.update(this.$translationArea);
       WLT.Utils.markTranslated(this.$translationForm);
@@ -99,7 +99,7 @@
       return false;
     });
     Mousetrap.bindGlobal("mod+o", (e) => {
-      $(".source-language-group [data-clone-text]").click();
+      $(".source-language-group [data-clone-value]").click();
       return false;
     });
     Mousetrap.bindGlobal("mod+y", (e) => {
@@ -167,7 +167,7 @@
 
     /* Form persistence. Restores translation form upon comment submission */
     const restoreKey = "translation_autosave";
-    const restoreValue = window.localStorage.getItem(restoreKey);
+    const restoreValue = localStorage.getItem(restoreKey);
     if (restoreValue !== null) {
       const translationRestore = JSON.parse(restoreValue);
 
@@ -192,23 +192,18 @@
         };
       });
 
-      window.localStorage.setItem(restoreKey, JSON.stringify(data.get()));
+      localStorage.setItem(restoreKey, JSON.stringify(data.get()));
     });
   };
 
   FullEditor.prototype.initTabs = function () {
-    /* Store active tab in a cookie */
+    /* Store active tab in a local storage */
     $('.translation-tabs a[data-toggle="tab"]').on("shown.bs.tab", function () {
-      const current = Cookies.get("translate-tab");
+      const current = localStorage.getItem("translate-tab");
       const desired = $(this).attr("href");
 
       if (current !== desired) {
-        Cookies.set("translate-tab", desired, {
-          path: "/",
-          expires: 365,
-          sameSite: "Lax",
-          secure: window.location.protocol === "https:",
-        });
+        localStorage.setItem("translate-tab", desired);
       }
     });
 
@@ -248,23 +243,23 @@
         success: (data) => {
           this.processMachineryResults(data);
         },
-        error: (jqXHR, textStatus, errorThrown) => {
-          this.processMachineryError(jqXHR, textStatus, errorThrown);
+        error: (jqXhr, textStatus, errorThrown) => {
+          this.processMachineryError(jqXhr, textStatus, errorThrown);
         },
       });
       return false;
     });
   };
 
-  FullEditor.prototype.removeTranslationEntry = function (delete_url) {
+  FullEditor.prototype.removeTranslationEntry = function (deleteUrl) {
     $.ajax({
       type: "DELETE",
-      url: delete_url,
+      url: deleteUrl,
       headers: { "X-CSRFToken": this.csrfToken },
       success: () => {
         addAlert(gettext("Translation memory entry removed."));
       },
-      error: (jqXHR, textStatus, errorThrown) => {
+      error: (jqXhr, textStatus, errorThrown) => {
         addAlert(errorThrown);
       },
     });
@@ -277,8 +272,8 @@
       success: (data) => {
         this.processMachineryResults(data);
       },
-      error: (jqXHR, textStatus, errorThrown) => {
-        this.processMachineryError(jqXHR, textStatus, errorThrown);
+      error: (jqXhr, textStatus, errorThrown) => {
+        this.processMachineryError(jqXhr, textStatus, errorThrown);
       },
       dataType: "json",
       data: {
@@ -288,12 +283,12 @@
   };
 
   FullEditor.prototype.processMachineryError = (
-    jqXHR,
+    jqXhr,
     textStatus,
     errorThrown,
   ) => {
     decreaseLoading("machinery");
-    if (jqXHR.state() !== "rejected") {
+    if (jqXhr.state() !== "rejected") {
       addAlert(
         `${gettext(
           "The request for machine translation has failed:",
@@ -370,7 +365,7 @@
     });
 
     const $checks = $(".check-item");
-    if (!$checks.length) {
+    if ($checks.length === 0) {
       return;
     }
 
@@ -379,8 +374,8 @@
       const $el = $(e.currentTarget);
       let url = $el.attr("href");
       const $check = $el.closest(".check");
-      const dismiss_all = $check.find("input").prop("checked");
-      if (dismiss_all) {
+      const dismissAll = $check.find("input").prop("checked");
+      if (dismissAll) {
         url = $el.data("dismiss-all");
       }
 
@@ -390,18 +385,18 @@
         data: {
           csrfmiddlewaretoken: this.csrfToken,
         },
-        error: (jqXHR, textStatus, errorThrown) => {
+        error: (jqXhr, textStatus, errorThrown) => {
           addAlert(errorThrown);
         },
         success: (data) => {
-          if (dismiss_all) {
+          if (dismissAll) {
             const { extra_flags, all_flags } = data;
             $("#id_extra_flags").val(extra_flags);
             $("#unit_all_flags").html(all_flags).addClass("flags-updated");
           }
         },
       });
-      if (dismiss_all) {
+      if (dismissAll) {
         $check.remove();
       } else {
         $check.toggleClass("check-dismissed");
@@ -495,24 +490,24 @@
       }
       /* Relies on clone source implementation */
       const cloneElement = document.querySelector(
-        ".source-language-group [data-clone-text]",
+        ".source-language-group [data-clone-value]",
       );
       if (cloneElement !== null) {
-        const source = cloneElement.getAttribute("data-clone-text");
-        const term_source = document
+        const source = cloneElement.getAttribute("data-clone-value");
+        const termSource = document
           .getElementById("div_id_add_term_source")
           .querySelector("textarea");
-        const term_target = document
+        const termTarget = document
           .getElementById("div_id_add_term_target")
           .querySelector("textarea");
         if (source.length < 200) {
-          term_source.value = source;
-          term_target.value = document.querySelector(
+          termSource.value = source;
+          termTarget.value = document.querySelector(
             ".translation-editor",
           ).value;
         }
-        term_source.dispatchEvent(new Event("input"));
-        term_target.dispatchEvent(new Event("input"));
+        termSource.dispatchEvent(new Event("input"));
+        termTarget.dispatchEvent(new Event("input"));
       }
       e.target.setAttribute("data-shown", true);
     });
@@ -578,18 +573,18 @@
           .attr("dir", this.state.dir)
           .html(el.html),
       );
-      row.append($("<td>").html(el.diff));
+      row.append($("<td>").attr("class", "machinery-text").html(el.diff));
       row.append(
         $("<td/>").attr("class", "machinery-text").html(el.source_diff),
       );
       row.append(service);
 
       /* Quality score as bar with the text */
-      const quality_cell = $("<td class='number'></td>");
+      const qualityCell = $("<td class='number'></td>");
       if (el.show_quality) {
-        quality_cell.html(`<strong>${el.quality}</strong> %`);
+        qualityCell.html(`<strong>${el.quality}</strong> %`);
       }
-      row.append(quality_cell);
+      row.append(qualityCell);
       /* Translators: Verb for copy operation */
       row.append(
         $(

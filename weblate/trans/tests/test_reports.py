@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.urls import reverse
 from django.utils import timezone
@@ -61,21 +61,30 @@ class ReportsTest(BaseReportsTest):
             timezone.now() - timedelta(days=1),
             timezone.now() + timedelta(days=1),
             "",
-            translation__component=self.component,
+            self.component,
         )
         self.assertEqual(data, [])
 
     def test_credits_one(self, expected_count=1) -> None:
         self.add_change()
         expected = [
-            {"Czech": [("weblate@example.org", "Weblate <b>Test</b>", expected_count)]}
+            {
+                "Czech": [
+                    {
+                        "email": "weblate@example.org",
+                        "full_name": "Weblate <b>Test</b>",
+                        "username": "testuser",
+                        "change_count": expected_count,
+                    }
+                ]
+            }
         ]
         data = generate_credits(
             None,
             timezone.now() - timedelta(days=1),
             timezone.now() + timedelta(days=1),
             "",
-            translation__component=self.component,
+            self.component,
         )
         self.assertEqual(data, expected)
         data = generate_credits(
@@ -83,7 +92,7 @@ class ReportsTest(BaseReportsTest):
             timezone.now() - timedelta(days=1),
             timezone.now() + timedelta(days=1),
             "cs",
-            translation__component=self.component,
+            self.component,
         )
         self.assertEqual(data, expected)
         data = generate_credits(
@@ -91,7 +100,7 @@ class ReportsTest(BaseReportsTest):
             timezone.now() - timedelta(days=1),
             timezone.now() + timedelta(days=1),
             "de",
-            translation__component=self.component,
+            self.component,
         )
         self.assertEqual(data, [])
 
@@ -123,16 +132,12 @@ class ReportsComponentTest(BaseReportsTest):
     def get_kwargs(self):
         return {"path": self.component.get_url_path()}
 
-    def get_credits(self, style):
+    def get_credits(self, style, follow=False, **kwargs):
         self.add_change()
+        params = {"style": style, "period": "01/01/2000 - 01/01/2100"}
+        params.update(kwargs)
         return self.client.post(
-            reverse("credits", kwargs=self.get_kwargs()),
-            {
-                "period": "",
-                "style": style,
-                "start_date": "2000-01-01",
-                "end_date": "2100-01-01",
-            },
+            reverse("credits", kwargs=self.get_kwargs()), params, follow=follow
         )
 
     def test_credits_view_json(self) -> None:
@@ -140,7 +145,18 @@ class ReportsComponentTest(BaseReportsTest):
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(
             response.content.decode(),
-            [{"Czech": [["weblate@example.org", "Weblate <b>Test</b>", 1]]}],
+            [
+                {
+                    "Czech": [
+                        {
+                            "email": "weblate@example.org",
+                            "full_name": "Weblate <b>Test</b>",
+                            "username": "testuser",
+                            "change_count": 1,
+                        }
+                    ]
+                }
+            ],
         )
 
     def test_credits_view_rst(self) -> None:
@@ -152,7 +168,7 @@ class ReportsComponentTest(BaseReportsTest):
             """
 * Czech
 
-    * Weblate <b>Test</b> <weblate@example.org> (1)
+    * Weblate <b>Test</b> (testuser) <weblate@example.org> - 1
 """.strip(),
         )
 
@@ -164,20 +180,52 @@ class ReportsComponentTest(BaseReportsTest):
             "<table><tbody>\n"
             "<tr>\n<th>Czech</th>\n"
             '<td><ul><li><a href="mailto:weblate@example.org">'
-            "Weblate &lt;b&gt;Test&lt;/b&gt;</a> (1)</li></ul></td>\n</tr>\n"
+            "Weblate &lt;b&gt;Test&lt;/b&gt; (testuser)</a> - 1</li></ul></td>\n</tr>\n"
             "</tbody></table>",
         )
 
-    def get_counts(self, style, **kwargs):
+    def test_credits_blank_period(self) -> None:
+        period = ""
+        response = self.get_credits("json", period=period, follow=True)
+        self.assertContains(
+            response, "Error in parameter period: This field is required."
+        )
+
+    def test_credits_invalid_start(self) -> None:
+        end = timezone.now()
+        start = end - timedelta(days=30)
+        period = "{}invalid - {}".format(
+            start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y")
+        )
+        response = self.get_credits("json", period=period, follow=True)
+        self.assertContains(response, "Error in parameter period: Invalid date!")
+
+    def test_credits_invalid_end(self) -> None:
+        end = timezone.now()
+        start = end - timedelta(days=30)
+        period = "{} - {}invalid".format(
+            start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y")
+        )
+        response = self.get_credits("json", period=period, follow=True)
+        self.assertContains(response, "Error in parameter period: Invalid date!")
+
+    def test_credits_inverse_daterange(self) -> None:
+        start = timezone.now()
+        end = start - timedelta(days=1)
+        period = "{} - {}".format(start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y"))
+        response = self.get_credits("json", period=period, follow=True)
+        self.assertContains(
+            response,
+            "Error in parameter period: The starting date has to be before the ending date.",
+        )
+
+    def get_counts(self, style, follow=False, **kwargs):
         self.add_change()
-        params = {
-            "style": style,
-            "period": "",
-            "start_date": "2000-01-01",
-            "end_date": "2100-01-01",
-        }
+        params = {"style": style, "period": "01/01/2000 - 01/01/2100"}
         params.update(kwargs)
-        return self.client.post(reverse("counts", kwargs=self.get_kwargs()), params)
+        return self.client.post(
+            reverse("counts", kwargs=self.get_kwargs()), params, follow=follow
+        )
 
     def test_counts_view_json(self) -> None:
         response = self.get_counts("json")
@@ -185,27 +233,45 @@ class ReportsComponentTest(BaseReportsTest):
         self.assertJSONEqual(response.content.decode(), COUNTS_DATA)
 
     def test_counts_view_30days(self) -> None:
-        response = self.get_counts("json", period="30days")
+        end = timezone.now()
+        start = end - timedelta(days=30)
+        period = "{} - {}".format(start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y"))
+        response = self.get_counts("json", period=period)
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(response.content.decode(), COUNTS_DATA)
 
     def test_counts_view_this_month(self) -> None:
-        response = self.get_counts("json", period="this-month")
+        end = timezone.now().replace(day=1) + timedelta(days=31)
+        end = end.replace(day=1) - timedelta(days=1)
+        start = end.replace(day=1)
+        period = "{} - {}".format(start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y"))
+        response = self.get_counts("json", period=period)
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(response.content.decode(), COUNTS_DATA)
 
     def test_counts_view_month(self) -> None:
-        response = self.get_counts("json", period="month")
+        end = timezone.now().replace(day=1) - timedelta(days=1)
+        start = end.replace(day=1)
+        period = "{} - {}".format(start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y"))
+        response = self.get_counts("json", period=period)
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(response.content.decode(), [])
 
     def test_counts_view_year(self) -> None:
-        response = self.get_counts("json", period="year")
+        year = timezone.now().year - 1
+        end = timezone.make_aware(datetime(year, 12, 31))  # noqa: DTZ001
+        start = timezone.make_aware(datetime(year, 1, 1))  # noqa: DTZ001
+        period = "{} - {}".format(start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y"))
+        response = self.get_counts("json", period=period)
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(response.content.decode(), [])
 
     def test_counts_view_this_year(self) -> None:
-        response = self.get_counts("json", period="this-year")
+        year = timezone.now().year
+        end = timezone.make_aware(datetime(year, 12, 31))  # noqa: DTZ001
+        start = timezone.make_aware(datetime(year, 1, 1))  # noqa: DTZ001
+        period = "{} - {}".format(start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y"))
+        response = self.get_counts("json", period=period)
         self.assertEqual(response.status_code, 200)
         self.assertJSONEqual(response.content.decode(), COUNTS_DATA)
 
@@ -283,6 +349,41 @@ class ReportsComponentTest(BaseReportsTest):
 """,
         )
 
+    def test_counts_blank_period(self) -> None:
+        period = ""
+        response = self.get_counts("json", period=period, follow=True)
+        self.assertContains(
+            response, "Error in parameter period: This field is required."
+        )
+
+    def test_counts_invalid_start(self) -> None:
+        end = timezone.now()
+        start = end - timedelta(days=30)
+        period = "{}invalid - {}".format(
+            start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y")
+        )
+        response = self.get_counts("json", period=period, follow=True)
+        self.assertContains(response, "Error in parameter period: Invalid date!")
+
+    def test_counts_invalid_end(self) -> None:
+        end = timezone.now()
+        start = end - timedelta(days=30)
+        period = "{} - {}invalid".format(
+            start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y")
+        )
+        response = self.get_counts("json", period=period, follow=True)
+        self.assertContains(response, "Error in parameter period: Invalid date!")
+
+    def test_counts_inverse_daterange(self) -> None:
+        start = timezone.now()
+        end = start - timedelta(days=1)
+        period = "{} - {}".format(start.strftime("%m/%d/%Y"), end.strftime("%m/%d/%Y"))
+        response = self.get_counts("json", period=period, follow=True)
+        self.assertContains(
+            response,
+            "Error in parameter period: The starting date has to be before the ending date.",
+        )
+
 
 class ReportsProjectTest(ReportsComponentTest):
     def get_kwargs(self):
@@ -292,3 +393,17 @@ class ReportsProjectTest(ReportsComponentTest):
 class ReportsGlobalTest(ReportsComponentTest):
     def get_kwargs(self):
         return {}
+
+
+class ReportsCategoryTest(ReportsComponentTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.setup_category()
+
+    def setup_category(self) -> None:
+        self.component.category = self.create_category(project=self.project)
+        self.component.save()
+        self.category = self.component.category
+
+    def get_kwargs(self) -> dict[str, tuple]:
+        return {"path": self.category.get_url_path()}

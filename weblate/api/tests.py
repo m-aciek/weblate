@@ -4,9 +4,10 @@
 
 import os
 from copy import copy
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
+import responses
 from django.core.files import File
 from django.urls import reverse
 from rest_framework.exceptions import ErrorDetail
@@ -29,6 +30,7 @@ from weblate.trans.models import (
 )
 from weblate.trans.tests.test_models import fixup_languages_seq
 from weblate.trans.tests.utils import RepoTestMixin, get_test_file
+from weblate.utils.data import data_dir
 from weblate.utils.django_hacks import immediate_on_commit, immediate_on_commit_leave
 from weblate.utils.state import STATE_EMPTY, STATE_TRANSLATED
 
@@ -95,6 +97,7 @@ class APIBaseTest(APITestCase, RepoTestMixin):
         *,
         data=None,
         code=200,
+        authenticated: bool = True,
         superuser: bool = False,
         method="get",
         request=None,
@@ -102,7 +105,8 @@ class APIBaseTest(APITestCase, RepoTestMixin):
         skip=(),
         format: str = "multipart",  # noqa: A002
     ):
-        self.authenticate(superuser)
+        if authenticated:
+            self.authenticate(superuser)
         url = name if name.startswith(("http:", "/")) else reverse(name, kwargs=kwargs)
         response = getattr(self.client, method)(url, request, format, headers=headers)
         content = response.content if hasattr(response, "content") else "<stream>"
@@ -234,7 +238,9 @@ class UserAPITest(APIBaseTest):
             code=200,
             request={"group_id": group.id},
         )
-        self.assertIn("http://example.com/api/groups/2/", response.data["groups"])
+        self.assertIn(
+            f"http://example.com/api/groups/{group.id}/", response.data["groups"]
+        )
         response = self.do_request(
             "api:user-groups",
             kwargs={"username": username},
@@ -243,7 +249,9 @@ class UserAPITest(APIBaseTest):
             code=200,
             request={"group_id": group.id},
         )
-        self.assertNotIn("http://example.com/api/groups/2/", response.data["groups"])
+        self.assertNotIn(
+            "http://example.com/api/groups/{group.id}/", response.data["groups"]
+        )
 
     def test_list_notifications(self) -> None:
         response = self.do_request(
@@ -446,7 +454,7 @@ class GroupAPITest(APIBaseTest):
         self.assertEqual(group.defining_project, self.component.project)
 
     def test_add_role(self) -> None:
-        role = Role.objects.get(pk=1)
+        role = Role.objects.get(name="Administration")
         self.do_request(
             "api:group-roles",
             kwargs={"id": Group.objects.get(name="Users").id},
@@ -775,7 +783,7 @@ class GroupAPITest(APIBaseTest):
         )
         self.assertEqual(Group.objects.get(name="Users").language_selection, 1)
 
-    def test_grant_admin(self):
+    def test_grant_admin(self) -> None:
         group = Group.objects.create(name="Test Group")
         response = self.do_request(
             "api:group-grant-admin",
@@ -805,7 +813,7 @@ class GroupAPITest(APIBaseTest):
             code=400,
         )
 
-    def test_group_admin_edit(self):
+    def test_group_admin_edit(self) -> None:
         user = User.objects.create_user(username="testuser", password="12345")
         group = Group.objects.create(name="Test Group")
         response = self.do_request(
@@ -826,7 +834,7 @@ class GroupAPITest(APIBaseTest):
         )
         self.assertIn("Administration rights granted.", response.data)
 
-    def test_revoke_admin(self):
+    def test_revoke_admin(self) -> None:
         group = Group.objects.create(name="Test Group")
         user = User.objects.create_user(username="testuser", password="12345")
         group.admins.add(user)
@@ -1394,6 +1402,33 @@ class ProjectAPITest(APIBaseTest):
         )
         self.assertIn("file_format", response.data)
 
+    def test_create_component_link(self) -> None:
+        repo_url = self.format_local_path(self.git_repo_path)
+        response = self.do_request(
+            "api:project-components",
+            self.project_kwargs,
+            method="post",
+            code=201,
+            superuser=True,
+            request={
+                "name": "API project",
+                "slug": "api-project",
+                "repo": "weblate://test/test",
+                "filemask": "po/*.po",
+                "file_format": "po",
+                "new_lang": "none",
+            },
+        )
+        self.assertEqual(Component.objects.count(), 3)
+        component = Component.objects.get(slug="api-project", project__slug="test")
+        self.assertEqual(component.repo, "weblate://test/test")
+        self.assertEqual(component.full_path, self.component.full_path)
+        self.assertEqual(response.data["repo"], repo_url)
+
+        # Verify that the repo was not checked out
+        real_path = os.path.join(data_dir("vcs"), *component.get_url_path())
+        self.assertFalse(os.path.exists(real_path))
+
     def test_create_component_no_push(self) -> None:
         repo_url = self.format_local_path(self.git_repo_path)
         response = self.do_request(
@@ -1412,7 +1447,7 @@ class ProjectAPITest(APIBaseTest):
             },
         )
         self.assertEqual(Component.objects.count(), 3)
-        # Auto linking in place
+        # Verify auto linking is in place
         self.assertEqual(
             Component.objects.get(slug="api-project", project__slug="test").repo,
             "weblate://test/test",
@@ -1443,7 +1478,7 @@ class ProjectAPITest(APIBaseTest):
             },
         )
         self.assertEqual(Component.objects.count(), 3)
-        # Auto linking in place
+        # Verify auto linking is in place
         self.assertEqual(
             Component.objects.get(slug="api-project", project__slug="test").repo,
             "weblate://test/test",
@@ -1941,6 +1976,282 @@ class ProjectAPITest(APIBaseTest):
         )
         self.assertEqual(response.headers["content-type"], "application/zip")
 
+    def test_credits(self) -> None:
+        self.do_request(
+            "api:component-credits",
+            self.component_kwargs,
+            method="get",
+            code=401,
+            authenticated=False,
+        )
+
+        # mandatory date parameters
+        self.do_request(
+            "api:component-credits", self.component_kwargs, method="get", code=400
+        )
+
+        start = datetime.now(tz=UTC) - timedelta(days=1)
+        end = datetime.now(tz=UTC) + timedelta(days=1)
+
+        response = self.do_request(
+            "api:component-credits",
+            self.component_kwargs,
+            method="get",
+            code=200,
+            request={"start": start.isoformat(), "end": end.isoformat()},
+        )
+        self.assertEqual(response.data, [])
+
+        response = self.do_request(
+            "api:component-credits",
+            self.component_kwargs,
+            method="get",
+            code=200,
+            request={"start": start.isoformat(), "end": end.isoformat(), "lang": "fr"},
+        )
+        self.assertEqual(response.data, [])
+
+    @responses.activate
+    def test_install_machinery(self) -> None:
+        """Test the machinery settings API endpoint for various scenarios."""
+        from weblate.machinery.tests import AlibabaTranslationTest, DeepLTranslationTest
+
+        # unauthenticated get
+        self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="get",
+            code=403,
+            authenticated=True,
+            superuser=False,
+        )
+
+        # unauthenticated post
+        self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=403,
+            authenticated=True,
+            superuser=False,
+            request={"service": "weblate"},
+        )
+
+        # missing service
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=400,
+            superuser=True,
+            request={},
+        )
+
+        # unknown service
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=400,
+            superuser=True,
+            request={"service": "unknown"},
+        )
+
+        # create configuration: no form
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=201,
+            superuser=True,
+            request={"service": "weblate"},
+        )
+
+        # missing required field
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=400,
+            superuser=True,
+            request={
+                "service": "deepl",
+                "configuration": {"wrong": ""},
+            },
+            format="json",
+        )
+
+        # invalid field with multipart
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=400,
+            superuser=True,
+            request={
+                "service": "deepl",
+                "configuration": "{malformed_json",
+            },
+        )
+
+        # create configuration: valid form with multipart
+        DeepLTranslationTest.mock_response()
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=201,
+            superuser=True,
+            request={
+                "service": "deepl",
+                "configuration": '{"key": "x", "url": "https://api.deepl.com/v2/"}',
+            },
+        )
+
+        # create configuration: valid form with json
+        AlibabaTranslationTest().mock_response()
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=201,
+            superuser=True,
+            request={
+                "service": "alibaba",
+                "configuration": {
+                    "key": "alibaba-key-v1",
+                    "secret": "alibaba-secret",
+                    "region": "alibaba-region",
+                },
+            },
+            format="json",
+        )
+
+        # update configuration: incorrect method
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="post",
+            code=400,
+            superuser=True,
+            request={
+                "service": "deepl",
+                "configuration": {
+                    "key": "deepl-key-v1",
+                    "url": "https://api.deepl.com/v2/",
+                },
+            },
+            format="json",
+        )
+
+        # update configuration: valid method
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="patch",
+            code=200,
+            superuser=True,
+            request={
+                "service": "deepl",
+                "configuration": {
+                    "key": "deepl-key-v2",
+                    "url": "https://api.deepl.com/v2/",
+                },
+            },
+            format="json",
+        )
+
+        # list configurations
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="get",
+            code=200,
+            superuser=True,
+        )
+        self.assertIn("weblate", response.data)
+        self.assertEqual(response.data["deepl"]["key"], "deepl-key-v2")
+        self.assertEqual(response.data["alibaba"]["key"], "alibaba-key-v1")
+
+        # remove configuration
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="patch",
+            code=200,
+            superuser=True,
+            request={"service": "deepl", "configuration": None},
+            format="json",
+        )
+
+        # check configuration no longer exists
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="get",
+            code=200,
+            superuser=True,
+        )
+        self.assertNotIn("deepl", response.data)
+
+        # invalid replace all configurations (missing required config)
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="put",
+            code=400,
+            superuser=True,
+            request={
+                "deepl": {"key": "deepl-key-valid", "url": "https://api.deepl.com/v2/"},
+                "unknown": {"key": "alibaba-key-invalid"},
+            },
+            format="json",
+        )
+
+        # invalid replace all configurations (missing required config)
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="put",
+            code=400,
+            superuser=True,
+            request={
+                "deepl": {"key": "deepl-key-valid", "url": "https://api.deepl.com/v2/"},
+                "alibaba": {"key": "alibaba-key-invalid"},
+            },
+            format="json",
+        )
+
+        # replace all configurations
+        new_config = {
+            "deepl": {"key": "deepl-key-v3", "url": "https://api.deepl.com/v2/"},
+            "alibaba": {
+                "key": "alibaba-key-v2",
+                "secret": "alibaba-secret",
+                "region": "alibaba-region",
+            },
+        }
+
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="put",
+            code=201,
+            superuser=True,
+            request=new_config,
+            format="json",
+        )
+
+        # check all configurations
+        response = self.do_request(
+            "api:project-machinery-settings",
+            self.project_kwargs,
+            method="get",
+            superuser=True,
+        )
+
+        self.assertEqual(new_config, response.data)
+
 
 class ComponentAPITest(APIBaseTest):
     def setUp(self) -> None:
@@ -2231,6 +2542,41 @@ class ComponentAPITest(APIBaseTest):
             code=204,
             superuser=True,
         )
+
+    def test_credits(self) -> None:
+        self.do_request(
+            "api:component-credits",
+            self.component_kwargs,
+            method="get",
+            code=401,
+            authenticated=False,
+        )
+
+        # mandatory date parameters
+        self.do_request(
+            "api:component-credits", self.component_kwargs, method="get", code=400
+        )
+
+        start = datetime.now(tz=UTC) - timedelta(days=1)
+        end = datetime.now(tz=UTC) + timedelta(days=1)
+
+        response = self.do_request(
+            "api:component-credits",
+            self.component_kwargs,
+            method="get",
+            code=200,
+            request={"start": start.isoformat(), "end": end.isoformat()},
+        )
+        self.assertEqual(response.data, [])
+
+        response = self.do_request(
+            "api:component-credits",
+            self.component_kwargs,
+            method="get",
+            code=200,
+            request={"start": start.isoformat(), "end": end.isoformat(), "lang": "fr"},
+        )
+        self.assertEqual(response.data, [])
 
 
 class LanguageAPITest(APIBaseTest):
@@ -3223,7 +3569,11 @@ class TranslationAPITest(APIBaseTest):
         )
 
     def test_delete(self) -> None:
-        start_count = Translation.objects.count()
+        def _translation_count():
+            # exclude glossaries because stale glossaries are also cleaned out
+            return Translation.objects.filter(component__is_glossary=False).count()
+
+        start_count = _translation_count()
         self.do_request(
             "api:translation-detail", self.translation_kwargs, method="delete", code=403
         )
@@ -3234,7 +3584,8 @@ class TranslationAPITest(APIBaseTest):
             superuser=True,
             code=204,
         )
-        self.assertEqual(Translation.objects.count(), start_count - 1)
+
+        self.assertEqual(_translation_count(), start_count - 1)
 
 
 class UnitAPITest(APIBaseTest):
@@ -3908,6 +4259,11 @@ class MetricsAPITest(APIBaseTest):
         response = self.client.get(reverse("api:metrics"))
         self.assertEqual(response.data["projects"], 1)
 
+    def test_metrics_openmetrics(self) -> None:
+        self.authenticate()
+        response = self.client.get(reverse("api:metrics"), {"format": "openmetrics"})
+        self.assertContains(response, "# EOF")
+
     def test_forbidden(self) -> None:
         response = self.client.get(reverse("api:metrics"))
         self.assertEqual(response.data["detail"].code, "not_authenticated")
@@ -4210,7 +4566,7 @@ class AddonAPITest(APIBaseTest):
             request=request,
         )
 
-    def test_create_project_addon(self):
+    def test_create_project_addon(self) -> None:
         # Not authenticated user
         response = self.create_project_addon(code=403, superuser=False)
         self.assertFalse(self.component.project.addon_set.exists())
@@ -4225,7 +4581,7 @@ class AddonAPITest(APIBaseTest):
         # Existing
         response = self.create_project_addon(code=400)
 
-    def test_delete_project_addon(self):
+    def test_delete_project_addon(self) -> None:
         response = self.create_project_addon()
         self.do_request(
             "api:addon-detail",
@@ -4367,7 +4723,7 @@ class CategoryAPITest(APIBaseTest):
         for translation in response.data["results"]:
             self.do_request(translation["url"])
 
-    def test_statistics(self):
+    def test_statistics(self) -> None:
         # Create a category to get the statistics from
         response = self.create_category()
         category_kwargs = {"pk": response.data["id"]}
@@ -4378,7 +4734,9 @@ class CategoryAPITest(APIBaseTest):
 
 class LabelAPITest(APIBaseTest):
     def test_get_label(self) -> None:
-        label = self.component.project.label_set.create(name="test", color="navy")
+        label = self.component.project.label_set.create(
+            name="test", description="test description", color="navy"
+        )
 
         response = self.do_request(
             "api:project-labels",
@@ -4393,6 +4751,7 @@ class LabelAPITest(APIBaseTest):
 
         self.assertEqual(response_label["id"], label.id)
         self.assertEqual(response_label["name"], label.name)
+        self.assertEqual(response_label["description"], label.description)
         self.assertEqual(response_label["color"], label.color)
 
     def test_create_label(self) -> None:
@@ -4403,6 +4762,7 @@ class LabelAPITest(APIBaseTest):
             superuser=True,
             request={
                 "name": "Test Label",
+                "description": "Test description for Test Label",
                 "color": "green",
             },
             code=201,
@@ -4415,7 +4775,18 @@ class LabelAPITest(APIBaseTest):
             superuser=False,
             request={
                 "name": "Test Label 2",
+                "description": "Test description for Test Label 2",
                 "color": "red",
             },
             code=403,
         )
+
+
+class OpenAPITest(APIBaseTest):
+    def test_view(self) -> None:
+        self.do_request(
+            "api-schema",
+        )
+
+    def test_redoc(self) -> None:
+        self.do_request("redoc")

@@ -14,6 +14,106 @@ translation project or component. Add-ons can be also installed site-wide in :re
 
 .. image:: /screenshots/addons.webp
 
+Events that trigger add-ons
++++++++++++++++++++++++++++
+
+.. _addon-event-install:
+
+Add-on installation
+-------------------
+
+Triggered when add-on is being installed.
+
+.. _addon-event-component-update:
+
+Component update
+----------------
+
+Triggered whenever a change happens in a component such as:
+
+* Strings are changed in the repository.
+* A string is added.
+* A new translation is added.
+
+.. _addon-event-daily:
+
+Daily
+-----
+
+Triggered daily, but add-ons usually split the daily load between components depending on :setting:`BACKGROUND_TASKS`.
+
+.. _addon-event-repository-post-add:
+
+Repository post-add
+-------------------
+
+Triggered just after the new translation is added and committed.
+
+.. _addon-event-repository-post-commit:
+
+Repository post-commit
+----------------------
+
+Triggered just after the changes are committed.
+
+
+.. _addon-event-repository-post-push:
+
+Repository post-push
+--------------------
+
+Triggered just after the repository is pushed upstream.
+
+.. _addon-event-repository-post-update:
+
+Repository post-update
+----------------------
+
+Triggered whenever new changes are pulled from the upstream repository.
+
+.. _addon-event-repository-pre-commit:
+
+Repository pre-commit
+---------------------
+
+Triggered just before the changes are committed.
+
+.. _addon-event-repository-pre-push:
+
+Repository pre-push
+-------------------
+
+Triggered just before the repository is pushed upstream.
+
+.. _addon-event-repository-pre-update:
+
+Repository pre-update
+---------------------
+
+Triggered just before the repository update is attempted.
+
+.. _addon-event-storage-post-load:
+
+Storage post-load
+-----------------
+
+Triggered when file is parsed by Weblate.
+
+.. _addon-event-unit-post-save:
+
+Unit post-save
+--------------
+
+Triggered just after the string is saved.
+
+.. _addon-event-unit-pre-create:
+
+Unit pre-create
+---------------
+
+Triggered just after the newly created string is saved.
+
+
 Built-in add-ons
 ++++++++++++++++
 
@@ -46,6 +146,8 @@ Automatic translation
                 |                 |                                  | ``fuzzy`` -- Strings marked for edit                                                                 |
                 |                 |                                  |                                                                                                      |
                 |                 |                                  | ``check:inconsistent`` -- Failing check: Inconsistent                                                |
+                |                 |                                  |                                                                                                      |
+                |                 |                                  | ``check:translated`` -- Failing check: Has been translated                                           |
                 +-----------------+----------------------------------+------------------------------------------------------------------------------------------------------+
                 | ``auto_source`` | Source of automated translations | Available choices:                                                                                   |
                 |                 |                                  |                                                                                                      |
@@ -59,14 +161,9 @@ Automatic translation
                 +-----------------+----------------------------------+------------------------------------------------------------------------------------------------------+
                 | ``threshold``   | Score threshold                  |                                                                                                      |
                 +-----------------+----------------------------------+------------------------------------------------------------------------------------------------------+
-:Triggers: component update, daily
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-component-update`, :ref:`addon-event-daily`
 
 Automatically translates strings using machine translation or other components.
-
-It is triggered:
-
-* When new strings appear in a component.
-* Once in a month for every component, this can be configured using :setting:`BACKGROUND_TASKS`.
 
 .. seealso::
 
@@ -90,7 +187,7 @@ JavaScript localization CDN
                 +------------------+---------------------------------+-------------------------------------------------------------------------------------------+
                 | ``files``        | Extract strings from HTML files | List of filenames in current repository or remote URLs to parse for translatable strings. |
                 +------------------+---------------------------------+-------------------------------------------------------------------------------------------+
-:Triggers: daily, repository post-commit, repository post-update
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-daily`, :ref:`addon-event-repository-post-commit`, :ref:`addon-event-repository-post-update`
 
 Publishes translations into content delivery network for use in JavaScript or
 HTML localization.
@@ -128,7 +225,7 @@ Remove blank strings
 
 :Add-on ID: ``weblate.cleanup.blank``
 :Configuration: `This add-on has no configuration.`
-:Triggers: repository post-commit, repository post-update
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-repository-post-commit`, :ref:`addon-event-repository-post-update`
 
 Removes strings without a translation from translation files.
 
@@ -147,11 +244,15 @@ Cleanup translation files
 
 :Add-on ID: ``weblate.cleanup.generic``
 :Configuration: `This add-on has no configuration.`
-:Triggers: repository pre-commit, repository post-update
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-repository-post-update`, :ref:`addon-event-repository-pre-commit`
 
 Update all translation files to match the monolingual base file. For most file
 formats, this means removing stale translation keys no longer present in the
 base file.
+
+For formats containing additional content besides translation strings (such as
+:ref:`html`, :ref:`winrc`, or :ref:`odf`) this also brings the translation file
+in sync with the base file.
 
 .. seealso::
 
@@ -164,7 +265,7 @@ Add missing languages
 
 :Add-on ID: ``weblate.consistency.languages``
 :Configuration: `This add-on has no configuration.`
-:Triggers: daily, repository post-add
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-daily`, :ref:`addon-event-repository-post-add`
 
 Ensures a consistent set of languages is used for all components within a
 project.
@@ -206,7 +307,7 @@ Component discovery
                 +---------------------------+-----------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------+
                 | ``confirm``               | I confirm the above matches look correct                        |                                                                                                                                                             |
                 +---------------------------+-----------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------+
-:Triggers: repository post-update
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-repository-post-update`
 
 Automatically adds or removes project components based on file changes in the
 version control system.
@@ -360,13 +461,9 @@ Bulk edit
                 +-------------------+-----------------------------+-------------------------+
                 | ``remove_labels`` | Labels to remove            |                         |
                 +-------------------+-----------------------------+-------------------------+
-:Triggers: component update
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-component-update`
 
 Bulk edit flags, labels, or states of strings.
-
-Automate labeling by starting out with the search query ``NOT has:label``
-and add labels till all strings have all required labels.
-Other automated operations for Weblate metadata can also be done.
 
 **Examples:**
 
@@ -387,6 +484,14 @@ Other automated operations for Weblate metadata can also be done.
       - ``read-only``
 
 
+.. list-table:: Marking certain strings read-only
+    :stub-columns: 1
+
+    * - Search query
+      - ``source:r"^\`\`[.a-zA-Z0-9_-]*\`\`$" AND language:en``
+    * - Translation flags to add
+      - ``read-only``
+
 .. seealso::
 
    :ref:`bulk-edit`,
@@ -401,7 +506,7 @@ Flag unchanged translations as "Needs editing"
 
 :Add-on ID: ``weblate.flags.same_edit``
 :Configuration: `This add-on has no configuration.`
-:Triggers: unit post-create
+:Triggers: :ref:`addon-event-unit-pre-create`
 
 Whenever a new translatable string is imported from the VCS and it matches a
 source string, it is flagged as needing editing in Weblate. Especially useful
@@ -423,7 +528,7 @@ Flag new source strings as "Needs editing"
 
 :Add-on ID: ``weblate.flags.source_edit``
 :Configuration: `This add-on has no configuration.`
-:Triggers: unit post-create
+:Triggers: :ref:`addon-event-unit-pre-create`
 
 Whenever a new source string is imported from the VCS, it is flagged as needing
 editing in Weblate. This way you can easily filter and edit source strings
@@ -440,7 +545,7 @@ Flag new translations as "Needs editing"
 
 :Add-on ID: ``weblate.flags.target_edit``
 :Configuration: `This add-on has no configuration.`
-:Triggers: unit post-create
+:Triggers: :ref:`addon-event-unit-pre-create`
 
 Whenever a new translatable string is imported from the VCS, it is flagged as
 needing editing in Weblate. This way you can easily filter and edit
@@ -459,7 +564,7 @@ Fill read-only strings with source
 
 :Add-on ID: ``weblate.generate.fill_read_only``
 :Configuration: `This add-on has no configuration.`
-:Triggers: component update, daily
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-component-update`, :ref:`addon-event-daily`
 
 Fills in translation of read-only strings with source string.
 
@@ -474,7 +579,7 @@ Statistics generator
                 +--------------+---------------------------+--+
                 | ``template`` | Content of generated file |  |
                 +--------------+---------------------------+--+
-:Triggers: repository pre-commit
+:Triggers: :ref:`addon-event-repository-pre-commit`
 
 Generates a file containing detailed info about the translation status.
 
@@ -510,7 +615,7 @@ Prefill translation with source
 
 :Add-on ID: ``weblate.generate.prefill``
 :Configuration: `This add-on has no configuration.`
-:Triggers: component update, daily
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-component-update`, :ref:`addon-event-daily`
 
 Fills in translation strings with source string.
 
@@ -543,7 +648,7 @@ Pseudolocale generation
                 +----------------------+---------------------------+------------------------------------------------------------------------------------------+
                 | ``include_readonly`` | Include read-only strings |                                                                                          |
                 +----------------------+---------------------------+------------------------------------------------------------------------------------------+
-:Triggers: component update, daily
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-component-update`, :ref:`addon-event-daily`
 
 Generates a translation by adding prefix and suffix to source strings
 automatically.
@@ -595,7 +700,7 @@ Contributors in comment
 
 :Add-on ID: ``weblate.gettext.authors``
 :Configuration: `This add-on has no configuration.`
-:Triggers: repository pre-commit
+:Triggers: :ref:`addon-event-repository-pre-commit`
 
 Updates the comment part of the PO file header to include contributor names and
 years of contributions.
@@ -616,7 +721,7 @@ Update ALL_LINGUAS variable in the "configure" file
 
 :Add-on ID: ``weblate.gettext.configure``
 :Configuration: `This add-on has no configuration.`
-:Triggers: repository post-add, daily
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-daily`, :ref:`addon-event-repository-post-add`
 
 Updates the ALL_LINGUAS variable in :file:`configure`, :file:`configure.in` or any
 :file:`configure.ac` files, when a new translation is added.
@@ -638,7 +743,7 @@ Customize gettext output
                 |           |                     |                                                                                                                                   |
                 |           |                     | ``-1`` -- No line wrapping                                                                                                        |
                 +-----------+---------------------+-----------------------------------------------------------------------------------------------------------------------------------+
-:Triggers: storage post-load
+:Triggers: :ref:`addon-event-storage-post-load`
 
 Allows customization of gettext output behavior, for example line wrapping.
 
@@ -661,7 +766,7 @@ Update LINGUAS file
 
 :Add-on ID: ``weblate.gettext.linguas``
 :Configuration: `This add-on has no configuration.`
-:Triggers: repository post-add, daily
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-daily`, :ref:`addon-event-repository-post-add`
 
 Updates the LINGUAS file when a new translation is added.
 
@@ -676,7 +781,7 @@ Generate MO files
                 +-----------+---------------------------------+----------------------------------------------------------------------------------+
                 | ``fuzzy`` | Include strings needing editing | Strings needing editing (fuzzy) are typically not ready for use as translations. |
                 +-----------+---------------------------------+----------------------------------------------------------------------------------+
-:Triggers: repository pre-commit
+:Triggers: :ref:`addon-event-repository-pre-commit`
 
 Automatically generates a MO file for every changed PO file.
 
@@ -685,7 +790,7 @@ The location of the generated MO file can be customized and the field for it use
 .. note::
 
    If a translation is removed, its PO file will be deleted from the
-   repository, but the MO file generated by this add-on will not.  The MO file
+   repository, but the MO file generated by this add-on will not. The MO file
    must be removed from the upstream manually.
 
 
@@ -702,12 +807,11 @@ Update PO files to match POT (msgmerge)
                 +-----------------+--------------------------------------------+--+
                 | ``fuzzy``       | Use fuzzy matching                         |  |
                 +-----------------+--------------------------------------------+--+
-:Triggers: repository post-update
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-repository-post-update`
 
 Updates all PO files (as configured by :ref:`component-filemask`) to match the
 POT file (as configured by :ref:`component-new_base`) using :program:`msgmerge`.
 
-Triggered whenever new changes are pulled from the upstream repository.
 Most msgmerge command-line options can be set up through the add-on
 configuration.
 
@@ -736,7 +840,7 @@ Squash Git commits
                 +---------------------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
                 | ``commit_message``  | Commit message                             | This commit message will be used instead of the combined commit messages from the squashed commits.                                                               |
                 +---------------------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-:Triggers: repository post-commit
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-repository-post-commit`
 
 Squash Git commits prior to pushing changes.
 
@@ -775,7 +879,7 @@ Customize JSON output
                 |               |                        |                      |
                 |               |                        | ``tabs`` -- Tabs     |
                 +---------------+------------------------+----------------------+
-:Triggers: storage post-load
+:Triggers: :ref:`addon-event-storage-post-load`
 
 Allows adjusting JSON output behavior, for example indentation or sorting.
 
@@ -785,8 +889,10 @@ Format the Java properties file
 -------------------------------
 
 :Add-on ID: ``weblate.properties.sort``
-:Configuration: `This add-on has no configuration.`
-:Triggers: repository pre-commit
+:Configuration: +--------------------+-----------------------------------+--+
+                | ``case_sensitive`` | Enable case-sensitive key sorting |  |
+                +--------------------+-----------------------------------+--+
+:Triggers: :ref:`addon-event-repository-pre-commit`
 
 Formats and sorts the Java properties file.
 
@@ -805,7 +911,7 @@ Stale comment removal
 :Configuration: +---------+--------------+--+
                 | ``age`` | Days to keep |  |
                 +---------+--------------+--+
-:Triggers: daily
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-daily`
 
 Set a timeframe for removal of comments.
 
@@ -824,7 +930,7 @@ Stale suggestion removal
                 +-----------+------------------+-------------------------------------------------------------------------+
                 | ``votes`` | Voting threshold | Threshold for removal. This field has no effect with voting turned off. |
                 +-----------+------------------+-------------------------------------------------------------------------+
-:Triggers: daily
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-daily`
 
 Set a timeframe for removal of suggestions.
 
@@ -839,7 +945,7 @@ Update RESX files
 
 :Add-on ID: ``weblate.resx.update``
 :Configuration: `This add-on has no configuration.`
-:Triggers: repository post-update
+:Triggers: :ref:`addon-event-install`, :ref:`addon-event-repository-post-update`
 
 Update all translation files to match the monolingual upstream base file.
 Unused strings are removed, and new ones added as copies of the source string.
@@ -864,7 +970,7 @@ Customize XML output
 :Configuration: +------------------+----------------------------------------+--+
                 | ``closing_tags`` | Include closing tag for blank XML tags |  |
                 +------------------+----------------------------------------+--+
-:Triggers: storage post-load
+:Triggers: :ref:`addon-event-storage-post-load`
 
 Allows adjusting XML output behavior, for example closing tags.
 
@@ -897,7 +1003,7 @@ Customize YAML output
                 |                |                     |                                    |
                 |                |                     | ``mac`` -- MAC (\\r)               |
                 +----------------+---------------------+------------------------------------+
-:Triggers: storage post-load
+:Triggers: :ref:`addon-event-storage-post-load`
 
 Allows adjusting YAML output behavior, for example line-length or newlines.
 

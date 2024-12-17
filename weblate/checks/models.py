@@ -2,7 +2,10 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 import json
+from typing import TYPE_CHECKING
 
 from appconf import AppConf
 from django.db import models
@@ -11,8 +14,17 @@ from django.utils.functional import cached_property
 
 from weblate.utils.classloader import ClassLoader
 
+from .base import BaseCheck
+
+if TYPE_CHECKING:
+    from weblate.auth.models import User
+    from weblate.trans.models import Unit
+
 
 class ChecksLoader(ClassLoader):
+    def __init__(self) -> None:
+        super().__init__("CHECK_LIST", base_class=BaseCheck)
+
     @cached_property
     def source(self):
         return {k: v for k, v in self.items() if v.source}
@@ -21,9 +33,13 @@ class ChecksLoader(ClassLoader):
     def target(self):
         return {k: v for k, v in self.items() if v.target}
 
+    @cached_property
+    def glossary(self):
+        return {k: v for k, v in self.items() if v.glossary}
+
 
 # Initialize checks list
-CHECKS = ChecksLoader("CHECK_LIST")
+CHECKS = ChecksLoader()
 
 
 class WeblateChecksConf(AppConf):
@@ -94,6 +110,7 @@ class WeblateChecksConf(AppConf):
         "weblate.checks.source.LongUntranslatedCheck",
         "weblate.checks.format.MultipleUnnamedFormatsCheck",
         "weblate.checks.glossary.GlossaryCheck",
+        "weblate.checks.glossary.ProhibitedInitialCharacterCheck",
         "weblate.checks.fluent.syntax.FluentSourceSyntaxCheck",
         "weblate.checks.fluent.syntax.FluentTargetSyntaxCheck",
         "weblate.checks.fluent.parts.FluentPartsCheck",
@@ -107,7 +124,7 @@ class WeblateChecksConf(AppConf):
 
 
 class CheckQuerySet(models.QuerySet):
-    def filter_access(self, user):
+    def filter_access(self, user: User):
         result = self
         if user.needs_project_filter:
             result = result.filter(
@@ -139,7 +156,7 @@ class Check(models.Model):
         return str(self.get_name())
 
     @cached_property
-    def check_obj(self):
+    def check_obj(self) -> BaseCheck | None:
         try:
             return CHECKS[self.name]
         except KeyError:
@@ -181,7 +198,7 @@ class Check(models.Model):
         self.unit.translation.invalidate_cache()
 
 
-def get_display_checks(unit):
+def get_display_checks(unit: Unit):
     check_objects = {check.name: check for check in unit.all_checks}
     for check, check_obj in CHECKS.target.items():
         if check_obj.should_display(unit):

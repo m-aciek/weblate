@@ -32,10 +32,12 @@ class DeepLTranslation(
     # better than other ones.
     max_score = 91
     language_map = {
-        "zh_hans": "zh",
+        "zh_Hans": "zh",
+        "zh_Hant": "",  # Traditional Chinese not supported but would map to zh
         "pt": "pt-pt",
+        "pt@formal": "pt-pt@formal",
+        "pt@informal": "pt-pt@informal",
     }
-    force_uncleanup = True
     hightlight_syntax = True
     settings_form = DeepLMachineryForm
     glossary_count_limit = 1000
@@ -112,6 +114,8 @@ class DeepLTranslation(
             "tag_handling": "xml",
             "ignore_tags": ["x"],
         }
+        if context := self.settings.get("context", ""):
+            params["context"] = context
         if language.endswith("@FORMAL"):
             params["target_lang"] = language[:-7]
             params["formality"] = "more"
@@ -140,20 +144,23 @@ class DeepLTranslation(
         return result
 
     def format_replacement(
-        self, h_start: int, h_end: int, h_text: str, h_kind: None | Unit
+        self, h_start: int, h_end: int, h_text: str, h_kind: Unit | None
     ) -> str:
         """Generate a single replacement."""
         return f'<x id="{h_start}"></x>'
 
     def is_glossary_supported(self, source_language: str, target_language: str) -> bool:
         cache_key = self.get_cache_key("glossary_languages")
-        languages = cache.get(cache_key)
-        if languages is None:
+        languages_cache = cache.get(cache_key)
+        if languages_cache is not None:
+            # hiredis-py 3 makes list from set
+            languages = set(languages_cache)
+        else:
             response = self.request("get", self.get_api_url("glossary-language-pairs"))
-            languages = [
+            languages = {
                 (support["source_lang"].upper(), support["target_lang"].upper())
                 for support in response.json()["supported_languages"]
-            ]
+            }
 
             cache.set(cache_key, languages, 24 * 3600)
 

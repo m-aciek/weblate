@@ -1,9 +1,11 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
 import json
 import re
+from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse
 
 from django.conf import settings
@@ -17,11 +19,15 @@ from django.http import (
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
+from weblate.auth.models import AuthenticatedHttpRequest
 from weblate.logger import LOGGER
 from weblate.trans.models import Change, Component, Project
 from weblate.trans.tasks import perform_update
 from weblate.utils.errors import report_error
 from weblate.utils.views import parse_path
+
+if TYPE_CHECKING:
+    from weblate.auth.models import AuthenticatedHttpRequest
 
 BITBUCKET_GIT_REPOS = (
     "ssh://git@{server}/{full_name}.git",
@@ -86,7 +92,7 @@ def register_hook(handler):
 
 
 @csrf_exempt
-def update(request, path):
+def update(request: AuthenticatedHttpRequest, path):
     """Update git repository API hook."""
     if not settings.ENABLE_HOOKS:
         return HttpResponseNotAllowed([])
@@ -99,7 +105,7 @@ def update(request, path):
     return hook_response()
 
 
-def parse_hook_payload(request):
+def parse_hook_payload(request: AuthenticatedHttpRequest):
     """
     Parse hook payload.
 
@@ -112,7 +118,7 @@ def parse_hook_payload(request):
 
 @require_POST
 @csrf_exempt
-def vcs_service_hook(request, service):
+def vcs_service_hook(request: AuthenticatedHttpRequest, service):
     """
     Shared code between VCS service hooks.
 
@@ -127,7 +133,8 @@ def vcs_service_hook(request, service):
     try:
         hook_helper = HOOK_HANDLERS[service]
     except KeyError as exc:
-        raise Http404(f"Hook {service} not supported") from exc
+        msg = f"Hook {service} not supported"
+        raise Http404(msg) from exc
 
     # Check if we got payload
     try:
@@ -143,7 +150,7 @@ def vcs_service_hook(request, service):
         service_data = hook_helper(data, request)
     except Exception:
         LOGGER.error("failed to parse service %s data", service)
-        report_error()
+        report_error("Invalid service data")
         return HttpResponseBadRequest("Invalid data in json payload!")
 
     # This happens on ping request upon installation
@@ -265,7 +272,8 @@ def bitbucket_extract_full_name(repository):
         return "{}/{}".format(repository["owner"], repository["slug"])
     if "project" in repository and "slug" in repository:
         return "{}/{}".format(repository["project"]["key"], repository["slug"])
-    raise ValueError("Could not determine repository full name")
+    msg = "Could not determine repository full name"
+    raise ValueError(msg)
 
 
 def bitbucket_extract_repo_url(data, repository):
@@ -275,11 +283,12 @@ def bitbucket_extract_repo_url(data, repository):
         return repository["links"]["self"][0]["href"]
     if "canon_url" in data:
         return "{}{}".format(data["canon_url"], repository["absolute_url"])
-    raise ValueError("Could not determine repository URL")
+    msg = "Could not determine repository URL"
+    raise ValueError(msg)
 
 
 @register_hook
-def bitbucket_hook_helper(data, request):
+def bitbucket_hook_helper(data, request: AuthenticatedHttpRequest):
     """Parse service hook from Bitbucket."""
     # Bitbucket ping event
     if request and request.headers.get("x-event-key") not in {
@@ -320,7 +329,8 @@ def bitbucket_hook_helper(data, request):
 
     if not repos:
         LOGGER.error("unsupported repository: %s", repr(data["repository"]))
-        raise ValueError("unsupported repository")
+        msg = "unsupported repository"
+        raise ValueError(msg)
 
     return {
         "service_long_name": "Bitbucket",
@@ -332,7 +342,7 @@ def bitbucket_hook_helper(data, request):
 
 
 @register_hook
-def github_hook_helper(data, request):
+def github_hook_helper(data, request: AuthenticatedHttpRequest):
     """Parse hooks from GitHub."""
     # Ignore non push events
     if request and request.headers.get("x-github-event") != "push":
@@ -369,7 +379,7 @@ def github_hook_helper(data, request):
 
 
 @register_hook
-def gitea_hook_helper(data, request):
+def gitea_hook_helper(data, request: AuthenticatedHttpRequest):
     return {
         "service_long_name": "Gitea",
         "repo_url": data["repository"]["html_url"],
@@ -384,7 +394,7 @@ def gitea_hook_helper(data, request):
 
 
 @register_hook
-def gitee_hook_helper(data, request):
+def gitee_hook_helper(data, request: AuthenticatedHttpRequest):
     return {
         "service_long_name": "Gitee",
         "repo_url": data["repository"]["html_url"],
@@ -401,7 +411,7 @@ def gitee_hook_helper(data, request):
 
 
 @register_hook
-def gitlab_hook_helper(data, request):
+def gitlab_hook_helper(data, request: AuthenticatedHttpRequest):
     """Parse hook from GitLab."""
     # Ignore non known events
     if "ref" not in data:
@@ -419,8 +429,7 @@ def gitlab_hook_helper(data, request):
         data["repository"]["homepage"],
     ]
     full_name = ssh_url.split(":", 1)[1]
-    if full_name.endswith(".git"):
-        full_name = full_name[:-4]
+    full_name = full_name.removesuffix(".git")
 
     return {
         "service_long_name": "GitLab",
@@ -432,7 +441,7 @@ def gitlab_hook_helper(data, request):
 
 
 @register_hook
-def pagure_hook_helper(data, request):
+def pagure_hook_helper(data, request: AuthenticatedHttpRequest):
     """Parse hook from Pagure."""
     # Ignore non known events
     if "msg" not in data or data.get("topic") != "git.receive":
@@ -460,7 +469,7 @@ def expand_quoted(name: str):
 
 
 @register_hook
-def azure_hook_helper(data, request):
+def azure_hook_helper(data, request: AuthenticatedHttpRequest):
     if data.get("eventType") != "git.push":
         return None
 

@@ -18,6 +18,7 @@ from lxml import html
 from weblate.addons.events import AddonEvent
 from weblate.addons.models import Addon, handle_addon_event
 from weblate.lang.models import Language
+from weblate.trans.exceptions import FileParseError
 from weblate.trans.models import Component, Project
 from weblate.utils.celery import app
 from weblate.utils.hash import calculate_checksum
@@ -104,16 +105,21 @@ def language_consistency(
             )
             if new_lang is None:
                 component.log_warning(
-                    "could not add %s language for language consistency", language
+                    "could not add %s language for language consistency: %s",
+                    language,
+                    component.new_lang_error_message,
                 )
             else:
                 new_lang.log_info("added for language consistency")
-        component.create_translations()
+        try:
+            component.create_translations_task()
+        except FileParseError as error:
+            component.log_error("could not parse translation files: %s", error)
 
 
 @app.task(trail=False)
 def daily_addons(modulo: bool = True) -> None:
-    def daily_callback(addon, component) -> None:
+    def daily_callback(addon: Addon, component: Component) -> None:
         addon.addon.daily(component)
 
     today = timezone.now()

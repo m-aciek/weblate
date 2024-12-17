@@ -8,10 +8,10 @@ import warnings
 from gettext import c2py
 from io import StringIO
 from itertools import chain
-from unittest import SkipTest
 
 from django.core.management import call_command
 from django.test import TestCase
+from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils.translation import activate
 from weblate_language_data.aliases import ALIASES
@@ -61,7 +61,7 @@ TEST_LANGUAGES = (
         "ltr",
         "n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && "
         "(n%100<10 || n%100>=20) ? 1 : 2",
-        "Serbian (latin)",
+        "Serbian (Latin script)",
         False,
     ),
     (
@@ -70,7 +70,7 @@ TEST_LANGUAGES = (
         "ltr",
         "n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && "
         "(n%100<10 || n%100>=20) ? 1 : 2",
-        "Serbian (latin)",
+        "Serbian (Latin script)",
         False,
     ),
     (
@@ -79,7 +79,7 @@ TEST_LANGUAGES = (
         "ltr",
         "n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && "
         "(n%100<10 || n%100>=20) ? 1 : 2",
-        "Serbian (latin)",
+        "Serbian (Latin script)",
         False,
     ),
     (
@@ -88,7 +88,7 @@ TEST_LANGUAGES = (
         "ltr",
         "n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && "
         "(n%100<10 || n%100>=20) ? 1 : 2",
-        "Serbian (latin)",
+        "Serbian (Latin script)",
         False,
     ),
     (
@@ -100,20 +100,34 @@ TEST_LANGUAGES = (
         True,
     ),
     ("en_CZ", "en_CZ", "ltr", "n != 1", "English (en_CZ)", True),
-    ("zh_CN", "zh_Hans", "ltr", "0", "Chinese (Simplified)", False),
-    ("zh-CN", "zh_Hans", "ltr", "0", "Chinese (Simplified)", False),
-    ("zh_HANT", "zh_Hant", "ltr", "0", "Chinese (Traditional)", False),
-    ("zh-HANT", "zh_Hant", "ltr", "0", "Chinese (Traditional)", False),
-    ("zh-CN@test", "zh_CN@test", "ltr", "0", "Chinese (Simplified) (zh_CN@test)", True),
-    ("zh-rCN", "zh_Hans", "ltr", "0", "Chinese (Simplified)", False),
-    ("zh_rCN", "zh_Hans", "ltr", "0", "Chinese (Simplified)", False),
-    ("zh_HK", "zh_Hant_HK", "ltr", "0", "Chinese (Traditional, Hong Kong)", False),
+    ("zh_CN", "zh_Hans", "ltr", "0", "Chinese (Simplified Han script)", False),
+    ("zh-CN", "zh_Hans", "ltr", "0", "Chinese (Simplified Han script)", False),
+    ("zh_HANT", "zh_Hant", "ltr", "0", "Chinese (Traditional Han script)", False),
+    ("zh-HANT", "zh_Hant", "ltr", "0", "Chinese (Traditional Han script)", False),
+    (
+        "zh-CN@test",
+        "zh_CN@test",
+        "ltr",
+        "0",
+        "Chinese (Simplified Han script) (zh_CN@test)",
+        True,
+    ),
+    ("zh-rCN", "zh_Hans", "ltr", "0", "Chinese (Simplified Han script)", False),
+    ("zh_rCN", "zh_Hans", "ltr", "0", "Chinese (Simplified Han script)", False),
+    (
+        "zh_HK",
+        "zh_Hant_HK",
+        "ltr",
+        "0",
+        "Chinese (Traditional Han script, Hong Kong)",
+        False,
+    ),
     (
         "zh_Hant-rHK",
         "zh_Hant_HK",
         "ltr",
         "0",
-        "Chinese (Traditional, Hong Kong)",
+        "Chinese (Traditional Han script, Hong Kong)",
         False,
     ),
     (
@@ -153,7 +167,7 @@ TEST_LANGUAGES = (
         "zh_Hant_HK",
         "ltr",
         "0",
-        "Chinese (Traditional, Hong Kong)",
+        "Chinese (Traditional Han script, Hong Kong)",
         False,
     ),
     (
@@ -277,7 +291,7 @@ class BasicLanguagesTest(TestCase):
             )
 
 
-class TestSequenceMeta(type):
+class LanguageTestSequenceMeta(type):
     def __new__(mcs, name, bases, dict):  # noqa: N804, A002
         def gen_test(original, expected, direction, plural, name, create):
             def test(self) -> None:
@@ -290,13 +304,14 @@ class TestSequenceMeta(type):
                 params[0].replace("@", "___").replace("+", "_").replace("-", "__")
             )
             if test_name in dict:
-                raise ValueError(f"Duplicate test: {params[0]}, mapped to {test_name}")
+                msg = f"Duplicate test: {params[0]}, mapped to {test_name}"
+                raise ValueError(msg)
             dict[test_name] = gen_test(*params)
 
         return type.__new__(mcs, name, bases, dict)
 
 
-class LanguagesTest(BaseTestCase, metaclass=TestSequenceMeta):
+class LanguagesTest(BaseTestCase, metaclass=LanguageTestSequenceMeta):
     def setUp(self) -> None:
         # Ensure we're using English
         activate("en")
@@ -361,7 +376,7 @@ class LanguagesTest(BaseTestCase, metaclass=TestSequenceMeta):
     def test_case_sensitive_fuzzy_get(self) -> None:
         """Test handling of manually created zh-TW, zh-TW and zh_TW languages."""
         if not using_postgresql():
-            raise SkipTest("Not supported on MySQL")
+            self.skipTest("Not supported on MySQL")
 
         language = Language.objects.create(code="zh_TW", name="Chinese (Taiwan)")
         language.plural_set.create(
@@ -394,6 +409,8 @@ class CommandTest(BaseTestCase):
     def test_setuplang(self) -> None:
         call_command("setuplang")
         self.assertTrue(Language.objects.exists())
+        with self.assertNumQueries(3):
+            call_command("setuplang")
 
     def test_setuplang_noupdate(self) -> None:
         call_command("setuplang", update=False)
@@ -685,7 +702,7 @@ class PluralMapperTestCase(FixtureTestCase):
         english = Language.objects.get(code="en")
         czech = Language.objects.get(code="cs")
         mapper = PluralMapper(english.plural, czech.plural)
-        self.assertEqual(mapper._target_map, ((0, None), (None, None), (-1, None)))
+        self.assertEqual(mapper.target_map, ((0, None), (None, None), (-1, None)))
         unit = Unit.objects.get(
             translation__language=english, id_hash=2097404709965985808
         )
@@ -698,7 +715,7 @@ class PluralMapperTestCase(FixtureTestCase):
         russian = Language.objects.get(code="ru")
         english = Language.objects.get(code="en")
         mapper = PluralMapper(russian.plural, english.plural)
-        self.assertEqual(mapper._target_map, ((0, "1"), (-1, None)))
+        self.assertEqual(mapper.target_map, ((0, 1), (-1, None)))
         # Use English here to test incomplete plural set in the source string
         unit = Unit.objects.get(
             translation__language=english, id_hash=2097404709965985808
@@ -712,7 +729,7 @@ class PluralMapperTestCase(FixtureTestCase):
         russian = Language.objects.get(code="ru")
         english = Language.objects.get(code="en")
         mapper = PluralMapper(russian.plural, english.plural)
-        self.assertEqual(mapper._target_map, ((0, "1"), (-1, None)))
+        self.assertEqual(mapper.target_map, ((0, 1), (-1, None)))
         # Use English here to test incomplete plural set in the source string
         unit = Unit.objects.get(
             translation__language=english, id_hash=2097404709965985808
@@ -728,7 +745,7 @@ class PluralMapperTestCase(FixtureTestCase):
         russian = Language.objects.get(code="ru")
         english = Language.objects.get(code="en")
         mapper = PluralMapper(russian.plural, english.plural)
-        self.assertEqual(mapper._target_map, ((0, "1"), (-1, None)))
+        self.assertEqual(mapper.target_map, ((0, 1), (-1, None)))
         # Use English here to test incomplete plural set in the source string
         unit = Unit.objects.get(
             translation__language=english, id_hash=2097404709965985808
@@ -747,7 +764,7 @@ class PluralMapperTestCase(FixtureTestCase):
         russian = Language.objects.get(code="ru")
         english = Language.objects.get(code="en")
         mapper = PluralMapper(russian.plural, english.plural)
-        self.assertEqual(mapper._target_map, ((0, "1"), (-1, None)))
+        self.assertEqual(mapper.target_map, ((0, 1), (-1, None)))
         unit = Unit.objects.get(
             translation__language=english, id_hash=2097404709965985808
         )
@@ -757,3 +774,13 @@ class PluralMapperTestCase(FixtureTestCase):
             mapper.map(unit),
             ["{{periodNumber}}-я четверть", "{{periodNumber}}-я четверть"],
         )
+
+    def test_arabic_aliases(self) -> None:
+        arabic = Language.objects.get(code="ar")
+        self.assertEqual(arabic.get_aliases_names(), ["ar_aa", "ar_ar", "ara", "arb"])
+        with override_settings(SIMPLIFY_LANGUAGES=True):
+            self.assertEqual(
+                arabic.get_aliases_names(), ["ar_aa", "ar_ar", "ara", "arb"]
+            )
+        with override_settings(SIMPLIFY_LANGUAGES=False):
+            self.assertEqual(arabic.get_aliases_names(), ["ar_ar", "ara", "arb"])

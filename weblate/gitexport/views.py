@@ -1,7 +1,6 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-
 from __future__ import annotations
 
 import os.path
@@ -20,12 +19,12 @@ from django.urls import reverse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 
-from weblate.auth.models import User
-from weblate.gitexport.models import SUPPORTED_VCS
+from weblate.auth.models import AuthenticatedHttpRequest, User
 from weblate.gitexport.utils import find_git_http_backend
 from weblate.trans.models import Component
 from weblate.utils.errors import report_error
 from weblate.utils.views import parse_path
+from weblate.vcs.models import VCS_REGISTRY
 
 
 def response_authenticate():
@@ -35,7 +34,7 @@ def response_authenticate():
     return response
 
 
-def authenticate(request, auth) -> bool:
+def authenticate(request: AuthenticatedHttpRequest, auth) -> bool:
     """Perform authentication with HTTP Basic auth."""
     try:
         method, data = auth.split(None, 1)
@@ -61,7 +60,7 @@ def authenticate(request, auth) -> bool:
 
 @never_cache
 @csrf_exempt
-def git_export(request, path, git_request):
+def git_export(request: AuthenticatedHttpRequest, path, git_request):
     """
     Git HTTP server view.
 
@@ -70,7 +69,8 @@ def git_export(request, path, git_request):
     """
     # Reject non pull access early
     if request.GET.get("service", "") not in {"", "git-upload-pack"}:
-        raise PermissionDenied("Only pull is supported")
+        msg = "Only pull is supported"
+        raise PermissionDenied(msg)
 
     # HTTP authentication
     auth = request.headers.get("authorization", b"")
@@ -91,9 +91,11 @@ def git_export(request, path, git_request):
     if not request.user.has_perm("vcs.access", obj):
         if not request.user.is_authenticated:
             return response_authenticate()
-        raise PermissionDenied("No VCS permissions")
-    if obj.vcs not in SUPPORTED_VCS:
-        raise Http404("Not a git repository")
+        msg = "No VCS permissions"
+        raise PermissionDenied(msg)
+    if obj.vcs not in VCS_REGISTRY.git_based:
+        msg = "Not a git repository"
+        raise Http404(msg)
     if obj.is_repo_link:
         return redirect(
             "{}?{}".format(
@@ -114,8 +116,22 @@ def git_export(request, path, git_request):
     return wrapper.get_response()
 
 
+class GitStreamingHttpResponse(StreamingHttpResponse):
+    def __init__(self, streaming_content, *args, **kwargs) -> None:
+        super().__init__(streaming_content.stream(), *args, **kwargs)
+        self.wrapper = streaming_content
+
+    def close(self) -> None:
+        if self.wrapper.process.poll() is None:
+            self.wrapper.process.kill()
+        self.wrapper.process.wait()
+        super().close()
+
+
 class GitHTTPBackendWrapper:
-    def __init__(self, obj, request, git_request: str) -> None:
+    def __init__(
+        self, obj, request: AuthenticatedHttpRequest, git_request: str
+    ) -> None:
         self.path = os.path.join(obj.full_path, git_request)
         self.obj = obj
         self.request = request
@@ -127,7 +143,8 @@ class GitHTTPBackendWrapper:
         # Find Git HTTP backend
         git_http_backend = find_git_http_backend()
         if git_http_backend is None:
-            raise SuspiciousOperation("git-http-backend not found")
+            msg = "git-http-backend not found"
+            raise SuspiciousOperation(msg)
 
         # Invoke Git HTTP backend
         self.process = subprocess.Popen(
@@ -186,8 +203,8 @@ class GitHTTPBackendWrapper:
 
     def get_response(self):
         # Iniciate select()
-        stdout = cast(BinaryIO, self.process.stdout)
-        stderr = cast(BinaryIO, self.process.stderr)
+        stdout = cast("BinaryIO", self.process.stdout)
+        stderr = cast("BinaryIO", self.process.stderr)
         self.selector.register(stdout, EVENT_READ, True)
         self.selector.register(stderr, EVENT_READ, False)
 
@@ -209,7 +226,7 @@ class GitHTTPBackendWrapper:
         # Log error
         if output_err:
             report_error(
-                cause="Git backend failure",
+                "Git backend failure",
                 extra_log=output_err,
                 project=self.obj.project,
                 level="error",
@@ -217,16 +234,17 @@ class GitHTTPBackendWrapper:
             )
 
         # Handle failure
-        if retcode:
+        if retcode is not None and retcode != 0:
             return HttpResponseServerError(output_err)
 
         message = message_from_string(self._headers.decode())
 
         # Handle status in response
         if "status" in message:
+            self.process.wait()
             return HttpResponse(status=int(message["status"].split()[0]))
 
         # Send streaming content as response
-        return StreamingHttpResponse(
-            streaming_content=self.stream(), content_type=message["content-type"]
+        return GitStreamingHttpResponse(
+            streaming_content=self, content_type=message["content-type"]
         )

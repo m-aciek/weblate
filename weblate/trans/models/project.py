@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import os.path
+from collections import UserDict
 from datetime import datetime
 from operator import itemgetter
 from typing import TYPE_CHECKING
@@ -14,14 +15,14 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
-from django.db.models import Count, Q, Value
+from django.db.models import Count, F, Q, Value
 from django.db.models.functions import Replace
 from django.urls import reverse
 from django.utils.functional import cached_property
 from django.utils.timezone import make_aware
 from django.utils.translation import gettext_lazy, gettext_noop
 
-from weblate.configuration.models import Setting
+from weblate.configuration.models import Setting, SettingCategory
 from weblate.formats.models import FILE_FORMATS
 from weblate.lang.models import Language
 from weblate.memory.tasks import import_memory
@@ -39,20 +40,49 @@ from weblate.utils.validators import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from weblate.auth.models import User
     from weblate.trans.backups import BackupListDict
+    from weblate.trans.models.component import Component
     from weblate.trans.models.label import Label
     from weblate.trans.models.translation import TranslationQuerySet
 
 
-class ProjectLanguageFactory(dict):
+class ProjectLanguageFactory(UserDict):
     def __init__(self, project: Project) -> None:
+        super().__init__()
         self._project = project
 
-    def __missing__(self, key: Language):
-        return ProjectLanguage(self._project, key)
+    def __getitem__(self, key: Language):
+        try:
+            return super().__getitem__(key.id)
+        except KeyError:
+            self[key.id] = result = ProjectLanguage(self._project, key)
+            return result
 
     def preload(self):
         return [self[language] for language in self._project.languages]
+
+    def preload_workflow_settings(self):
+        from weblate.trans.models.workflow import WorkflowSetting
+
+        instances = self.preload()
+
+        pending = {instance.language.id: instance for instance in instances}
+
+        for setting in WorkflowSetting.objects.filter(
+            Q(project=None) | Q(project=self._project),
+            language__in=[instance.language for instance in instances],
+        ).order_by(F("project").desc(nulls_last=True)):
+            if setting.language_id not in pending:
+                continue
+            pending[setting.language_id].__dict__["workflow_settings"] = setting
+            del pending[setting.language_id]
+
+        # Indicate that there is no setting
+        for instance in pending.values():
+            instance.__dict__["workflow_settings"] = None
 
 
 class ProjectQuerySet(models.QuerySet):
@@ -185,6 +215,13 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
             "in the documentation."
         ),
     )
+    enforced_2fa = models.BooleanField(
+        verbose_name=gettext_lazy("Enforced two-factor authentication"),
+        default=False,
+        help_text=gettext_lazy(
+            "Requires contributors to have two-factor authentication configured before being able to contribute."
+        ),
+    )
     # This should match definition in WorkflowSetting
     translation_review = models.BooleanField(
         verbose_name=gettext_lazy("Enable reviews"),
@@ -223,6 +260,9 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
     settings_permission = "project.edit"
 
     objects = ProjectQuerySet.as_manager()
+
+    # Used when updating for object removal
+    billings_to_update: list[int]
 
     class Meta:
         app_label = "trans"
@@ -280,9 +320,10 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
         super().__init__(*args, **kwargs)
         self.old_access_control = self.access_control
         self.stats = ProjectStats(self)
-        self.acting_user = None
+        self.acting_user: User | None = None
         self.project_languages = ProjectLanguageFactory(self)
-        self.label_cleanups: None | TranslationQuerySet = None
+        self.label_cleanups: TranslationQuerySet | None = None
+        self.languages_cache: dict[str, Language] = {}
 
     def generate_changes(self, old) -> None:
         from weblate.trans.models.change import Change
@@ -305,7 +346,7 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
             return {}
         return dict(part.split(":") for part in self.language_aliases.split(","))
 
-    def add_user(self, user, group: str | None = None) -> None:
+    def add_user(self, user: User, group: str | None = None) -> None:
         """Add user based on username or email address."""
         implicit_group = False
         if group is None:
@@ -327,7 +368,7 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
             user.add_team(None, team)
         user.profile.watched.add(self)
 
-    def remove_user(self, user) -> None:
+    def remove_user(self, user: User) -> None:
         """Add user based on username or email address."""
         for group in self.defined_groups.iterator():
             user.remove_team(None, group)
@@ -384,7 +425,7 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
         # This is status checking, call only needed methods
         return any(generator)
 
-    def commit_pending(self, reason, user):
+    def commit_pending(self, reason, user: User):
         """Commit any pending changes."""
         return self.on_repo_components(True, "commit_pending", reason, user)
 
@@ -427,7 +468,7 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
         return self.on_repo_components(False, "can_push")
 
     @cached_property
-    def all_repo_components(self):
+    def all_repo_components(self) -> Iterable[Component]:
         """Return list of all unique VCS components."""
         result = list(self.component_set.with_repo())
         included = {component.id for component in result}
@@ -463,7 +504,7 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
     def is_libre_trial(self):
         return any(billing.is_libre_trial for billing in self.billings)
 
-    def post_create(self, user, billing=None) -> None:
+    def post_create(self, user: User, billing=None) -> None:
         from weblate.trans.models import Change
 
         if billing:
@@ -497,7 +538,7 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
 
         return User.objects.all_admins(self).select_related("profile")
 
-    def get_child_components_access(self, user, filter_callback=None):
+    def get_child_components_access(self, user: User, filter_callback=None):
         """
         List child components.
 
@@ -605,7 +646,7 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
         return get_glossary_automaton(self)
 
     def get_machinery_settings(self):
-        settings = Setting.objects.get_settings_dict(Setting.CATEGORY_MT)
+        settings = Setting.objects.get_settings_dict(SettingCategory.MT)
         for item, value in self.machinery_settings.items():
             if value is None:
                 if item in settings:
@@ -647,7 +688,7 @@ class Project(models.Model, PathMixin, CacheKeyMixin):
     def enable_review(self):
         return self.translation_review or self.source_review
 
-    def do_lock(self, user, lock: bool = True, auto: bool = False) -> None:
+    def do_lock(self, user: User, lock: bool = True, auto: bool = False) -> None:
         for component in self.component_set.iterator():
             component.do_lock(user, lock=lock, auto=auto)
 

@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 msgid ""
 msgstr ""
-"Project-Id-Version: Weblate 5.5.4\n"
+"Project-Id-Version: Weblate 5.9\n"
 "Report-Msgid-Bugs-To: https://github.com/WeblateOrg/weblate/issues\n"
-"POT-Creation-Date: 2024-05-07 11:27+0000\n"
+"POT-Creation-Date: 2024-12-13 14:50+0000\n"
 "PO-Revision-Date: 2020-07-31 06:28+0000\n"
 "Last-Translator: Sithu Aung <sithu.aung015@gmail.com>\n"
 "Language-Team: Burmese <https://hosted.weblate.org/projects/weblate/"
@@ -17,68 +17,97 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "X-Generator: Weblate 4.2-dev\n"
 
-#: weblate/static/editor/base.js:89
+#: weblate/static/editor/base.js:91
 msgid "Please select target plural by clicking."
 msgstr ""
 
-#: weblate/static/editor/base.js:165
+#: weblate/static/editor/base.js:145
+#, fuzzy
+#| msgid "There are some unsaved changes, are you sure you want to leave?"
+msgid "You have unsaved changes. Are you sure you want to skip?"
+msgstr "မသိမ်းဆည်းရသေးသော အပြောင်းအလဲ အချို့ ရှိပါသည်၊ သင် ထွက်ခွာ လိုပါ သလား။"
+
+#: weblate/static/editor/base.js:180
 #, javascript-format
 msgid "Cmd+%s"
 msgstr "Cmd+%s"
 
-#: weblate/static/editor/base.js:167
+#: weblate/static/editor/base.js:182
 #, javascript-format
 msgid "Ctrl+%s"
 msgstr "Ctrl+%s"
 
-#: weblate/static/editor/full.js:265
+#: weblate/static/editor/full.js:260
 msgid "Translation memory entry removed."
 msgstr ""
 
-#: weblate/static/editor/full.js:299
+#: weblate/static/editor/full.js:294
 msgid "The request for machine translation has failed:"
 msgstr "ဤ စက် ဘာသာပြန်ခြင်း တောင်းဆိုမှု မအောင်မြင်:"
 
-#: weblate/static/editor/full.js:309
+#: weblate/static/editor/full.js:304
 #, javascript-format
 msgid "The request for machine translation using %s has failed:"
 msgstr "%s ကို အသုံးပြု၍ စက်ဘာသာပြန်ခြင်း တောင်းဆိုမှုမအောင်မြင်:"
 
-#: weblate/static/editor/full.js:344
+#: weblate/static/editor/full.js:339
 #, javascript-format
 msgid "Cmd+M then %s"
 msgstr "Cmd+M ထို့နောက် %s"
 
-#: weblate/static/editor/full.js:346
+#: weblate/static/editor/full.js:341
 #, javascript-format
 msgid "Ctrl+M then %s"
 msgstr "Ctrl+M ပြီးတော့ %s"
 
-#: weblate/static/editor/full.js:448
+#: weblate/static/editor/full.js:443
 #, javascript-format
 msgid "Press Cmd+I then %s to dismiss this."
 msgstr "Cmd+I ကို နှိုပ်ပြီး %s ကို ဖယ်ပစ်ပါ။"
 
-#: weblate/static/editor/full.js:453
+#: weblate/static/editor/full.js:448
 #, javascript-format
 msgid "Press Ctrl+I then %s to dismiss this."
 msgstr "Ctrl+I ကို နှိုပ်ပြီး %s ကို ဖယ်ပစ်ပါ။"
 
-#: weblate/static/editor/full.js:591
+#: weblate/static/editor/full.js:592
 msgid "Clone to translation"
 msgstr ""
 
-#: weblate/static/editor/full.js:593
+#: weblate/static/editor/full.js:594
 msgid "Accept"
 msgstr ""
 
-#: weblate/static/editor/full.js:602
+#: weblate/static/editor/full.js:603
 msgid "Delete entry"
 msgstr ""
 
-#: weblate/static/editor/zen.js:105
+#: weblate/static/editor/tools/search.js:49
+msgid "No results found"
+msgstr ""
+
+#: weblate/static/editor/tools/search.js:102
+#, javascript-format
+msgid "%s matching string"
+msgid_plural "%s matching strings"
+msgstr[0] ""
+
+#: weblate/static/editor/zen.js:114
 msgid "There are some unsaved changes, are you sure you want to leave?"
 msgstr "မသိမ်းဆည်းရသေးသော အပြောင်းအလဲ အချို့ ရှိပါသည်၊ သင် ထွက်ခွာ လိုပါ သလား။"
+
+#: weblate/static/js/screenshots/clipboard-paste.js:38
+msgid "Image Pasted!"
+msgstr ""
+
+#: weblate/static/js/screenshots/clipboard-paste.js:40
+#: weblate/static/js/screenshots/clipboard-paste.js:56
+msgid "Something went wrong!"
+msgstr ""
+
+#: weblate/static/js/screenshots/clipboard-paste.js:53
+msgid "No image found in clipboard"
+msgstr ""
 
 #: weblate/static/loader-bootstrap.js:171
 msgid "Error loading search results!"
@@ -92,97 +121,245 @@ msgstr "ကိုက်ညီသော ရင်းမြစ် မတွေ့�
 msgid "Sort this column"
 msgstr "ဤ အတိုင် ကို စဥ်ရန်"
 
-#: weblate/static/loader-bootstrap.js:562
+#: weblate/static/loader-bootstrap.js:571
 msgid "Error while loading page:"
 msgstr "စာမျက်နှာ တင်ဆောင်စဥ် ကြုံတွေ့သည့် အမှား:"
 
-#: weblate/static/loader-bootstrap.js:829
+#: weblate/static/loader-bootstrap.js:844
 msgid "Text copied to clipboard."
 msgstr "စာသားကို ကလစ်ဘုတ် သို့ ကူးယူမည်။"
 
-#: weblate/static/loader-bootstrap.js:833
+#: weblate/static/loader-bootstrap.js:848
 msgid "Please press Ctrl+C to copy."
 msgstr "ကူးယူရန် Ctrl+C ကို နှိပ်ပါ။"
 
-#: weblate/static/loader-bootstrap.js:857
+#: weblate/static/loader-bootstrap.js:873
 msgid "Search…"
 msgstr "ရှာရန်…"
 
-#: weblate/static/loader-bootstrap.js:858
+#: weblate/static/loader-bootstrap.js:875
 msgid "Available:"
 msgstr "ရရှိမှု:"
 
-#: weblate/static/loader-bootstrap.js:859
+#: weblate/static/loader-bootstrap.js:877
 msgid "Chosen:"
 msgstr "ရွေးချယ်ရန်:"
 
-#: weblate/static/loader-bootstrap.js:1111
+#: weblate/static/loader-bootstrap.js:1181
 msgid "Weblate is now scanning the repository, please be patient."
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1225
+#: weblate/static/loader-bootstrap.js:1296
 msgid ""
 "Notification settings removed, please do not forget to save the changes."
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1377
+#: weblate/static/loader-bootstrap.js:1458
+msgid "Custom range"
+msgstr ""
+
+#: weblate/static/loader-bootstrap.js:1459
+msgid "Clear"
+msgstr "ရှင်းလင်း"
+
+#: weblate/static/loader-bootstrap.js:1461
+#, fuzzy
+#| msgctxt "Minimal (for example two letter) name of day in week"
+#| msgid "Su"
+msgctxt "Short name of day"
+msgid "Su"
+msgstr "နွ"
+
+#: weblate/static/loader-bootstrap.js:1462
+#, fuzzy
+#| msgctxt "Minimal (for example two letter) name of day in week"
+#| msgid "Mo"
+msgctxt "Short name of day"
+msgid "Mo"
+msgstr "လာ"
+
+#: weblate/static/loader-bootstrap.js:1463
+#, fuzzy
+#| msgctxt "Minimal (for example two letter) name of day in week"
+#| msgid "Tu"
+msgctxt "Short name of day"
+msgid "Tu"
+msgstr "ဂါ"
+
+#: weblate/static/loader-bootstrap.js:1464
+#, fuzzy
+#| msgctxt "Minimal (for example two letter) name of day in week"
+#| msgid "We"
+msgctxt "Short name of day"
+msgid "We"
+msgstr "ဟူ"
+
+#: weblate/static/loader-bootstrap.js:1465
+#, fuzzy
+#| msgctxt "Minimal (for example two letter) name of day in week"
+#| msgid "Th"
+msgctxt "Short name of day"
+msgid "Th"
+msgstr "ကြ"
+
+#: weblate/static/loader-bootstrap.js:1466
+#, fuzzy
+#| msgctxt "Minimal (for example two letter) name of day in week"
+#| msgid "Fr"
+msgctxt "Short name of day"
+msgid "Fr"
+msgstr "သေ"
+
+#: weblate/static/loader-bootstrap.js:1467
+#, fuzzy
+#| msgctxt "Minimal (for example two letter) name of day in week"
+#| msgid "Sa"
+msgctxt "Short name of day"
+msgid "Sa"
+msgstr "နေ"
+
+#: weblate/static/loader-bootstrap.js:1470
+msgctxt "Short name of month"
+msgid "Jan"
+msgstr "ဇန်"
+
+#: weblate/static/loader-bootstrap.js:1471
+msgctxt "Short name of month"
+msgid "Feb"
+msgstr "ဖေ"
+
+#: weblate/static/loader-bootstrap.js:1472
+msgctxt "Short name of month"
+msgid "Mar"
+msgstr "မတ်"
+
+#: weblate/static/loader-bootstrap.js:1473
+msgctxt "Short name of month"
+msgid "Apr"
+msgstr "ဧ"
+
+#: weblate/static/loader-bootstrap.js:1474
+msgctxt "Short name of month"
+msgid "May"
+msgstr "မေ"
+
+#: weblate/static/loader-bootstrap.js:1475
+msgctxt "Short name of month"
+msgid "Jun"
+msgstr "ဇွန်"
+
+#: weblate/static/loader-bootstrap.js:1476
+msgctxt "Short name of month"
+msgid "Jul"
+msgstr "ဇူ"
+
+#: weblate/static/loader-bootstrap.js:1477
+msgctxt "Short name of month"
+msgid "Aug"
+msgstr "ဩ"
+
+#: weblate/static/loader-bootstrap.js:1478
+msgctxt "Short name of month"
+msgid "Sep"
+msgstr "စက်"
+
+#: weblate/static/loader-bootstrap.js:1479
+msgctxt "Short name of month"
+msgid "Oct"
+msgstr "အောက်"
+
+#: weblate/static/loader-bootstrap.js:1480
+msgctxt "Short name of month"
+msgid "Nov"
+msgstr "နို"
+
+#: weblate/static/loader-bootstrap.js:1481
+msgctxt "Short name of month"
+msgid "Dec"
+msgstr "ဒီ"
+
+#: weblate/static/loader-bootstrap.js:1485
+msgid "Today"
+msgstr "ယနေ့"
+
+#: weblate/static/loader-bootstrap.js:1486
+msgid "Yesterday"
+msgstr ""
+
+#: weblate/static/loader-bootstrap.js:1490
+msgid "Last 7 days"
+msgstr ""
+
+#: weblate/static/loader-bootstrap.js:1491
+msgid "Last 30 days"
+msgstr ""
+
+#: weblate/static/loader-bootstrap.js:1492
+msgid "This month"
+msgstr ""
+
+#: weblate/static/loader-bootstrap.js:1496
+msgid "Last month"
+msgstr ""
+
+#: weblate/static/loader-bootstrap.js:1500
+msgid "This year"
+msgstr ""
+
+#: weblate/static/loader-bootstrap.js:1504
+msgid "Last year"
+msgstr ""
+
+#: weblate/static/loader-bootstrap.js:1586
 msgctxt "Alert to user when opening browser developer console"
 msgid "Stop!"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1383
+#: weblate/static/loader-bootstrap.js:1593
 msgid ""
 "This is a browser feature intended for developers. If someone told you to "
 "copy-paste something here, they are likely trying to compromise your Weblate "
 "account."
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1389
+#: weblate/static/loader-bootstrap.js:1600
 msgid "See https://en.wikipedia.org/wiki/Self-XSS for more information."
 msgstr ""
 
-#: weblate/static/zammad.js:7
-msgid "Weblate feedback"
-msgstr "Weblate တုန့်ပြန်ရန်"
+#~ msgid "Weblate feedback"
+#~ msgstr "Weblate တုန့်ပြန်ရန်"
 
-#: weblate/static/zammad.js:8
-msgid "Get help"
-msgstr "အကူအညီ ရယူရန်"
+#~ msgid "Get help"
+#~ msgstr "အကူအညီ ရယူရန်"
 
-#: weblate/static/zammad.js:10
 #, javascript-format
-msgid ""
-"Thank you for your inquiry (#%s)! We'll contact you as soon as possible."
-msgstr ""
-"သင်၏ စုံစမ်းမေးမြန်းမှု (#%s) အတွက်ကျေးဇူးတင်ပါသည်! ကျွန်တော်တို့ ဖြစ်နိုင်သမျှ မြန်မြန် ဆက်သွယ်လိုက်ပါမည်။"
+#~ msgid ""
+#~ "Thank you for your inquiry (#%s)! We'll contact you as soon as possible."
+#~ msgstr ""
+#~ "သင်၏ စုံစမ်းမေးမြန်းမှု (#%s) အတွက်ကျေးဇူးတင်ပါသည်! ကျွန်တော်တို့ ဖြစ်နိုင်သမျှ မြန်မြန် "
+#~ "ဆက်သွယ်လိုက်ပါမည်။"
 
-#: weblate/static/zammad.js:17
-msgid "Subject"
-msgstr "အကြောင်းအရာ"
+#~ msgid "Subject"
+#~ msgstr "အကြောင်းအရာ"
 
-#: weblate/static/zammad.js:25
-msgid "Your name"
-msgstr "သင့် အမည်"
+#~ msgid "Your name"
+#~ msgstr "သင့် အမည်"
 
-#: weblate/static/zammad.js:33
-msgid "Your e-mail"
-msgstr "သင် ၏ အီးမေးလ်"
+#~ msgid "Your e-mail"
+#~ msgstr "သင် ၏ အီးမေးလ်"
 
-#: weblate/static/zammad.js:41
-msgid "Message"
-msgstr "စာ"
+#~ msgid "Message"
+#~ msgstr "စာ"
 
-#: weblate/static/zammad.js:45
-msgid ""
-"Please contact us in English, otherwise we might be unable to process your "
-"request."
-msgstr ""
-"ကျေးဇူးပြု၍ ကျွန်ုပ်တို့ကို အင်္ဂလိပ် ဘာသာဖြင့် ဆက်သွယ်ပါ၊ ထိုသို့မဟုတ်ပါက ကျွန်ုပ်တို့ သင်၏ တောင်းဆိုချက် ကို "
-"ဆက်လက်မလုပ်ဆောင်နိုင်ပါ။"
+#~ msgid ""
+#~ "Please contact us in English, otherwise we might be unable to process "
+#~ "your request."
+#~ msgstr ""
+#~ "ကျေးဇူးပြု၍ ကျွန်ုပ်တို့ကို အင်္ဂလိပ် ဘာသာဖြင့် ဆက်သွယ်ပါ၊ ထိုသို့မဟုတ်ပါက ကျွန်ုပ်တို့ သင်၏ တောင်းဆိုချက် ကို "
+#~ "ဆက်လက်မလုပ်ဆောင်နိုင်ပါ။"
 
-#: weblate/static/zammad.js:51
-msgid "Attachments"
-msgstr "ဖိုင်တွဲဆက်ရန်"
+#~ msgid "Attachments"
+#~ msgstr "ဖိုင်တွဲဆက်ရန်"
 
 #~ msgid "Sunday"
 #~ msgstr "တနင်္ဂနွေ"
@@ -233,34 +410,6 @@ msgstr "ဖိုင်တွဲဆက်ရန်"
 #~ msgid "Sat"
 #~ msgstr "နေ"
 
-#~ msgctxt "Minimal (for example two letter) name of day in week"
-#~ msgid "Su"
-#~ msgstr "နွ"
-
-#~ msgctxt "Minimal (for example two letter) name of day in week"
-#~ msgid "Mo"
-#~ msgstr "လာ"
-
-#~ msgctxt "Minimal (for example two letter) name of day in week"
-#~ msgid "Tu"
-#~ msgstr "ဂါ"
-
-#~ msgctxt "Minimal (for example two letter) name of day in week"
-#~ msgid "We"
-#~ msgstr "ဟူ"
-
-#~ msgctxt "Minimal (for example two letter) name of day in week"
-#~ msgid "Th"
-#~ msgstr "ကြ"
-
-#~ msgctxt "Minimal (for example two letter) name of day in week"
-#~ msgid "Fr"
-#~ msgstr "သေ"
-
-#~ msgctxt "Minimal (for example two letter) name of day in week"
-#~ msgid "Sa"
-#~ msgstr "နေ"
-
 #~ msgid "January"
 #~ msgstr "ဇန်နဝါရီ"
 
@@ -296,60 +445,6 @@ msgstr "ဖိုင်တွဲဆက်ရန်"
 
 #~ msgid "December"
 #~ msgstr "ဒီဇင်ဘာ"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Jan"
-#~ msgstr "ဇန်"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Feb"
-#~ msgstr "ဖေ"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Mar"
-#~ msgstr "မတ်"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Apr"
-#~ msgstr "ဧ"
-
-#~ msgctxt "Short name of month"
-#~ msgid "May"
-#~ msgstr "မေ"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Jun"
-#~ msgstr "ဇွန်"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Jul"
-#~ msgstr "ဇူ"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Aug"
-#~ msgstr "ဩ"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Sep"
-#~ msgstr "စက်"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Oct"
-#~ msgstr "အောက်"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Nov"
-#~ msgstr "နို"
-
-#~ msgctxt "Short name of month"
-#~ msgid "Dec"
-#~ msgstr "ဒီ"
-
-#~ msgid "Today"
-#~ msgstr "ယနေ့"
-
-#~ msgid "Clear"
-#~ msgstr "ရှင်းလင်း"
 
 #~ msgid "Copy"
 #~ msgstr "ကူးရန်"

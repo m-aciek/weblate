@@ -1,7 +1,6 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-
 from __future__ import annotations
 
 import difflib
@@ -19,6 +18,7 @@ from django.utils.translation import gettext
 from django.views.decorators.http import require_POST
 from django.views.generic import DetailView, ListView
 
+from weblate.auth.models import AuthenticatedHttpRequest
 from weblate.logger import LOGGER
 from weblate.screenshots.forms import ScreenshotEditForm, ScreenshotForm, SearchForm
 from weblate.screenshots.models import Screenshot
@@ -177,14 +177,14 @@ def ensure_tesseract_language(lang: str) -> None:
 
             LOGGER.debug("downloading tesseract data %s", url)
 
-            with sentry_sdk.start_span(op="ocr.download", description=url):
+            with sentry_sdk.start_span(op="ocr.download", name=url):
                 response = request("GET", url, allow_redirects=True)
 
             with open(full_name, "xb") as handle:
                 handle.write(response.content)
 
 
-def try_add_source(request, obj) -> bool:
+def try_add_source(request: AuthenticatedHttpRequest, obj) -> bool:
     if "source" not in request.POST:
         return False
 
@@ -220,7 +220,7 @@ class ScreenshotList(PathViewMixin, ListView):
                 result["add_form"] = ScreenshotForm(self.path_object)
         return result
 
-    def post(self, request, **kwargs):
+    def post(self, request: AuthenticatedHttpRequest, **kwargs):
         component = self.path_object
         if not request.user.has_perm("screenshot.add", component):
             raise PermissionDenied
@@ -269,9 +269,12 @@ class ScreenshotDetail(DetailView):
                 result["edit_form"] = self._edit_form
             else:
                 result["edit_form"] = ScreenshotEditForm(instance=result["object"])
+        # Blank list for search results, this is populated later via JavaScript
+        result["units"] = []
+        result["search_query"] = ""
         return result
 
-    def post(self, request, **kwargs):
+    def post(self, request: AuthenticatedHttpRequest, **kwargs):
         obj = self.get_object()
         if request.user.has_perm("screenshot.edit", obj.translation):
             self._edit_form = ScreenshotEditForm(
@@ -294,7 +297,7 @@ class ScreenshotDetail(DetailView):
 
 @require_POST
 @login_required
-def delete_screenshot(request, pk):
+def delete_screenshot(request: AuthenticatedHttpRequest, pk):
     obj = get_object_or_404(Screenshot, pk=pk)
     component = obj.translation.component
     if not request.user.has_perm("screenshot.delete", obj.translation):
@@ -307,7 +310,7 @@ def delete_screenshot(request, pk):
     return redirect("screenshots", path=component.get_url_path())
 
 
-def get_screenshot(request, pk):
+def get_screenshot(request: AuthenticatedHttpRequest, pk):
     obj = get_object_or_404(Screenshot, pk=pk)
     if not request.user.has_perm("screenshot.edit", obj.translation.component):
         raise PermissionDenied
@@ -316,7 +319,7 @@ def get_screenshot(request, pk):
 
 @require_POST
 @login_required
-def remove_source(request, pk):
+def remove_source(request: AuthenticatedHttpRequest, pk):
     obj = get_screenshot(request, pk)
 
     obj.units.remove(request.POST["source"])
@@ -326,7 +329,7 @@ def remove_source(request, pk):
     return redirect(obj)
 
 
-def search_results(request, code, obj, units=None):
+def search_results(request: AuthenticatedHttpRequest, code, obj, units=None):
     if units is None:
         units = []
     else:
@@ -345,6 +348,7 @@ def search_results(request, code, obj, units=None):
                     "object": obj,
                     "units": units,
                     "user": request.user,
+                    "search_query": "",
                 },
             ),
         }
@@ -353,7 +357,7 @@ def search_results(request, code, obj, units=None):
 
 @login_required
 @require_POST
-def search_source(request, pk):
+def search_source(request: AuthenticatedHttpRequest, pk):
     obj = get_screenshot(request, pk)
     translation = obj.translation
 
@@ -380,14 +384,14 @@ def ocr_get_strings(api, image: str, resolution: int = 72):
     else:
         api.SetSourceResolution(resolution)
 
-        with sentry_sdk.start_span(op="ocr.recognize", description=image):
+        with sentry_sdk.start_span(op="ocr.recognize", name=image):
             api.Recognize()
 
-        with sentry_sdk.start_span(op="ocr.iterate", description=image):
+        with sentry_sdk.start_span(op="ocr.iterate", name=image):
             iterator = api.GetIterator()
             level = RIL.TEXTLINE
             for r in iterate_level(iterator, level):
-                with sentry_sdk.start_span(op="ocr.text", description=image):
+                with sentry_sdk.start_span(op="ocr.text", name=image):
                     try:
                         yield r.GetUTF8Text(level)
                     except RuntimeError:
@@ -430,7 +434,7 @@ def get_tesseract(language: Language) -> PyTessBaseAPI:
 
 @login_required
 @require_POST
-def ocr_search(request, pk):
+def ocr_search(request: AuthenticatedHttpRequest, pk):
     from PIL import Image
 
     obj = get_screenshot(request, pk)
@@ -455,17 +459,17 @@ def ocr_search(request, pk):
 
 @login_required
 @require_POST
-def add_source(request, pk):
+def add_source(request: AuthenticatedHttpRequest, pk):
     obj = get_screenshot(request, pk)
     result = try_add_source(request, obj)
     return JsonResponse(data={"responseCode": 200, "status": result})
 
 
 @login_required
-def get_sources(request, pk):
+def get_sources(request: AuthenticatedHttpRequest, pk):
     obj = get_screenshot(request, pk)
     return render(
         request,
         "screenshots/screenshot_sources_body.html",
-        {"sources": obj.units.order(), "object": obj},
+        {"object": obj, "search_query": ""},
     )

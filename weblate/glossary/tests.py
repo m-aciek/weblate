@@ -11,7 +11,11 @@ from io import StringIO
 from django.urls import reverse
 
 from weblate.glossary.models import get_glossary_terms, get_glossary_tsv
-from weblate.glossary.tasks import sync_terminology
+from weblate.glossary.tasks import (
+    cleanup_stale_glossaries,
+    sync_terminology,
+)
+from weblate.lang.models import Language
 from weblate.trans.models import Unit
 from weblate.trans.tests.test_views import ViewTestCase
 from weblate.trans.tests.utils import get_test_file
@@ -322,7 +326,9 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
             unit_sources_and_positions(get_glossary_terms(unit)), {("thank", ((0, 5),))}
         )
 
-    def do_add_unit(self, language="cs", **kwargs) -> None:
+    def do_add_unit(
+        self, language: str = "cs", expected_status: int = 200, **kwargs
+    ) -> None:
         unit = self.get_unit("Thank you for using Weblate.", language=language)
         glossary = self.glossary_component.translation_set.get(
             language=unit.translation.language
@@ -339,8 +345,8 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
                 **kwargs,
             },
         )
-        content = json.loads(response.content.decode())
-        self.assertEqual(content["responseCode"], 200)
+        content = response.json()
+        self.assertEqual(content["responseCode"], expected_status)
 
     def test_add(self) -> None:
         """Test for adding term from translate page."""
@@ -351,6 +357,8 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
 
     def test_add_terminology(self) -> None:
         start = Unit.objects.count()
+        self.do_add_unit(expected_status=403, terminology=1)
+        self.make_manager()
         self.do_add_unit(terminology=1)
         # Should be added to all languages
         self.assertEqual(Unit.objects.count(), start + 4)
@@ -399,6 +407,7 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         self.assertEqual(unit.unit_set.count(), 4)
 
     def test_terminology_explanation_sync(self) -> None:
+        self.make_manager()
         unit = self.get_unit("Thank you for using Weblate.")
         # Add terms
         response = self.client.post(
@@ -467,3 +476,60 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         lines = list(reader)
         self.assertEqual(len(lines), 163)
         self.assertTrue(all(len(line) == 2 for line in lines))
+
+    def test_stale_glossaries_cleanup(self) -> None:
+        # setup: make glossary managed outside weblate
+        self.glossary_component.repo = "git://example.com/test/project.git"
+        self.glossary_component.save()
+
+        initial_count = self.glossary_component.translation_set.count()
+
+        # check glossary not deleted because it has a valid translation
+        cleanup_stale_glossaries(self.project.id)
+        self.assertEqual(self.glossary_component.translation_set.count(), initial_count)
+
+        # delete translation: should trigger cleanup_stale_glossary task
+        german = Language.objects.get(code="de")
+        self.component.translation_set.get(language=german).remove(self.user)
+
+        cleanup_stale_glossaries(self.project.id)
+        self.assertEqual(self.glossary_component.translation_set.count(), initial_count)
+
+        # make glossary managed by weblate
+        self.glossary_component.repo = "local:"
+        self.glossary_component.save()
+
+        # check that one glossary has been deleted
+        cleanup_stale_glossaries(self.project.id)
+        self.assertEqual(
+            self.glossary_component.translation_set.count(), initial_count - 1
+        )
+
+    def test_prohibited_initial_character(self) -> None:
+        """Test that a prohibited initial character in views."""
+        self.make_manager()
+        response = self.client.post(
+            reverse("new-unit", kwargs={"path": self.glossary.get_url_path()}),
+            {
+                "source_0": "=prohibited",
+                "target_0": "target",
+                "terminology": "on",
+                "new-unit-form-type": "singular",
+            },
+            follow=True,
+        )
+        self.assertContains(response, "Prohibited initial character")
+        self.assertContains(response, "New string has been added.")
+
+        # add ignore flag, check warning is gone
+        unit = self.glossary.unit_set.get(source="=prohibited")
+        response = self.client.post(
+            reverse("edit_context", kwargs={"pk": unit.pk}),
+            {
+                "next": reverse("translate", kwargs={"path": unit.get_url_path()}),
+                "explanation": "",
+                "extra_flags": "terminology,ignore-prohibited-initial-character",
+            },
+            follow=True,
+        )
+        self.assertNotContains(response, "Prohibited initial character")

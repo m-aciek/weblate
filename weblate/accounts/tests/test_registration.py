@@ -4,9 +4,14 @@
 
 """Test for user handling."""
 
+from __future__ import annotations
+
+import base64
+import json
 from urllib.parse import parse_qs, urlparse
 
 import responses
+from altcha import Challenge, Solution, solve_challenge
 from django.conf import settings
 from django.core import mail
 from django.test import Client, TestCase
@@ -26,6 +31,7 @@ REGISTRATION_DATA = {
     "email": "noreply-weblate@example.org",
     "fullname": "First Last",
     "captcha": "9999",
+    "altcha": "value",
 }
 
 GH_BACKENDS = (
@@ -151,14 +157,59 @@ class RegistrationTest(BaseRegistrationTest):
     def test_register_captcha_fail(self) -> None:
         response = self.do_register()
         self.assertContains(response, "That was not correct, please try again.")
+        self.assertContains(response, "Validation failed, please try again.")
+
+    def solve_altcha(self, response, data: dict):
+        form = response.context["form"]
+        challenge: Challenge = form.challenge
+        solution: Solution = solve_challenge(
+            challenge=challenge.challenge,
+            salt=challenge.salt,
+            algorithm=challenge.algorithm,
+            max_number=challenge.maxnumber,
+            start=0,
+        )
+        data["altcha"] = base64.b64encode(
+            json.dumps(
+                {
+                    "algorithm": challenge.algorithm,
+                    "challenge": challenge.challenge,
+                    "number": solution.number,
+                    "salt": challenge.salt,
+                    "signature": challenge.signature,
+                }
+            ).encode("utf-8")
+        ).decode("utf-8")
+
+    def solve_math(self, response, data: dict):
+        form = response.context["form"]
+        data["captcha"] = form.mathcaptcha.result
+
+    @override_settings(REGISTRATION_CAPTCHA=True)
+    def test_register_partial_altcha(self) -> None:
+        """Test registration with captcha enabled."""
+        response = self.client.get(reverse("register"))
+        data = REGISTRATION_DATA.copy()
+        self.solve_altcha(response, data)
+        response = self.do_register(data)
+        self.assertContains(response, "That was not correct, please try again.")
+
+    @override_settings(REGISTRATION_CAPTCHA=True)
+    def test_register_partial_match(self) -> None:
+        """Test registration with captcha enabled."""
+        response = self.client.get(reverse("register"))
+        data = REGISTRATION_DATA.copy()
+        self.solve_math(response, data)
+        response = self.do_register(data)
+        self.assertContains(response, "Validation failed, please try again.")
 
     @override_settings(REGISTRATION_CAPTCHA=True)
     def test_register_captcha(self) -> None:
         """Test registration with captcha enabled."""
         response = self.client.get(reverse("register"))
-        form = response.context["captcha_form"]
         data = REGISTRATION_DATA.copy()
-        data["captcha"] = form.mathcaptcha.result
+        self.solve_altcha(response, data)
+        self.solve_math(response, data)
         response = self.do_register(data)
         self.assertContains(response, REGISTRATION_SUCCESS)
 
@@ -297,7 +348,7 @@ class RegistrationTest(BaseRegistrationTest):
 
     @override_settings(REGISTRATION_CAPTCHA=False)
     def test_reset_twice(self) -> None:
-        """Test for password reset."""
+        """Test for password reset for different users."""
         User.objects.create_user("testuser", "test@example.com", "x")
         User.objects.create_user("testuser2", "test2@example.com", "x")
 
@@ -306,27 +357,31 @@ class RegistrationTest(BaseRegistrationTest):
         )
         self.assertRedirects(response, reverse("email-sent"))
         self.assert_registration(reset=True)
-        # Pop notifications (new association + reset + password change)
-        sent_mail = mail.outbox.pop()
-        sent_mail = mail.outbox.pop()
-        sent_mail = mail.outbox.pop()
-        self.assertEqual(["test@example.com"], sent_mail.to)
-        self.assert_notify_mailbox(sent_mail)
-        # Pop password change
-        sent_mail = mail.outbox.pop()
+
+        self.assertEqual({"test@example.com"}, {i.to[0] for i in mail.outbox})
+        self.assertEqual(
+            {
+                "[Weblate] Activity on your account at Weblate",
+                "[Weblate] Password reset on Weblate",
+            },
+            {i.subject for i in mail.outbox},
+        )
+        mail.outbox.clear()
 
         response = self.client.post(
             reverse("password_reset"), {"email": "test2@example.com"}
         )
         self.assertRedirects(response, reverse("email-sent"))
         self.assert_registration(reset=True)
-        # Pop notifications (new association + reset + password change)
-        sent_mail = mail.outbox.pop()
-        sent_mail = mail.outbox.pop()
-        sent_mail = mail.outbox.pop()
-        self.assertEqual(["test2@example.com"], sent_mail.to)
-        # Pop password change
-        sent_mail = mail.outbox.pop()
+        self.assertEqual({"test2@example.com"}, {i.to[0] for i in mail.outbox})
+        self.assertEqual(
+            {
+                "[Weblate] Activity on your account at Weblate",
+                "[Weblate] Password reset on Weblate",
+            },
+            {i.subject for i in mail.outbox},
+        )
+        mail.outbox.clear()
 
     @override_settings(REGISTRATION_CAPTCHA=False)
     def test_reset_paralel(self) -> None:

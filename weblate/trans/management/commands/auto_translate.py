@@ -64,26 +64,28 @@ class Command(WeblateTranslationCommand):
         # Get user
         try:
             user = User.objects.get(username=options["user"])
-        except User.DoesNotExist:
-            raise CommandError("User does not exist!")
+        except User.DoesNotExist as error:
+            msg = "User does not exist!"
+            raise CommandError(msg) from error
 
         source = None
         if options["source"]:
             try:
                 component = Component.objects.get_by_path(options["source"])
-            except Component.DoesNotExist:
-                raise CommandError("No matching source component found!")
+            except Component.DoesNotExist as error:
+                msg = "No matching source component found!"
+                raise CommandError(msg) from error
             source = component.id
 
         if options["mt"]:
             for translator in options["mt"]:
                 if translator not in MACHINERY:
-                    raise CommandError(
-                        f"Machine translation {translator} is not available"
-                    )
+                    msg = f"Machine translation {translator} is not available"
+                    raise CommandError(msg)
 
         if options["mode"] not in {"translate", "fuzzy", "suggest"}:
-            raise CommandError("Invalid translation mode specified!")
+            msg = "Invalid translation mode specified!"
+            raise CommandError(msg)
 
         if options["inconsistent"]:
             filter_type = "check:inconsistent"

@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import json
+import re
 
 from django import forms
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext, gettext_lazy, pgettext_lazy
 
-from weblate.utils.validators import WeblateServiceURLValidator
+from weblate.utils.forms import WeblateServiceURLField
 
 
 class BaseMachineryForm(forms.Form):
@@ -37,9 +38,8 @@ class KeyMachineryForm(BaseMachineryForm):
 
 
 class URLMachineryForm(BaseMachineryForm):
-    url = forms.URLField(
+    url = WeblateServiceURLField(
         label=pgettext_lazy("Automatic suggestion service configuration", "API URL"),
-        validators=[WeblateServiceURLValidator()],
     )
 
 
@@ -215,12 +215,24 @@ class GoogleV3MachineryForm(BaseMachineryForm):
             )
         ),
     )
+    bucket_name = forms.CharField(
+        label=pgettext_lazy(
+            "Automatic suggestion service configuration", "Google Storage Bucket name"
+        ),
+        help_text=pgettext_lazy(
+            "Google Cloud Translation configuration",
+            "Enter the name of the Google Cloud Storage bucket that is used to store the Glossary files.",
+        ),
+        required=False,
+    )
 
     def clean_credentials(self):
         try:
             json.loads(self.cleaned_data["credentials"])
         except json.JSONDecodeError as error:
-            raise ValidationError(gettext("Could not parse JSON: %s") % error)
+            raise ValidationError(
+                gettext("Could not parse JSON: %s") % error
+            ) from error
         return self.cleaned_data["credentials"]
 
 
@@ -249,18 +261,41 @@ class AlibabaMachineryForm(KeySecretMachineryForm):
 
 
 class ModernMTMachineryForm(KeyURLMachineryForm):
-    url = forms.URLField(
+    url = WeblateServiceURLField(
         label=pgettext_lazy("Automatic suggestion service configuration", "API URL"),
         initial="https://api.modernmt.com/",
-        validators=[WeblateServiceURLValidator()],
     )
+    context_vector = forms.CharField(
+        label=pgettext_lazy(
+            "Automatic suggestion service configuration", "Context vector"
+        ),
+        help_text=gettext_lazy(
+            "Comma-separated list of memory IDs:weight. e.g: 1234:0.123,4567:0.456"
+        ),
+        required=False,
+    )
+
+    def clean_context_vector(self):
+        """Validate context_vector field."""
+        pattern = r"^\d+:\d(?:\.\d{1,3})?$"
+        context_vector = self.cleaned_data["context_vector"]
+        if context_vector:
+            for couple in context_vector.split(","):
+                if not re.match(pattern, couple):
+                    raise ValidationError(
+                        gettext("The context vector is not valid: %s") % couple
+                    )
+                if not 0 < (weight := float(couple.split(":")[1])) < 1:
+                    raise ValidationError(
+                        gettext("The weight value must be between 0 and 1: %s") % weight
+                    )
+        return self.cleaned_data["context_vector"]
 
 
 class DeepLMachineryForm(KeyURLMachineryForm):
-    url = forms.URLField(
+    url = WeblateServiceURLField(
         label=pgettext_lazy("Automatic suggestion service configuration", "API URL"),
         initial="https://api.deepl.com/v2/",
-        validators=[WeblateServiceURLValidator()],
     )
     formality = forms.CharField(
         label=pgettext_lazy("Automatic suggestion service configuration", "Formality"),
@@ -277,27 +312,20 @@ class DeepLMachineryForm(KeyURLMachineryForm):
         initial="default",
         required=False,
     )
-
-
-class OpenAIMachineryForm(KeyMachineryForm):
-    # Ordering choices here defines priority for automatic selection
-    MODEL_CHOICES = (
-        ("auto", pgettext_lazy("OpenAI model selection", "Automatic selection")),
-        ("gpt-4o", "GPT-4o"),
-        ("gpt-4-1106-preview", "GPT-4 Turbo"),
-        ("gpt-4", "GPT-4"),
-        ("gpt-3.5-turbo-1106", "Updated GPT 3.5 Turbo"),
-        ("gpt-3.5-turbo", "GPT-3.5 Turbo"),
-    )
-
-    model = forms.ChoiceField(
+    context = forms.CharField(
         label=pgettext_lazy(
             "Automatic suggestion service configuration",
-            "OpenAI model",
+            "Translation context",
         ),
-        initial="auto",
-        choices=MODEL_CHOICES,
+        widget=forms.Textarea,
+        help_text=gettext_lazy(
+            "Describe the context of the translation to improve the accuracy of the translation."
+        ),
+        required=False,
     )
+
+
+class BaseOpenAIMachineryForm(KeyMachineryForm):
     persona = forms.CharField(
         label=pgettext_lazy(
             "Automatic suggestion service configuration",
@@ -319,4 +347,81 @@ class OpenAIMachineryForm(KeyMachineryForm):
             "Describe the style of translation. For example: “Use informal language.”"
         ),
         required=False,
+    )
+
+
+class OpenAIMachineryForm(BaseOpenAIMachineryForm):
+    # Ordering choices here defines priority for automatic selection
+    MODEL_CHOICES = (
+        ("auto", pgettext_lazy("OpenAI model selection", "Automatic selection")),
+        ("o1-mini", "OpenAI o1-mini"),
+        ("o1-preview", "OpenAI o1-preview"),
+        ("gpt-4o-mini", "GPT-4o mini"),
+        ("gpt-4o", "GPT-4o"),
+        ("gpt-4-turbo", "GPT-4 Turbo"),
+        ("gpt-4", "GPT-4"),
+        ("gpt-3.5-turbo", "GPT-3.5 Turbo"),
+        ("custom", pgettext_lazy("OpenAI model selection", "Custom model")),
+    )
+    base_url = WeblateServiceURLField(
+        label=pgettext_lazy(
+            "Automatic suggestion service configuration",
+            "OpenAI API base URL",
+        ),
+        widget=forms.TextInput,
+        help_text=gettext_lazy(
+            "Base URL of the OpenAI API, if it differs from the OpenAI default URL"
+        ),
+        required=False,
+    )
+    model = forms.ChoiceField(
+        label=pgettext_lazy(
+            "Automatic suggestion service configuration",
+            "OpenAI model",
+        ),
+        initial="auto",
+        choices=MODEL_CHOICES,
+    )
+    custom_model = forms.CharField(
+        label=pgettext_lazy(
+            "OpenAI model selection",
+            "Custom model name",
+        ),
+        help_text=gettext_lazy("Only needed when model is set to 'Custom model'"),
+        required=False,
+    )
+
+    def clean(self) -> None:
+        """Validate `custom_model, model` fields."""
+        has_custom_model = bool(self.cleaned_data.get("custom_model"))
+        model = self.cleaned_data.get("model")
+        if model == "custom" and not has_custom_model:
+            raise ValidationError(
+                {"custom_model": gettext("Missing custom model name.")}
+            )
+        if model != "custom" and has_custom_model:
+            raise ValidationError(
+                {"model": gettext("Choose custom model here to enable it.")}
+            )
+        super().clean()
+
+
+class AzureOpenAIMachineryForm(BaseOpenAIMachineryForm):
+    azure_endpoint = WeblateServiceURLField(
+        label=pgettext_lazy(
+            "Automatic suggestion service configuration",
+            "Azure OpenAI endpoint URL",
+        ),
+        widget=forms.TextInput,
+        help_text=gettext_lazy(
+            "Endpoint URL of the instance, e.g: https://my-instance.openai.azure.com."
+        ),
+    )
+    deployment = forms.CharField(
+        label=pgettext_lazy(
+            "Automatic suggestion service configuration",
+            "Azure OpenAI deployment",
+        ),
+        widget=forms.TextInput,
+        help_text=gettext_lazy("The model's unique deployment name."),
     )

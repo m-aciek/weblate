@@ -13,7 +13,9 @@ class ExampleAddon(BaseAddon):
     # matched against property of component
     compat = {"file_format": {"po", "po-mono"}}
     # List of events add-on should receive
-    events = (AddonEvent.EVENT_PRE_COMMIT,)
+    events: set[AddonEvent] = {
+        AddonEvent.EVENT_PRE_COMMIT,
+    }
     # Add-on unique identifier
     name = "weblate.example.example"
     # Verbose name shown in the user interface
@@ -22,5 +24,5 @@ class ExampleAddon(BaseAddon):
     description = gettext_lazy("This add-on does nothing it is just an example.")
 
     # Callback to implement custom behavior
-    def pre_commit(self, translation, author) -> None:
+    def pre_commit(self, translation, author: str, store_hash: bool) -> None:
         return

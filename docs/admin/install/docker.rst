@@ -20,7 +20,7 @@ Installation
 
 This creates a Weblate deployment server via HTTP, so you should place it
 behind HTTPS terminating proxy. You can also deploy with a HTTPS proxy, see
-:ref:`docker-https-portal`.  For larger setups, please see
+:ref:`docker-https-portal`. For larger setups, please see
 :ref:`docker-scaling`.
 
 1. Clone the weblate-docker repo:
@@ -177,7 +177,7 @@ In case you want to use `Let’s Encrypt <https://letsencrypt.org/>`_
 automatically generated SSL certificates on public installation, you need to
 add a reverse HTTPS proxy an additional Docker container, `https-portal
 <https://hub.docker.com/r/steveltn/https-portal/>`_ will be used for that.
-This is made use of in the :file:`docker-compose-https.yml` file.  Then create
+This is made use of in the :file:`docker-compose-https.yml` file. Then create
 a :file:`docker-compose-https.override.yml` file with your settings:
 
 .. code-block:: yaml
@@ -343,7 +343,7 @@ To reset `admin` password, restart the container with
 Number of processes and memory consumption
 ------------------------------------------
 
-The number of worker processes for both uWSGI and Celery is determined
+The number of worker processes for both WSGI and Celery is determined
 automatically based on number of CPUs. This works well for most cloud virtual
 machines as these typically have few CPUs and good amount of memory.
 
@@ -365,6 +365,13 @@ You can also fine-tune individual worker categories:
       CELERY_NOTIFY_OPTIONS: --concurrency 1
       CELERY_TRANSLATE_OPTIONS: --concurrency 1
 
+Memory usage can be further reduced by running only a single Celery process:
+
+.. code-block:: yaml
+
+    environment:
+      CELERY_SINGLE_PROCESS: 1
+
 .. seealso::
 
    :envvar:`WEBLATE_WORKERS`
@@ -374,6 +381,7 @@ You can also fine-tune individual worker categories:
    :envvar:`CELERY_TRANSLATE_OPTIONS`,
    :envvar:`CELERY_BACKUP_OPTIONS`,
    :envvar:`CELERY_BEAT_OPTIONS`,
+   :envvar:`CELERY_SINGLE_PROCESS`,
    :envvar:`WEB_WORKERS`
 
 .. _docker-scaling:
@@ -390,7 +398,7 @@ volume should be separate for each container.
 
 Each Weblate container has defined role using :envvar:`WEBLATE_SERVICE`
 environment variable. Please follow carefully the documentation as some of the
-services should be running just once in the cluster and the ordering of the
+services should be running just once in the cluster, and the order of the
 services matters as well.
 
 You can find example setup in the ``docker-compose`` repo as
@@ -441,7 +449,7 @@ Related :file:`docker-compose.yml` might look like:
 
 .. seealso::
 
-   `How to use secrets in Docker Compose <https://docs.docker.com/compose/use-secrets/>`_
+   `How to use secrets in Docker Compose <https://docs.docker.com/compose/how-tos/use-secrets/>`_
 
 Generic settings
 ++++++++++++++++
@@ -473,18 +481,39 @@ Generic settings
 
     Configures the logging of the database queries verbosity.
 
+.. envvar:: WEBLATE_LOG_GELF_HOST
+
+   .. versionadded:: 5.9
+
+   Configures remote logging using GELF TCP connection. Can be used to integrate with Graylog.
+
+.. envvar:: WEBLATE_LOG_GELF_PORT
+
+   .. versionadded:: 5.9
+
+   Use custom port for :envvar:`WEBLATE_LOG_GELF_HOST`, defaults to 12201.
+
 .. envvar:: WEBLATE_SITE_TITLE
 
     Changes the site-title shown in the header of all pages.
 
 .. envvar:: WEBLATE_SITE_DOMAIN
 
-    Configures the site domain. This parameter is required.
+   Configures the site domain. This parameter is required.
 
-    .. seealso::
+   Include port if using a non-standard one.
 
-        :ref:`production-site`,
-        :setting:`SITE_DOMAIN`
+   **Example:**
+
+   .. code-block:: yaml
+
+      environment:
+        WEBLATE_SITE_DOMAIN: example.com:8080
+
+   .. seealso::
+
+      :ref:`production-site`,
+      :setting:`SITE_DOMAIN`
 
 .. envvar:: WEBLATE_ADMIN_NAME
 .. envvar:: WEBLATE_ADMIN_EMAIL
@@ -532,6 +561,18 @@ Generic settings
             :envvar:`WEBLATE_ADMIN_PASSWORD`,
             :envvar:`WEBLATE_ADMIN_NAME`,
             :envvar:`WEBLATE_ADMIN_EMAIL`
+
+.. envvar:: WEBLATE_ADMIN_NOTIFY_ERROR
+
+   Whether to sent e-mail to admins upon server error. Turned on by default.
+
+   You might want to use other error collection like Sentry or Rollbar and turn this off.
+
+   .. seealso::
+
+      :ref:`django:logging-security-implications`,
+      :envvar:`ROLLBAR_KEY`,
+      :envvar:`SENTRY_DSN`
 
 .. envvar:: WEBLATE_SERVER_EMAIL
 
@@ -790,7 +831,7 @@ Generic settings
 
     Configures :setting:`DEFAULT_COMMITER_NAME`.
 
-.. envvar::  WEBLATE_DEFAULT_SHARED_TM
+.. envvar:: WEBLATE_DEFAULT_SHARED_TM
 
    Configures :setting:`DEFAULT_SHARED_TM`.
 
@@ -820,6 +861,7 @@ Generic settings
 .. envvar:: WEBLATE_CSP_CONNECT_SRC
 .. envvar:: WEBLATE_CSP_STYLE_SRC
 .. envvar:: WEBLATE_CSP_FONT_SRC
+.. envvar:: WEBLATE_CSP_FORM_SRC
 
     Allows to customize ``Content-Security-Policy`` HTTP header.
 
@@ -831,6 +873,7 @@ Generic settings
         :setting:`CSP_CONNECT_SRC`,
         :setting:`CSP_STYLE_SRC`,
         :setting:`CSP_FONT_SRC`
+        :setting:`CSP_FORM_SRC`
 
 .. envvar:: WEBLATE_LICENSE_FILTER
 
@@ -968,11 +1011,17 @@ Generic settings
 
    Configures :setting:`UNUSED_ALERT_DAYS`.
 
+.. envvar:: WEBLATE_UPDATE_LANGUAGES
+
+   .. versionadded:: 4.3.2
+
+   Configures :setting:`UPDATE_LANGUAGES`.
+
 .. envvar:: WEBLATE_CORS_ALLOWED_ORIGINS
 
    .. versionadded:: 4.16
 
-   Allow CORS requests from given origins.
+   Allow CORS requests to API from given origins.
 
    **Example:**
 
@@ -980,6 +1029,12 @@ Generic settings
 
         environment:
           WEBLATE_CORS_ALLOWED_ORIGINS: https://example.com,https://weblate.org
+
+.. envvar:: WEBLATE_CORS_ALLOW_ALL_ORIGINS
+
+   .. versionadded:: 5.6.1
+
+      Allows CORS requests to API from all origins.
 
 
 .. envvar:: CLIENT_MAX_BODY_SIZE
@@ -1005,7 +1060,7 @@ Code hosting sites credentials
 ++++++++++++++++++++++++++++++
 
 In the Docker container, the code hosting credentials can be configured either
-in separate variables or using a Python dictionary to set them at once.  The
+in separate variables or using a Python dictionary to set them at once. The
 following examples are for :ref:`vcs-github`, but applies to all :ref:`vcs`
 with appropriately changed variable names.
 
@@ -1083,6 +1138,14 @@ Or the path to a file containing the Python dictionary:
 .. envvar:: WEBLATE_BITBUCKETSERVER_CREDENTIALS
 
     Configures :ref:`vcs-bitbucket-server` by changing :setting:`BITBUCKETSERVER_CREDENTIALS`.
+
+.. envvar:: WEBLATE_BITBUCKETCLOUD_USERNAME
+.. envvar:: WEBLATE_BITBUCKETCLOUD_WORKSPACE
+.. envvar:: WEBLATE_BITBUCKETCLOUD_TOKEN
+.. envvar:: WEBLATE_BITBUCKETCLOUD_HOST
+.. envvar:: WEBLATE_BITBUCKETCLOUD_CREDENTIALS
+
+    Configures :ref:`vcs-bitbucket-cloud` by changing :setting:`BITBUCKETCLOUD_CREDENTIALS`.
 
     .. seealso:: :ref:`Configuring code hosting credentials in Docker <docker-vcs-config>`
 
@@ -1405,7 +1468,9 @@ both Weblate and PostgreSQL containers.
 
 .. envvar:: POSTGRES_ALTER_ROLE
 
-    Configures name of role to alter during migrations, see :ref:`config-postgresql`.
+    Configures name of the PostgreSQL role to alter during the database migration, see :ref:`config-postgresql`.
+
+    Defaults to :envvar:`POSTGRES_USER`.
 
 .. envvar:: POSTGRES_CONN_MAX_AGE
 
@@ -1679,7 +1744,7 @@ To enable support for Sentry, set following:
 
 .. envvar:: SENTRY_TRACES_SAMPLE_RATE
 
-   Configure sampling rate for performance monitoring. Set to 1 to trace all events, 0 (the default) disables tracing.
+   Configures :setting:`SENTRY_TRACES_SAMPLE_RATE`.
 
    **Example:**
 
@@ -1688,13 +1753,9 @@ To enable support for Sentry, set following:
        environment:
          SENTRY_TRACES_SAMPLE_RATE: 0.5
 
-   .. seealso::
-
-      `Sentry Performance Monitoring <https://docs.sentry.io/product/performance/>`_,
-
 .. envvar:: SENTRY_PROFILES_SAMPLE_RATE
 
-   Configure sampling rate for profiling monitoring. Set to 1 to trace all events, 0 (the default) disables tracing.
+   Configures :setting:`SENTRY_PROFILES_SAMPLE_RATE`.
 
    **Example:**
 
@@ -1702,10 +1763,6 @@ To enable support for Sentry, set following:
 
        environment:
          SENTRY_PROFILES_SAMPLE_RATE: 0.5
-
-   .. seealso::
-
-      `Sentry Profiling <https://docs.sentry.io/product/profiling/>`_
 
 .. envvar:: SENTRY_SEND_PII
 
@@ -1744,8 +1801,8 @@ Localization CDN
         :setting:`LOCALIZE_CDN_PATH`
 
 
-Changing enabled apps, checks, add-ons or autofixes
-+++++++++++++++++++++++++++++++++++++++++++++++++++
+Changing enabled apps, checks, add-ons, machine translation or autofixes
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 The built-in configuration of enabled checks, add-ons or autofixes can be
 adjusted by the following variables:
@@ -1758,6 +1815,13 @@ adjusted by the following variables:
 .. envvar:: WEBLATE_REMOVE_AUTOFIX
 .. envvar:: WEBLATE_ADD_ADDONS
 .. envvar:: WEBLATE_REMOVE_ADDONS
+.. envvar:: WEBLATE_ADD_MACHINERY
+
+   .. versionadded:: 5.6.1
+
+.. envvar:: WEBLATE_REMOVE_MACHINERY
+
+   .. versionadded:: 5.6.1
 
 **Example:**
 
@@ -1773,6 +1837,7 @@ adjusted by the following variables:
    :setting:`AUTOFIX_LIST`,
    :setting:`WEBLATE_ADDONS`,
    :setting:`django:INSTALLED_APPS`
+   :setting:`WEBLATE_MACHINERY`
 
 Container settings
 ++++++++++++++++++
@@ -1816,9 +1881,24 @@ Container settings
         :doc:`Celery worker options <celery:reference/celery.bin.worker>`,
         :ref:`celery`
 
+.. envvar:: CELERY_SINGLE_PROCESS
+
+   .. versionadded:: 5.7.1
+
+    This variable can be set to ``1`` to run only one celery process. This reduces memory usage but may impact Weblate performance.
+
+    .. code-block:: yaml
+
+        environment:
+          CELERY_SINGLE_PROCESS: 1
+
+    .. seealso::
+
+        :ref:`minimal-celery`
+
 .. envvar:: WEB_WORKERS
 
-    Configure how many uWSGI workers should be executed.
+    Configure how many WSGI workers should be executed.
 
     It defaults to :envvar:`WEBLATE_WORKERS`.
 
@@ -1828,6 +1908,11 @@ Container settings
 
         environment:
           WEB_WORKERS: 32
+
+   .. versionchanged:: 5.9
+
+      The Docker container runs two WSGI processes since 5.9 and
+      :envvar:`WEB_WORKERS` configures how many threads each process will have.
 
 .. envvar:: WEBLATE_SERVICE
 
@@ -1858,29 +1943,35 @@ Container settings
 Docker container volumes
 ------------------------
 
-There are two volumes (data and cache) exported by the Weblate container. The
+There are two volumes (``data`` and ``cache``) exported by the Weblate container. The
 other service containers (PostgreSQL or Redis) have their data volumes as well,
 but those are not covered by this document.
 
-The data volume is used to store Weblate persistent data such as cloned
-repositories or to customize Weblate installation.
+The ``data`` volume is mounted as :file:`/app/data` and is used to store
+Weblate persistent data such as cloned repositories or to customize Weblate
+installation. :setting:`DATA_DIR` describes in more detail what is stored here.
 
 The placement of the Docker volume on host system depends on your Docker
 configuration, but usually it is stored in
 :file:`/var/lib/docker/volumes/weblate-docker_weblate-data/_data/` (the path
 consist of name of your docker-compose directory, container, and volume names).
-In the container it is mounted as :file:`/app/data`.
 
-The cache volume is mounted as :file:`/app/cache` and is used to store static
+The ``cache`` volume is mounted as :file:`/app/cache` and is used to store static
 files and :setting:`CACHE_DIR`. Its content is recreated on container startup
 and the volume can be mounted using ephemeral filesystem such as `tmpfs`.
 
 When creating the volumes manually, the directories should be owned by UID 1000
 as that is user used inside the container.
 
+Weblate container can also be executed with a read-only root file system. In
+this case, two additional ``tmpfs`` volumes should be mounted: ``/tmp`` and
+``/run``.
+
 .. seealso::
 
-   `Docker volumes documentation <https://docs.docker.com/storage/volumes/>`_
+   `Docker volumes documentation <https://docs.docker.com/engine/storage/volumes/>`_,
+   :setting:`DATA_DIR`,
+   :setting:`CACHE_DIR`
 
 Read-only root filesystem
 +++++++++++++++++++++++++
@@ -1930,69 +2021,69 @@ Overriding settings by extending the Docker image
 
 To override settings at the Docker image level instead of from the data volume:
 
-#.  :ref:`Create a custom Python package <custom-module>`.
+#. :ref:`Create a custom Python package <custom-module>`.
 
-#.  Add a module to your package that imports all settings from
-    ``weblate.settings_docker``.
+#. Add a module to your package that imports all settings from
+   ``weblate.settings_docker``.
 
-    For example, within the example package structure defined at
-    :ref:`custom-module`, you could create a file at
-    ``weblate_customization/weblate_customization/settings.py`` with the
-    following initial code:
+   For example, within the example package structure defined at
+   :ref:`custom-module`, you could create a file at
+   ``weblate_customization/weblate_customization/settings.py`` with the
+   following initial code:
 
-    .. code-block:: python
+   .. code-block:: python
 
-        from weblate.settings_docker import *
+       from weblate.settings_docker import *
 
-#.  Create a custom ``Dockerfile`` that inherits from the official Weblate
-    Docker image, and then installs your package and points the
-    ``DJANGO_SETTINGS_MODULE`` environment variable to your settings module:
+#. Create a custom ``Dockerfile`` that inherits from the official Weblate
+   Docker image, and then installs your package and points the
+   ``DJANGO_SETTINGS_MODULE`` environment variable to your settings module:
 
-    .. code-block:: docker
+   .. code-block:: docker
 
-        FROM weblate/weblate
+       FROM weblate/weblate
 
-        USER root
+       USER root
 
-        COPY weblate_customization /usr/src/weblate_customization
-        RUN pip install --no-cache-dir /usr/src/weblate_customization
-        ENV DJANGO_SETTINGS_MODULE=weblate_customization.settings
+       COPY weblate_customization /usr/src/weblate_customization
+       RUN source /app/venv/bin/activate && uv pip install --no-cache-dir /usr/src/weblate_customization
+       ENV DJANGO_SETTINGS_MODULE=weblate_customization.settings
 
-        USER 1000
+       USER 1000
 
-#.  Instead of using the official Weblate Docker image, build a custom image
-    from this ``Dockerfile`` file.
+#. Instead of using the official Weblate Docker image, build a custom image
+   from this ``Dockerfile`` file.
 
-    There is `no clean way <https://github.com/docker/compose/issues/7231>`__
-    to do this with ``docker-compose.override.yml``. You *could* add
-    ``build: .`` to the ``weblate`` node in that file, but then your custom
-    image will be tagged as ``weblate/weblate`` in your system, which could be
-    problematic.
+   There is `no clean way <https://github.com/docker/compose/issues/7231>`__
+   to do this with ``docker-compose.override.yml``. You *could* add
+   ``build: .`` to the ``weblate`` node in that file, but then your custom
+   image will be tagged as ``weblate/weblate`` in your system, which could be
+   problematic.
 
-    So, instead of using the ``docker-compose.yml`` straight from the `official
-    repository <https://github.com/WeblateOrg/docker-compose>`__, unmodified,
-    and extending it through ``docker-compose.override.yml``, you may want to
-    make a copy of the official ``docker-compose.yml`` file, and edit your copy
-    to replace ``image: weblate/weblate`` with ``build: .``.
+   So, instead of using the ``docker-compose.yml`` straight from the `official
+   repository <https://github.com/WeblateOrg/docker-compose>`__, unmodified,
+   and extending it through ``docker-compose.override.yml``, you may want to
+   make a copy of the official ``docker-compose.yml`` file, and edit your copy
+   to replace ``image: weblate/weblate`` with ``build: .``.
 
-    See the `Compose file build reference`_ for details on building images from
-    source when using ``docker-compose``.
+   See the `Compose file build reference`_ for details on building images from
+   source when using ``docker-compose``.
 
-    .. _Compose file build reference: https://docs.docker.com/compose/compose-file/build/
+   .. _Compose file build reference: https://docs.docker.com/reference/compose-file/build/
 
-#.  Extend your custom settings module to define or redefine settings.
+#. Extend your custom settings module to define or redefine settings.
 
-    You can define settings before or after the import statement above to
-    determine which settings take precedence. Settings defined before the
-    import statement can be overridden by environment variables and setting
-    overrides defined in the data volume. Setting defined after the import
-    statement cannot be overridden.
+   You can define settings before or after the import statement above to
+   determine which settings take precedence. Settings defined before the
+   import statement can be overridden by environment variables and setting
+   overrides defined in the data volume. Setting defined after the import
+   statement cannot be overridden.
 
-    You can also go further. For example, you can reproduce some of the things
-    that ``weblate.docker_settings`` `does
-    <https://github.com/WeblateOrg/weblate/blob/main/weblate/settings_docker.py>`__,
-    such as exposing settings as environment variables, or allow overriding
-    settings from Python files in the data volume.
+   You can also go further. For example, you can reproduce some of the things
+   that ``weblate.docker_settings`` `does
+   <https://github.com/WeblateOrg/weblate/blob/main/weblate/settings_docker.py>`__,
+   such as exposing settings as environment variables, or allow overriding
+   settings from Python files in the data volume.
 
 Replacing logo and other static files
 -------------------------------------

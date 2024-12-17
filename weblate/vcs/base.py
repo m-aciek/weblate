@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 
     from django_stubs_ext import StrOrPromise
 
+    from weblate.trans.models import Component
+
 LOGGER = logging.getLogger("weblate.vcs")
 
 
@@ -79,8 +81,9 @@ class Repository:
     def __init__(
         self,
         path: str,
+        *,
         branch: str | None = None,
-        component=None,
+        component: Component | None = None,
         local: bool = False,
         skip_init: bool = False,
     ) -> None:
@@ -106,7 +109,8 @@ class Repository:
             # Create ssh wrapper for possible use
             SSH_WRAPPER.create()
             if not skip_init and not self.is_valid():
-                self.init()
+                with self.lock:
+                    self.create_blank_repository(self.path)
 
     @classmethod
     def get_remote_branch(cls, repo: str):  # noqa: ARG003
@@ -147,7 +151,8 @@ class Repository:
         """Check whether this is a valid repository."""
         raise NotImplementedError
 
-    def init(self) -> None:
+    @classmethod
+    def create_blank_repository(cls, path: str) -> None:
         """Initialize the repository."""
         raise NotImplementedError
 
@@ -158,7 +163,8 @@ class Repository:
         repository_path = path_separator(os.path.realpath(self.path))
 
         if not real_path.startswith(repository_path):
-            raise ValueError("Too many symlinks or link outside tree")
+            msg = "Too many symlinks or link outside tree"
+            raise ValueError(msg)
 
         return real_path[len(repository_path) :].lstrip("/")
 
@@ -178,6 +184,7 @@ class Repository:
     def _popen(
         cls,
         args: list[str],
+        *,
         cwd: str | None = None,
         merge_err: bool = True,
         fullcmd: bool = False,
@@ -191,18 +198,26 @@ class Repository:
         if not fullcmd:
             args = [cls._cmd, *list(args)]
         text_cmd = " ".join(args)
-        process = subprocess.run(
-            args,
-            cwd=cwd,
-            env={} if local else cls._getenv(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT if merge_err else subprocess.PIPE,
-            text=not raw,
-            check=False,
-            # These are mutually exclusive
-            input=stdin,
-            stdin=subprocess.PIPE if stdin is None else None,
-        )
+        try:
+            process = subprocess.run(
+                args,
+                cwd=cwd,
+                env={} if local else cls._getenv(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT if merge_err else subprocess.PIPE,
+                text=not raw,
+                check=False,
+                # These are mutually exclusive
+                input=stdin,
+                stdin=subprocess.PIPE if stdin is None else None,
+                # Excessively long timeout to catch misbehaving processes
+                timeout=3600,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RepositoryError(
+                0,
+                f"Subprocess didn't complete before {error.timeout} seconds\n{error.stdout}{error.stderr or ''}",
+            ) from error
         cls.add_breadcrumb(
             text_cmd,
             retcode=process.returncode,
@@ -219,6 +234,7 @@ class Repository:
     def execute(
         self,
         args: list[str],
+        *,
         needs_lock: bool = True,
         fullcmd: bool = False,
         merge_err: bool = True,
@@ -227,14 +243,15 @@ class Repository:
         """Execute command and caches its output."""
         if needs_lock:
             if not self.lock.is_locked:
-                raise RuntimeError("Repository operation without lock held!")
+                msg = "Repository operation without lock held!"
+                raise RuntimeError(msg)
             if self.component:
                 self.ensure_config_updated()
         is_status = args[0] == self._cmd_status[0]
         try:
             self.last_output = self._popen(
                 args,
-                self.path,
+                cwd=self.path,
                 fullcmd=fullcmd,
                 local=self.local,
                 merge_err=merge_err,
@@ -282,7 +299,7 @@ class Repository:
     @classmethod
     def clone(cls, source: str, target: str, branch: str, component=None):
         """Clone repository and return object for cloned repository."""
-        repo = cls(target, branch, component, skip_init=True)
+        repo = cls(target, branch=branch, component=component, skip_init=True)
         with repo.lock:
             cls._clone(source, target, branch)
         return repo

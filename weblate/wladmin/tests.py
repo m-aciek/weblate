@@ -6,6 +6,7 @@ import json
 import os
 from io import StringIO
 from tempfile import TemporaryDirectory
+from unittest import TestCase
 
 import responses
 from django.conf import settings
@@ -23,6 +24,7 @@ from weblate.trans.tests.test_views import ViewTestCase
 from weblate.trans.tests.utils import get_test_file
 from weblate.utils.apps import check_data_writable
 from weblate.utils.unittest import tempdir_setting
+from weblate.wladmin.forms import ThemeColorField, ThemeColorWidget
 from weblate.wladmin.models import BackupService, ConfigurationError, SupportStatus
 
 TEST_BACKENDS = ("weblate.accounts.auth.WeblateUserBackend",)
@@ -50,7 +52,7 @@ class AdminTest(ViewTestCase):
 
     @tempdir_setting("DATA_DIR")
     def test_ssh_generate(self) -> None:
-        self.assertEqual(check_data_writable(), [])
+        self.assertEqual(check_data_writable(app_configs=None, databases=None), [])
         response = self.client.get(reverse("manage-ssh"))
         self.assertContains(response, "Generate RSA SSH key")
         self.assertContains(response, "Generate Ed25519 SSH key")
@@ -75,7 +77,7 @@ class AdminTest(ViewTestCase):
 
     @tempdir_setting("DATA_DIR")
     def test_ssh_add(self) -> None:
-        self.assertEqual(check_data_writable(), [])
+        self.assertEqual(check_data_writable(app_configs=None, databases=None), [])
         oldpath = os.environ["PATH"]
         try:
             os.environ["PATH"] = ":".join((get_test_file(""), os.environ["PATH"]))
@@ -408,3 +410,41 @@ class AdminTest(ViewTestCase):
         out = StringIO()
         call_command("configuration_health_check", stdout=out)
         self.assertEqual(out.getvalue(), "")
+
+
+class TestThemeColorField(TestCase):
+    """Tests for ThemeColorField widget."""
+
+    def setUp(self):
+        self.field = ThemeColorField()
+        self.widget = ThemeColorWidget()
+
+    def test_decompress_two_colors(self):
+        value = "#ffffff,#000000"
+        expected = ["#ffffff", "#000000"]
+        self.assertEqual(self.widget.decompress(value), expected)
+
+    def test_decompress_one_color(self):
+        value = "#ffffff"
+        expected = ["#ffffff", "#ffffff"]
+        self.assertEqual(self.widget.decompress(value), expected)
+
+    def test_decompress_no_value(self):
+        value = None
+        expected = [None, None]
+        self.assertEqual(self.widget.decompress(value), expected)
+
+    def test_compress_two_colors(self):
+        data_list = ["#ffffff", "#000000"]
+        expected = "#ffffff,#000000"
+        self.assertEqual(self.field.compress(data_list), expected)
+
+    def test_compress_one_color(self):
+        data_list = ["#ffffff", "#ffffff"]
+        expected = "#ffffff,#ffffff"
+        self.assertEqual(self.field.compress(data_list), expected)
+
+    def test_compress_no_data(self):
+        data_list = []
+        expected = None
+        self.assertEqual(self.field.compress(data_list), expected)

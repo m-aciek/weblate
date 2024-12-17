@@ -1,10 +1,14 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
+from django.db.models import Count, Sum
 from django.shortcuts import redirect
 from django.utils.translation import gettext, ngettext
 from django.views.decorators.cache import never_cache
@@ -31,10 +35,13 @@ from weblate.utils.views import (
     show_form_errors,
 )
 
+if TYPE_CHECKING:
+    from weblate.auth.models import AuthenticatedHttpRequest
+
 
 @login_required
 @require_POST
-def search_replace(request, path):
+def search_replace(request: AuthenticatedHttpRequest, path):
     obj, unit_set, context = parse_path_units(
         request,
         path,
@@ -44,7 +51,7 @@ def search_replace(request, path):
     if not request.user.has_perm("unit.edit", obj):
         raise PermissionDenied
 
-    form = ReplaceForm(request.POST)
+    form = ReplaceForm(obj=obj, data=request.POST)
 
     if not form.is_valid():
         messages.error(request, gettext("Could not process form!"))
@@ -118,7 +125,7 @@ def search_replace(request, path):
 
 
 @never_cache
-def search(request, path=None):
+def search(request: AuthenticatedHttpRequest, path=None):
     """Perform site-wide search on units."""
     is_ratelimited = not check_rate_limit("search", request)
     search_form = SearchForm(user=request.user, data=request.GET)
@@ -147,9 +154,17 @@ def search(request, path=None):
             user=request.user, data=request.GET, show_builder=False
         )
         search_form.is_valid()
-        units = unit_set.prefetch_full().search(
+        units = unit_set.prefetch_bulk().search(
             search_form.cleaned_data.get("q", ""), project=context.get("project")
         )
+
+        # Count total strings and sum total words from the search results
+        aggregation = units.aggregate(
+            total_strings=Count("id"), total_words=Sum("num_words")
+        )
+        # Get the total strings and total words from the aggregation
+        total_strings = aggregation["total_strings"]
+        total_words = aggregation["total_words"]
 
         units = get_paginator(
             request, units.order_by_request(search_form.cleaned_data, obj)
@@ -168,6 +183,8 @@ def search(request, path=None):
                 "search_items": search_form.items(),
                 "sort_name": sort["name"],
                 "sort_query": sort["query"],
+                "total_strings": total_strings,
+                "total_words": total_words,
             }
         )
     elif is_ratelimited:
@@ -184,7 +201,7 @@ def search(request, path=None):
 @login_required
 @require_POST
 @never_cache
-def bulk_edit(request, path):
+def bulk_edit(request: AuthenticatedHttpRequest, path):
     obj, unit_set, context = parse_path_units(
         request,
         path,

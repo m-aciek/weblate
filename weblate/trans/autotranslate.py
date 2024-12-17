@@ -10,10 +10,16 @@ from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.db.models.functions import MD5, Lower
 
+from weblate.machinery.base import BatchMachineTranslation, MachineTranslationError
 from weblate.machinery.models import MACHINERY
 from weblate.trans.models import Change, Component, Suggestion, Unit
 from weblate.trans.util import split_plural
-from weblate.utils.state import STATE_APPROVED, STATE_FUZZY, STATE_TRANSLATED
+from weblate.utils.state import (
+    STATE_APPROVED,
+    STATE_FUZZY,
+    STATE_TRANSLATED,
+    StringState,
+)
 
 
 class AutoTranslate:
@@ -55,21 +61,27 @@ class AutoTranslate:
                 },
             )
 
-    def update(self, unit, state: int, target: list[str], user=None) -> None:
+    def update(
+        self, unit: Unit, state: StringState, target: list[str], user=None
+    ) -> None:
         if isinstance(target, str):
             target = [target]
         if self.mode == "suggest" or any(
             len(item) > unit.get_max_length() for item in target
         ):
             suggestion = Suggestion.objects.add(
-                unit, target, request=None, vote=False, user=user
+                unit, target, request=None, vote=False, user=user, raise_exception=False
             )
             if suggestion:
                 self.updated += 1
         else:
             unit.is_batch_update = True
             unit.translate(
-                user or self.user, target, state, Change.ACTION_AUTO, propagate=False
+                user or self.user,
+                target,
+                state,
+                change_action=Change.ACTION_AUTO,
+                propagate=False,
             )
             self.updated += 1
 
@@ -98,11 +110,11 @@ class AutoTranslate:
                 not component.project.contribute_shared_tm
                 and component.project != self.translation.component.project
             ):
-                raise PermissionDenied(
-                    "Project has disabled contribution to shared translation memory."
-                )
+                msg = "Project has disabled contribution to shared translation memory."
+                raise PermissionDenied(msg)
             if component.source_language != source_language:
-                raise PermissionDenied("Component have different source languages.")
+                msg = "Component have different source languages."
+                raise PermissionDenied(msg)
             kwargs["translation__component"] = component
         else:
             project = self.translation.component.project
@@ -136,7 +148,12 @@ class AutoTranslate:
             .filter(source__in=translations.keys())
             .values_list("id", flat=True)
         )
-        units = Unit.objects.filter(pk__in=unit_ids).prefetch_bulk().select_for_update()
+        units = (
+            Unit.objects.filter(pk__in=unit_ids)
+            .prefetch()
+            .prefetch_bulk()
+            .select_for_update()
+        )
         self.progress_steps = len(units)
 
         for pos, unit in enumerate(units):
@@ -157,18 +174,18 @@ class AutoTranslate:
 
         self.post_process()
 
-    def fetch_mt(self, engines, threshold):
+    def fetch_mt(self, engines_list: list[str], threshold: int):
         """Get the translations."""
         units = self.get_units()
         num_units = len(units)
 
         machinery_settings = self.translation.component.project.get_machinery_settings()
 
-        engines = sorted(
+        engines: list[BatchMachineTranslation] = sorted(
             (
                 MACHINERY[engine](setting)
                 for engine, setting in machinery_settings.items()
-                if engine in MACHINERY and engine in engines
+                if engine in MACHINERY and engine in engines_list
             ),
             key=lambda engine: engine.get_rank(),
             reverse=True,
@@ -185,11 +202,17 @@ class AutoTranslate:
             )
 
             for batch_start in range(0, num_units, batch_size):
-                translation_service.batch_translate(
-                    units[batch_start : batch_start + batch_size],
-                    self.user,
-                    threshold=threshold,
-                )
+                try:
+                    translation_service.batch_translate(
+                        units[batch_start : batch_start + batch_size],
+                        self.user,
+                        threshold=threshold,
+                    )
+                except MachineTranslationError as error:
+                    # Ignore errors here to complete fetching
+                    self.translation.log_error(
+                        "failed automatic translation: %s", error
+                    )
                 self.set_progress(pos * num_units + batch_start)
 
         return {

@@ -2,7 +2,10 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 import re
+from typing import TYPE_CHECKING
 
 from crispy_forms.helper import FormHelper
 from crispy_forms.layout import Field, Layout
@@ -15,14 +18,19 @@ from lxml.cssselect import CSSSelector
 from weblate.formats.models import FILE_FORMATS
 from weblate.trans.discovery import ComponentDiscovery
 from weblate.trans.forms import AutoForm, BulkEditForm
-from weblate.trans.models import Translation
+from weblate.trans.models import Component, Project, Translation
 from weblate.utils.forms import CachedModelChoiceField, ContextDiv
-from weblate.utils.render import validate_render, validate_render_component
+from weblate.utils.render import validate_render, validate_render_translation
 from weblate.utils.validators import validate_filename, validate_re
+
+if TYPE_CHECKING:
+    from weblate.auth.models import User
 
 
 class BaseAddonForm(forms.Form):
-    def __init__(self, user, addon, instance=None, *args, **kwargs) -> None:
+    def __init__(
+        self, user: User | None, addon, instance=None, *args, **kwargs
+    ) -> None:
         self._addon = addon
         self.user = user
         forms.Form.__init__(self, *args, **kwargs)
@@ -64,7 +72,7 @@ class GenerateMoForm(BaseAddonForm):
         )
 
     def test_render(self, value) -> None:
-        validate_render_component(value, translation=True)
+        validate_render_translation(value)
 
     def clean_path(self):
         self.test_render(self.cleaned_data["path"])
@@ -94,7 +102,7 @@ class GenerateForm(BaseAddonForm):
         )
 
     def test_render(self, value) -> None:
-        validate_render_component(value, translation=True)
+        validate_render_translation(value)
 
     def clean_filename(self):
         self.test_render(self.cleaned_data["filename"])
@@ -454,7 +462,7 @@ class DiscoveryForm(BaseAddonForm):
 
 
 class AutoAddonForm(BaseAddonForm, AutoForm):
-    def __init__(self, user, addon, instance=None, **kwargs) -> None:
+    def __init__(self, user: User, addon, instance=None, **kwargs) -> None:
         BaseAddonForm.__init__(self, user, addon)
         AutoForm.__init__(
             self, obj=addon.instance.component or addon.instance.project, **kwargs
@@ -462,13 +470,19 @@ class AutoAddonForm(BaseAddonForm, AutoForm):
 
 
 class BulkEditAddonForm(BaseAddonForm, BulkEditForm):
-    def __init__(self, user, addon, instance=None, **kwargs) -> None:
+    def __init__(self, user: User | None, addon, instance=None, **kwargs) -> None:
         BaseAddonForm.__init__(self, user, addon)
-        component = addon.instance.component
+        obj: Project | Component | None = None
+        project: Project | None = None
+        if addon.instance.component:
+            obj = addon.instance.component
+            project = addon.instance.component.project
+        elif addon.instance.project:
+            obj = project = addon.instance.project
         BulkEditForm.__init__(
             self,
-            obj=component,
-            project=component.project if component else None,
+            obj=obj,
+            project=project,
             user=None,
             **kwargs,
         )
@@ -539,7 +553,7 @@ class CDNJSForm(BaseAddonForm):
         except Exception as error:
             raise forms.ValidationError(
                 gettext("Could not parse CSS selector: %s") % error
-            )
+            ) from error
         return self.cleaned_data["css_selector"]
 
 
@@ -630,3 +644,11 @@ class PseudolocaleAddonForm(BaseAddonForm):
         result["source"] = result["source"].pk
         result["target"] = result["target"].pk
         return result
+
+
+class PropertiesSortAddonForm(BaseAddonForm):
+    case_sensitive = forms.BooleanField(
+        label=gettext_lazy("Enable case-sensitive key sorting"),
+        required=False,
+        initial=False,
+    )

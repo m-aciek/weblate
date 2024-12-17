@@ -8,6 +8,7 @@ from logging.handlers import SysLogHandler
 from django.core.exceptions import PermissionDenied
 from django.http import Http404
 
+from weblate.api.spectacular import get_spectacular_settings
 from weblate.utils.environment import (
     get_env_bool,
     get_env_credentials,
@@ -29,6 +30,7 @@ SITE_DOMAIN = get_env_str("WEBLATE_SITE_DOMAIN", required=True)
 # Whether site uses https
 ENABLE_HTTPS = get_env_bool("WEBLATE_ENABLE_HTTPS")
 
+# Site URL
 SITE_URL = "{}://{}".format("https" if ENABLE_HTTPS else "http", SITE_DOMAIN)
 
 #
@@ -114,6 +116,7 @@ LANGUAGES = (
     ("es", "Español"),
     ("fi", "Suomi"),
     ("fr", "Français"),
+    ("ga", "Gaeilge"),
     ("gl", "Galego"),
     ("he", "עברית"),
     ("hu", "Magyar"),
@@ -239,6 +242,11 @@ PAGURE_CREDENTIALS = get_env_credentials("PAGURE")
 # Please see the documentation for more details.
 BITBUCKETSERVER_CREDENTIALS = get_env_credentials("BITBUCKETSERVER")
 
+# Bitbucket username and token for sending merge requests.
+# Please see the documentation for more details.
+BITBUCKETCLOUD_CREDENTIALS = get_env_credentials("BITBUCKETCLOUD")
+
+
 # Default pull request message.
 # Please see the documentation for more details.
 if "WEBLATE_DEFAULT_PULL_MESSAGE" in os.environ:
@@ -249,6 +257,13 @@ AUTHENTICATION_BACKENDS: tuple[str, ...] = ()
 
 # Custom user model
 AUTH_USER_MODEL = "weblate_auth.User"
+
+# WebAuthn
+OTP_WEBAUTHN_RP_NAME = SITE_TITLE
+OTP_WEBAUTHN_RP_ID = SITE_DOMAIN.split(":")[0]
+OTP_WEBAUTHN_ALLOWED_ORIGINS = [SITE_URL]
+OTP_WEBAUTHN_ALLOW_PASSWORDLESS_LOGIN = False
+OTP_WEBAUTHN_HELPER_CLASS = "weblate.accounts.utils.WeblateWebAuthnHelper"
 
 if "WEBLATE_NO_EMAIL_AUTH" not in os.environ:
     AUTHENTICATION_BACKENDS += ("social_core.backends.email.EmailAuth",)
@@ -583,6 +598,7 @@ SOCIAL_AUTH_PIPELINE = [
     "social_core.pipeline.user.create_user",
     "social_core.pipeline.social_auth.associate_user",
     "social_core.pipeline.social_auth.load_extra_data",
+    "weblate.accounts.pipeline.second_factor",
     "weblate.accounts.pipeline.cleanup_next",
     "weblate.accounts.pipeline.user_full_name",
     "weblate.accounts.pipeline.store_email",
@@ -657,6 +673,7 @@ CSP_IMG_SRC = get_env_list("WEBLATE_CSP_IMG_SRC")
 CSP_CONNECT_SRC = get_env_list("WEBLATE_CSP_CONNECT_SRC")
 CSP_STYLE_SRC = get_env_list("WEBLATE_CSP_STYLE_SRC")
 CSP_FONT_SRC = get_env_list("WEBLATE_CSP_FONT_SRC")
+CSP_FORM_SRC = get_env_list("WEBLATE_CSP_FORM_SRC")
 
 # Allow new user registrations
 REGISTRATION_OPEN = get_env_bool("WEBLATE_REGISTRATION_OPEN", True)
@@ -687,12 +704,14 @@ MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "weblate.accounts.middleware.AuthenticationMiddleware",
+    "django_otp.middleware.OTPMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "social_django.middleware.SocialAuthExceptionMiddleware",
     "weblate.accounts.middleware.RequireLoginMiddleware",
     "weblate.api.middleware.ThrottlingMiddleware",
     "weblate.middleware.SecurityMiddleware",
+    "weblate.wladmin.middleware.ManageMiddleware",
 ]
 
 # Rollbar integration
@@ -746,7 +765,6 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.admin",
-    "django.contrib.admindocs",
     "django.contrib.sitemaps",
     "django.contrib.humanize",
     # Third party Django modules
@@ -759,7 +777,37 @@ INSTALLED_APPS = [
     "django_filters",
     "django_celery_beat",
     "corsheaders",
+    "django_otp",
+    "django_otp.plugins.otp_static",
+    "django_otp.plugins.otp_totp",
+    "django_otp_webauthn",
+    "drf_spectacular",
+    "drf_spectacular_sidecar",
 ]
+
+# Legal integration
+LEGAL_INTEGRATION = get_env_str("WEBLATE_LEGAL_INTEGRATION")
+if LEGAL_INTEGRATION:
+    # Hosted Weblate legal documents
+    if LEGAL_INTEGRATION == "wllegal":
+        INSTALLED_APPS.append("wllegal")
+
+    # Enable legal app
+    INSTALLED_APPS.append("weblate.legal")
+
+    # TOS confirmation enforcement
+    if LEGAL_INTEGRATION in {"tos-confirm", "wllegal"}:
+        # Social auth pipeline to confirm TOS upon registration/subsequent sign in
+        SOCIAL_AUTH_PIPELINE.insert(
+            SOCIAL_AUTH_PIPELINE.index(
+                "weblate.accounts.pipeline.second_factor",
+            )
+            + 1,
+            "weblate.legal.pipeline.tos_confirm",
+        )
+        # Middleware to enforce TOS confirmation of signed in users
+        MIDDLEWARE.append("weblate.legal.middleware.RequireTOSMiddleware")
+
 
 modify_env_list(INSTALLED_APPS, "APPS")
 
@@ -772,11 +820,16 @@ DEFAULT_EXCEPTION_REPORTER_FILTER = "weblate.trans.debug.WeblateExceptionReporte
 # - you can also choose "logfile" to log into separate file
 #   after configuring it below
 
-# Detect if we can connect to syslog
+# Syslog is not present inside Docker
 HAVE_SYSLOG = False
-
-DEFAULT_LOG = "console" if DEBUG or not HAVE_SYSLOG else "syslog"
+DEFAULT_LOG = ["console" if DEBUG or not HAVE_SYSLOG else "syslog"]
 DEFAULT_LOGLEVEL = get_env_str("WEBLATE_LOGLEVEL", "DEBUG" if DEBUG else "INFO")
+
+# GELF TCP integration (Graylog)
+WEBLATE_LOG_GELF_HOST = get_env_str("WEBLATE_LOG_GELF_HOST", None)
+
+if WEBLATE_LOG_GELF_HOST:
+    DEFAULT_LOG.append("gelf")
 
 # A sample logging configuration. The only tangible logging
 # performed by this configuration is to send an email to
@@ -788,7 +841,6 @@ LOGGING: dict = {
     "disable_existing_loggers": True,
     "filters": {"require_debug_false": {"()": "django.utils.log.RequireDebugFalse"}},
     "formatters": {
-        "syslog": {"format": "weblate[%(process)d]: %(levelname)s %(message)s"},
         "simple": {"format": "[%(asctime)s: %(levelname)s/%(process)s] %(message)s"},
         "logfile": {"format": "%(asctime)s %(levelname)s %(message)s"},
         "django.server": {
@@ -813,17 +865,10 @@ LOGGING: dict = {
             "class": "logging.StreamHandler",
             "formatter": "django.server",
         },
-        "syslog": {
-            "level": "DEBUG",
-            "class": "logging.handlers.SysLogHandler",
-            "formatter": "syslog",
-            "address": "/dev/log",
-            "facility": SysLogHandler.LOG_LOCAL2,
-        },
     },
     "loggers": {
         "django.request": {
-            "handlers": ["mail_admins", DEFAULT_LOG],
+            "handlers": [*DEFAULT_LOG],
             "level": "ERROR",
             "propagate": True,
         },
@@ -834,25 +879,77 @@ LOGGING: dict = {
         },
         # Logging database queries
         "django.db.backends": {
-            "handlers": [DEFAULT_LOG],
+            "handlers": [*DEFAULT_LOG],
+            # Toggle to DEBUG to log all database queries
             "level": get_env_str("WEBLATE_LOGLEVEL_DATABASE", "CRITICAL"),
         },
-        "redis_lock": {"handlers": [DEFAULT_LOG], "level": DEFAULT_LOGLEVEL},
-        "weblate": {"handlers": [DEFAULT_LOG], "level": DEFAULT_LOGLEVEL},
+        "redis_lock": {
+            "handlers": [*DEFAULT_LOG],
+            "level": DEFAULT_LOGLEVEL,
+        },
+        "weblate": {
+            "handlers": [*DEFAULT_LOG],
+            "level": DEFAULT_LOGLEVEL,
+        },
         # Logging VCS operations
-        "weblate.vcs": {"handlers": [DEFAULT_LOG], "level": DEFAULT_LOGLEVEL},
+        "weblate.vcs": {
+            "handlers": [*DEFAULT_LOG],
+            "level": DEFAULT_LOGLEVEL,
+        },
         # Python Social Auth
-        "social": {"handlers": [DEFAULT_LOG], "level": DEFAULT_LOGLEVEL},
+        "social": {
+            "handlers": [*DEFAULT_LOG],
+            "level": DEFAULT_LOGLEVEL,
+        },
         # Django Authentication Using LDAP
-        "django_auth_ldap": {"handlers": [DEFAULT_LOG], "level": DEFAULT_LOGLEVEL},
+        "django_auth_ldap": {
+            "handlers": [*DEFAULT_LOG],
+            "level": DEFAULT_LOGLEVEL,
+        },
         # SAML IdP
-        "djangosaml2idp": {"handlers": [DEFAULT_LOG], "level": DEFAULT_LOGLEVEL},
+        "djangosaml2idp": {
+            "handlers": [*DEFAULT_LOG],
+            "level": DEFAULT_LOGLEVEL,
+        },
+        # gunicorn
+        "gunicorn.error": {
+            "level": "INFO",
+            "handlers": [*DEFAULT_LOG],
+            "propagate": True,
+            "qualname": "gunicorn.error",
+        },
     },
 }
 
-# Remove syslog setup if it's not present
-if not HAVE_SYSLOG:
-    del LOGGING["handlers"]["syslog"]
+# Configure syslog setup if it's present
+if HAVE_SYSLOG:
+    LOGGING["formatters"]["syslog"] = {
+        "format": "weblate[%(process)d]: %(levelname)s %(message)s",
+    }
+    LOGGING["handlers"]["syslog"] = {
+        "level": "DEBUG",
+        "class": "logging.handlers.SysLogHandler",
+        "formatter": "syslog",
+        "address": "/dev/log",
+        "facility": SysLogHandler.LOG_LOCAL2,
+    }
+
+# Configure GELF integration if presetn
+if WEBLATE_LOG_GELF_HOST:
+    LOGGING["formatters"]["gelf"] = {
+        "()": "logging_gelf.formatters.GELFFormatter",
+        "null_character": True,
+    }
+    LOGGING["handlers"]["gelf"] = {
+        "level": "DEBUG",
+        "class": "logging_gelf.handlers.GELFTCPSocketHandler",
+        "formatter": "gelf",
+        "host": WEBLATE_LOG_GELF_HOST,
+        "port": get_env_int("WEBLATE_LOG_GELF_PORT", 12201),
+    }
+
+if get_env_bool("WEBLATE_ADMIN_NOTIFY_ERROR", True):
+    LOGGING["loggers"]["django.request"]["handlers"].append("mail_admins")
 
 # Use HTTPS when creating redirect URLs for social authentication, see
 # documentation for more details:
@@ -914,7 +1011,6 @@ LOGOUT_URL = f"{URL_PREFIX}/accounts/logout/"
 
 # Default location for login
 LOGIN_REDIRECT_URL = f"{URL_PREFIX}/"
-LOGOUT_REDIRECT_URL = f"{URL_PREFIX}/"
 
 # Opt-in for Django 6.0 default
 FORMS_URLFIELD_ASSUME_HTTPS = True
@@ -1035,6 +1131,7 @@ CHECK_LIST = [
     "weblate.checks.source.LongUntranslatedCheck",
     "weblate.checks.format.MultipleUnnamedFormatsCheck",
     "weblate.checks.glossary.GlossaryCheck",
+    "weblate.checks.glossary.ProhibitedInitialCharacterCheck",
     "weblate.checks.fluent.syntax.FluentSourceSyntaxCheck",
     "weblate.checks.fluent.syntax.FluentTargetSyntaxCheck",
     "weblate.checks.fluent.parts.FluentPartsCheck",
@@ -1065,7 +1162,7 @@ WEBLATE_ADDONS = [
     "weblate.addons.gettext.GettextAuthorComments",
     "weblate.addons.cleanup.CleanupAddon",
     "weblate.addons.cleanup.RemoveBlankAddon",
-    "weblate.addons.consistency.LangaugeConsistencyAddon",
+    "weblate.addons.consistency.LanguageConsistencyAddon",
     "weblate.addons.discovery.DiscoveryAddon",
     "weblate.addons.autotranslate.AutoTranslateAddon",
     "weblate.addons.flags.SourceEditAddon",
@@ -1087,6 +1184,37 @@ WEBLATE_ADDONS = [
     "weblate.addons.cdn.CDNJSAddon",
 ]
 modify_env_list(WEBLATE_ADDONS, "ADDONS")
+
+# Machinery configuration
+WEBLATE_MACHINERY = [
+    "weblate.machinery.apertium.ApertiumAPYTranslation",
+    "weblate.machinery.aws.AWSTranslation",
+    "weblate.machinery.alibaba.AlibabaTranslation",
+    "weblate.machinery.baidu.BaiduTranslation",
+    "weblate.machinery.deepl.DeepLTranslation",
+    "weblate.machinery.glosbe.GlosbeTranslation",
+    "weblate.machinery.google.GoogleTranslation",
+    "weblate.machinery.googlev3.GoogleV3Translation",
+    "weblate.machinery.libretranslate.LibreTranslateTranslation",
+    "weblate.machinery.microsoft.MicrosoftCognitiveTranslation",
+    "weblate.machinery.modernmt.ModernMTTranslation",
+    "weblate.machinery.mymemory.MyMemoryTranslation",
+    "weblate.machinery.netease.NeteaseSightTranslation",
+    "weblate.machinery.tmserver.TMServerTranslation",
+    "weblate.machinery.yandex.YandexTranslation",
+    "weblate.machinery.yandexv2.YandexV2Translation",
+    "weblate.machinery.saptranslationhub.SAPTranslationHub",
+    "weblate.machinery.youdao.YoudaoTranslation",
+    "weblate.machinery.ibm.IBMTranslation",
+    "weblate.machinery.systran.SystranTranslation",
+    "weblate.machinery.openai.OpenAITranslation",
+    "weblate.machinery.openai.AzureOpenAITranslation",
+    "weblate.machinery.weblatetm.WeblateTranslation",
+    "weblate.memory.machine.WeblateMemory",
+    "weblate.machinery.cyrtranslit.CyrTranslitTranslation",
+]
+modify_env_list(WEBLATE_MACHINERY, "MACHINERY")
+
 
 # E-mail address that error messages come from.
 SERVER_EMAIL = get_env_str("WEBLATE_SERVER_EMAIL", "weblate@example.com")
@@ -1135,7 +1263,9 @@ if not get_env_bool("REDIS_VERIFY_SSL", True) and REDIS_PROTO == "rediss":
 
 
 # Store sessions in cache
-SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+SESSION_ENGINE = os.environ.get(
+    "WEBLATE_SESSION_ENGINE", "django.contrib.sessions.backends.cache"
+)
 # Store messages in session
 MESSAGE_STORAGE = "django.contrib.messages.storage.session.SessionStorage"
 
@@ -1167,7 +1297,9 @@ REST_FRAMEWORK = {
     "VIEW_DESCRIPTION_FUNCTION": "weblate.api.views.get_view_description",
     "EXCEPTION_HANDLER": "weblate.api.views.weblate_exception_handler",
     "UNAUTHENTICATED_USER": "weblate.auth.models.get_anonymous",
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
+SPECTACULAR_SETTINGS = get_spectacular_settings(INSTALLED_APPS, SITE_URL, SITE_TITLE)
 
 # Fonts CDN URL
 FONTS_CDN_URL = None
@@ -1210,7 +1342,12 @@ EMAIL_HOST_USER = get_env_str(
 EMAIL_HOST_PASSWORD = get_env_str(
     "WEBLATE_EMAIL_HOST_PASSWORD", get_env_str("WEBLATE_EMAIL_PASSWORD")
 )
-EMAIL_PORT = get_env_int("WEBLATE_EMAIL_PORT", 25)
+DEFAULT_EMAIL_PORT = 25
+if "WEBLATE_EMAIL_USE_TLS" in os.environ:
+    DEFAULT_EMAIL_PORT = 587
+elif "WEBLATE_EMAIL_USE_SSL" in os.environ:
+    DEFAULT_EMAIL_PORT = 465
+EMAIL_PORT = get_env_int("WEBLATE_EMAIL_PORT", DEFAULT_EMAIL_PORT)
 
 # Detect SSL/TLS setup
 if "WEBLATE_EMAIL_USE_TLS" in os.environ or "WEBLATE_EMAIL_USE_SSL" in os.environ:
@@ -1231,8 +1368,16 @@ EMAIL_BACKEND = get_env_str(
 SILENCED_SYSTEM_CHECKS = [
     # We have modified django.contrib.auth.middleware.AuthenticationMiddleware
     # as weblate.accounts.middleware.AuthenticationMiddleware
-    "admin.E408"
+    "admin.E408",
+    # Silence drf_spectacular until these are addressed
+    "drf_spectacular.W001",
+    "drf_spectacular.W002",
 ]
+
+# Silence WebAuthn origin error
+if not ENABLE_HTTPS:
+    SILENCED_SYSTEM_CHECKS.append("otp_webauthn.E031")
+
 SILENCED_SYSTEM_CHECKS.extend(get_env_list("WEBLATE_SILENCED_SYSTEM_CHECKS"))
 
 # Celery worker configuration for production
@@ -1269,6 +1414,7 @@ CELERY_TASK_ROUTES = {
 
 # CORS allowed origins
 CORS_ALLOWED_ORIGINS = get_env_list("WEBLATE_CORS_ALLOWED_ORIGINS")
+CORS_ALLOW_ALL_ORIGINS = get_env_bool("WEBLATE_CORS_ALLOW_ALL_ORIGINS", False)
 CORS_URLS_REGEX = rf"^{URL_PREFIX}/api/.*$"
 
 # Database backup type
@@ -1352,39 +1498,16 @@ GOOGLE_ANALYTICS_ID = get_env_str("WEBLATE_GOOGLE_ANALYTICS_ID")
 SENTRY_DSN = get_env_str("SENTRY_DSN")
 SENTRY_ENVIRONMENT = get_env_str("SENTRY_ENVIRONMENT", SITE_DOMAIN)
 SENTRY_TRACES_SAMPLE_RATE = get_env_float("SENTRY_TRACES_SAMPLE_RATE")
-SENTRY_PROFILES_SAMPLE_RATE = get_env_float("SENTRY_PROFILES_SAMPLE_RATE")
+SENTRY_PROFILES_SAMPLE_RATE = get_env_float("SENTRY_PROFILES_SAMPLE_RATE", 1.0)
 SENTRY_TOKEN = get_env_str("SENTRY_TOKEN")
-SENTRY_SEND_PII = get_env_bool("SENTRY_SEND_PII", True)
+SENTRY_SEND_PII = get_env_bool("SENTRY_SEND_PII", False)
 AKISMET_API_KEY = get_env_str("WEBLATE_AKISMET_API_KEY")
+ZAMMAD_URL = get_env_str("WEBLATE_ZAMMAD_URL")
 
 # Web Monetization
 INTERLEDGER_PAYMENT_POINTERS = get_env_list(
     "WEBLATE_INTERLEDGER_PAYMENT_POINTERS", ["$ilp.uphold.com/ENU7fREdeZi9"]
 )
-
-# Legal integartion
-LEGAL_INTEGRATION = get_env_str("WEBLATE_LEGAL_INTEGRATION")
-if LEGAL_INTEGRATION:
-    # Hosted Weblate legal documents
-    if LEGAL_INTEGRATION == "wllegal":
-        INSTALLED_APPS.append("wllegal")
-
-    # Enable legal app
-    INSTALLED_APPS.append("weblate.legal")
-
-    # TOS confirmation enforcement
-    if LEGAL_INTEGRATION in {"tos-confirm", "wllegal"}:
-        # Social auth pipeline to confirm TOS upon registration/subsequent sign in
-        SOCIAL_AUTH_PIPELINE.insert(
-            SOCIAL_AUTH_PIPELINE.index(
-                "social_core.pipeline.social_auth.load_extra_data"
-            )
-            + 1,
-            "weblate.legal.pipeline.tos_confirm",
-        )
-        # Middleware to enforce TOS confirmation of signed in users
-        MIDDLEWARE.append("weblate.legal.middleware.RequireTOSMiddleware")
-
 
 ADDITIONAL_CONFIG = "/app/data/settings-override.py"
 if os.path.exists(ADDITIONAL_CONFIG):

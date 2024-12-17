@@ -1,17 +1,23 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
 import csv
+from typing import TYPE_CHECKING
 
 from django.http import HttpResponse, JsonResponse
 
 from weblate.api.serializers import StatisticsSerializer
 from weblate.trans.models import Component, Project
+from weblate.utils.stats import prefetch_stats
 from weblate.utils.views import parse_path
 
+if TYPE_CHECKING:
+    from weblate.auth.models import AuthenticatedHttpRequest
 
-def export_stats(request, path):
+
+def export_stats(request: AuthenticatedHttpRequest, path):
     """Export stats in JSON or CSV format."""
     obj = parse_path(request, path, (Project, Component))
     if isinstance(obj, Project):
@@ -19,13 +25,15 @@ def export_stats(request, path):
             request, f"stats-{obj.slug}.csv", obj.stats.get_language_stats()
         )
 
-    translations = obj.translation_set.order_by("language_code")
+    translations = prefetch_stats(
+        obj.translation_set.order_by("language_code").prefetch_meta()
+    )
     return export_response(
         request, f"stats-{obj.project.slug}-{obj.slug}.csv", translations
     )
 
 
-def export_response(request, filename, objects):
+def export_response(request: AuthenticatedHttpRequest, filename, objects):
     """Generate stats response."""
     fields = (
         "name",

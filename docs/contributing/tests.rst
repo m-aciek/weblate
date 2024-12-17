@@ -26,7 +26,7 @@ There are several jobs to verify different aspects:
 The configuration for the CI is in :file:`.github/workflows` directory. It
 heavily uses helper scripts stored in :file:`ci` directory. The scripts can be
 also executed manually, but they require several environment variables, mostly
-defining Django settings file to use and database connection. The example
+defining Django settings file to use and test database connection. The example
 definition of that is in :file:`scripts/test-database.sh`:
 
 .. literalinclude:: ../../scripts/test-database.sh
@@ -36,7 +36,7 @@ The simple execution can look like:
 
 .. code-block:: sh
 
-   . scripts/test-database.sh
+   source scripts/test-database.sh
    ./ci/run-migrate
    ./ci/run-test
    ./ci/run-docs
@@ -48,7 +48,30 @@ Local testing
 
 Before running test, please ensure test dependencies are installed. This can be done by ``pip install -e .[test]``.
 
-To run a testsuite locally, use:
+Testing using pytest
+~~~~~~~~~~~~~~~~~~~~
+Prior to running tests you should collect static files as some tests rely on them being present:
+
+.. code-block:: sh
+
+    DJANGO_SETTINGS_MODULE=weblate.settings_test ./manage.py collectstatic
+
+You can use `pytest` to run a testsuite locally:
+
+.. code-block:: sh
+
+   pytest weblate
+
+Running an individual test file:
+
+.. code-block:: sh
+
+   pytest weblate/utils/tests/test_search.py
+
+Testing using Django
+~~~~~~~~~~~~~~~~~~~~
+
+Alternatively, Django built-in tests should also work:
 
 .. code-block:: sh
 

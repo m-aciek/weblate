@@ -9,14 +9,12 @@ from requests.exceptions import HTTPError
 from .base import DownloadTranslations, MachineTranslation
 from .forms import BaseMachineryForm, URLMachineryForm
 
-AMAGAMA_LIVE = "https://amagama-live.translatehouse.org/api/v1"
-
 
 class TMServerTranslation(MachineTranslation):
     """tmserver machine translation support."""
 
     name = "tmserver"
-    settings_form: None | type[BaseMachineryForm] = URLMachineryForm
+    settings_form: type[BaseMachineryForm] | None = URLMachineryForm
 
     def map_language_code(self, code):
         """Convert language to service specific code."""
@@ -72,14 +70,3 @@ class TMServerTranslation(MachineTranslation):
                 "service": self.name,
                 "source": line["source"],
             }
-
-
-class AmagamaTranslation(TMServerTranslation):
-    """Specific instance of tmserver ran by Virtaal authors."""
-
-    name = "Amagama"
-    settings_form = None
-
-    @property
-    def api_base_url(self):
-        return AMAGAMA_LIVE

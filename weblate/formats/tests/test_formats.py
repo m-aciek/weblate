@@ -10,6 +10,7 @@ from __future__ import annotations
 import os.path
 import shutil
 from io import BytesIO
+from pathlib import Path
 from typing import NoReturn
 from unittest import SkipTest, TestCase
 
@@ -56,7 +57,7 @@ from weblate.lang.data import PLURAL_UNKNOWN
 from weblate.lang.models import Language, Plural
 from weblate.trans.tests.test_views import FixtureTestCase
 from weblate.trans.tests.utils import TempDirMixin, get_test_file
-from weblate.utils.state import STATE_FUZZY, STATE_TRANSLATED
+from weblate.utils.state import STATE_APPROVED, STATE_FUZZY, STATE_TRANSLATED
 
 TEST_PO = get_test_file("cs.po")
 TEST_CSV = get_test_file("cs-mono.csv")
@@ -177,6 +178,8 @@ class BaseFormatTest(FixtureTestCase, TempDirMixin):
     )
     NEW_UNIT_KEY = "key"
     SUPPORTS_FLAG = True
+    SUPPORTS_NOTES = True
+    NOTE_FOR_TEST = "template note for test"
     EXPECTED_FLAGS: str | list[str] = "c-format, max-length:100"
     EDIT_OFFSET = 0
     EDIT_TARGET: str | list[str] = "Nazdar, svete!\n"
@@ -185,7 +188,8 @@ class BaseFormatTest(FixtureTestCase, TempDirMixin):
     @classmethod
     def setUpClass(cls) -> None:
         if cls.FORMAT is TranslationFormat:
-            raise SkipTest("Base test class not intended for execution.")
+            msg = "Base test class not intended for execution."
+            raise SkipTest(msg)
         super().setUpClass()
 
     def setUp(self) -> None:
@@ -196,11 +200,13 @@ class BaseFormatTest(FixtureTestCase, TempDirMixin):
         super().tearDown()
         self.remove_temp()
 
-    def parse_file(self, filename):
+    def parse_file(self, filename: str, template: str | None = None):
         if self.MONOLINGUAL:
             return self.FORMAT(
                 filename,
-                template_store=self.FORMAT(self.TEMPLATE or filename, is_template=True),
+                template_store=self.FORMAT(
+                    template or self.TEMPLATE or filename, is_template=True
+                ),
             )
         return self.FORMAT(filename)
 
@@ -260,6 +266,15 @@ class BaseFormatTest(FixtureTestCase, TempDirMixin):
         self.maxDiff = None
         self.assertEqual(testdata.decode().strip(), newdata.decode().strip())
 
+    def assert_no_notes(self, unit) -> None:
+        """Assert that the underlying unit(s) do not have any notes."""
+        if unit.unit:
+            self.assertEqual(unit.unit.getnotes().strip(), "")
+        else:
+            # Assume this is a multi-unit. Will fail otherwise.
+            for subunit in unit.units:
+                self.assertEqual(subunit.unit.getnotes(), "")
+
     def test_find(self) -> None:
         storage = self.parse_file(self.FILE)
         unit, add = storage.find_unit(self.FIND_CONTEXT, self.FIND)
@@ -274,6 +289,7 @@ class BaseFormatTest(FixtureTestCase, TempDirMixin):
         self.assertTrue(self.FORMAT.is_valid_base_for_new(self.BASE, True))
         out = os.path.join(self.tempdir, f"test.{self.EXT}")
         self.FORMAT.add_language(out, Language.objects.get(code="cs"), self.BASE)
+        self.parse_file(out)  # check the parser agrees that the new file is valid.
         if self.MATCH is None:
             self.assertTrue(os.path.isdir(out))
         else:
@@ -292,7 +308,7 @@ class BaseFormatTest(FixtureTestCase, TempDirMixin):
 
     def test_new_unit(self) -> None:
         if not self.FORMAT.can_add_unit:
-            raise SkipTest("Not supported")
+            self.skipTest("Not supported")
         # Read test content
         with open(self.FILE, "rb") as handle:
             testdata = handle.read()
@@ -305,10 +321,13 @@ class BaseFormatTest(FixtureTestCase, TempDirMixin):
             handle.write(testdata)
 
         # Parse test file
-        storage = self.parse_file(testfile)
+        storage = self.parse_file(testfile, template=testfile)
+        if self.MONOLINGUAL:
+            # Add to template for monolingual (it is the same file, just different object)
+            storage = storage.template_store
 
         # Add new unit
-        storage.new_unit(self.NEW_UNIT_KEY, "Source string", skip_build=True)
+        storage.new_unit(self.NEW_UNIT_KEY, "Source string")
         storage.save()
 
         # Read new content
@@ -336,6 +355,92 @@ class BaseFormatTest(FixtureTestCase, TempDirMixin):
         for i, expected_flag in enumerate(expected_list):
             unit = units[i]
             self.assertEqual(unit.flags, expected_flag)
+
+    def test_add_monolingual(self) -> None:
+        """
+        Test for adding monolingual based on the template.
+
+        This is used when Weblate is translating string not present in the translation
+        in Translation.update_units().
+        """
+        if not self.MONOLINGUAL or not self.FORMAT.can_add_unit:
+            self.skipTest("Not supported")
+
+        temp_dir = Path(self.tempdir)
+        template_file = temp_dir / f"test.tmpl.{self.EXT}"
+        main_file = temp_dir / f"test.{self.EXT}"
+
+        # Monolingual formats copy() template units when adding a translation.
+        #
+        # The use of copy() (instead of deepcopy()) can result in unintended
+        # structural sharing for some formats (notably XML based formats that
+        # store a DOM tree internally, e.g. AndroidFormat).
+        #
+        # This structural sharing can lead to mutations leaking back to the
+        # template unit. In the context of this test, `removenotes()` leaks back
+        # to the template.
+        #
+        # Unfortunately, we must accept this structural sharing for performance
+        # reasons, see:
+        # https://github.com/WeblateOrg/weblate/pull/11937#discussion_r1662166224
+        # (a probably better alternative would be to fix and use
+        # `buildFromUnit` in ttkit).
+        #
+        # It turns out, that in practice, the modifications from the structural
+        # sharing do not actually impact Weblate's observable behavior.
+        # This is likely because it round trips through files.
+        #
+        # We mimic the file round-tripping behavior in this test.
+
+        # Create the template under test with a single string
+        shutil.copy(self.FILE, template_file)
+        template_storage = self.FORMAT(template_file, is_template=True)
+        template_unit = template_storage.new_unit(self.NEW_UNIT_KEY, "Source string")
+        if self.SUPPORTS_NOTES:
+            template_unit.unit.addnote(self.NOTE_FOR_TEST)
+        template_storage.save()
+
+        template_content = template_file.read_text()
+
+        # Add a new language and translate the new string.
+        self.FORMAT.add_language(main_file, Language.objects.get(code="cs"), self.BASE)
+        target_storage = self.parse_file(main_file, template=template_file)
+        target_unit, add = target_storage.find_unit(self.NEW_UNIT_KEY, "Source string")
+        self.assertTrue(add)
+
+        # This is what Translation.update_units() does
+        target_storage.add_unit(target_unit)
+        target_unit.set_target("Translated string (CS)")
+        # Note: Explanations are currently ignored by most of the formats
+        target_unit.set_explanation("Explanation")
+        target_unit.set_source_explanation("Source explanation")
+        # The approved state is saved by a few formats
+        target_unit.set_state(STATE_APPROVED)
+        target_storage.save()
+
+        # Eagerly check that the target unit does not have notes.
+        # This is the point where checking that the template unit still has the
+        # notes would potentially fail (depending on the exact format).
+        self.assert_no_notes(target_unit)
+
+        # Template should not change now
+        template_storage.save()
+        self.assertEqual(template_file.read_text(), template_content)
+
+        # Reload the storage to check notes were correctly written.
+        target_storage = self.parse_file(main_file, template=template_file)
+        target_unit, add = target_storage.find_unit(self.NEW_UNIT_KEY, "Source string")
+        self.assertFalse(add)
+        self.assertEqual(target_unit.target, "Translated string (CS)")
+
+        if self.SUPPORTS_NOTES:
+            # Check we get the aggregated notes through the unit wrapper:
+            # We always (additionally) display the template notes to the user
+            # (if they are different from the target unit notes).
+            self.assertEqual(target_unit.notes.strip(), self.NOTE_FOR_TEST)
+
+        # Check there are no notes on the underlying unit.
+        self.assert_no_notes(target_unit)
 
 
 class XMLMixin:
@@ -410,7 +515,7 @@ class PoFormatTest(BaseFormatTest):
         self.assertNotIn('\nmsgid "Hello, world!\\n"', content)
 
         # Add unit back, it should now overwrite obsolete one
-        storage.add_unit(unit.unit)
+        storage.add_unit(unit)
 
         # Verify it is properly added
         handle = BytesIO()
@@ -467,6 +572,11 @@ class GWTFormatTest(BaseFormatTest):
     BASE = ""
     MONOLINGUAL = True
 
+    # GWTFormat uses a proppluralunit under the hood which does not support
+    # `removenotes()`.
+    # https://github.com/translate/translate/blob/7ecba141b535572de75616ddb5f78afb41c2b7b2/translate/storage/properties.py#L578
+    SUPPORTS_NOTES = False
+
     def assert_same(self, newdata, testdata) -> None:
         self.assertEqual(
             (newdata).strip().splitlines(),
@@ -518,6 +628,7 @@ class JSONNestedFormatTest(JSONFormatTest):
     EXPECTED_FLAGS = ""
     MONOLINGUAL = True
     NEW_UNIT_MATCH = b'\n    "key": "Source string"\n'
+    SUPPORTS_NOTES = False
 
 
 class WebExtesionJSONFormatTest(JSONFormatTest):
@@ -542,6 +653,7 @@ class GoI18NV1JSONFormatTest(JSONFormatTest):
     MASK = "go-i18n-json/*.json"
     EXPECTED_PATH = "go-i18n-json/cs_CZ.json"
     FIND_CONTEXT = "hello"
+    MATCH = "[]\n"
     NEW_UNIT_MATCH = (
         b'{\n        "id": "key",\n        "translation": "Source string"\n    }\n'
     )
@@ -572,9 +684,11 @@ class PhpFormatTest(BaseFormatTest):
     FIND_CONTEXT = "$LANG['foo']"
     FIND_MATCH = "bar"
     BASE = ""
-    NEW_UNIT_MATCH = b"\n$key = 'Source string';\n"
+    NEW_UNIT_KEY = "$LANG['key']"
+    NEW_UNIT_MATCH = b"\n$LANG['key'] = 'Source string';\n"
     EXPECTED_FLAGS = ""
     MONOLINGUAL = True
+    NOTE_FOR_TEST = "// template note for test"
 
 
 class LaravelPhpFormatTest(PhpFormatTest):
@@ -796,6 +910,7 @@ class YAMLFormatTest(BaseFormatTest):
     NEW_UNIT_MATCH = b"\nkey: Source string\n"
     EXPECTED_FLAGS = ""
     MONOLINGUAL = True
+    SUPPORTS_NOTES = False
 
     def assert_same(self, newdata, testdata) -> None:
         # Fixup quotes as different translate toolkit versions behave
@@ -850,6 +965,7 @@ class DTDFormatTest(BaseFormatTest):
     NEW_UNIT_MATCH = b'<!ENTITY key "Source string">'
     EXPECTED_FLAGS = ""
     MONOLINGUAL = True
+    SUPPORTS_NOTES = False
 
 
 class CSVFormatTest(BaseFormatTest):
@@ -877,7 +993,7 @@ class CSVFormatNoHeadTest(CSVFormatTest):
     NEW_UNIT_MATCH = b'"Source string",""\r\n'
 
     def _test_save(self, edit=False) -> NoReturn:
-        raise SkipTest("Saving currently adds field headers")
+        self.skipTest("Saving currently adds field headers")
 
 
 class CSVSimpleFormatNoHeadTest(CSVFormatNoHeadTest):
@@ -901,6 +1017,7 @@ class FlatXMLFormatTest(BaseFormatTest):
     NEW_UNIT_MATCH = b'<str key="key">Source string</str>\n'
     EXPECTED_FLAGS = ""
     MONOLINGUAL = True
+    SUPPORTS_NOTES = False
 
 
 class ResourceDictionaryFormatTest(BaseFormatTest):
@@ -919,6 +1036,7 @@ class ResourceDictionaryFormatTest(BaseFormatTest):
     NEW_UNIT_MATCH = b'<system:String x:Key="key">Source string</system:String>\n'
     EXPECTED_FLAGS = ""
     MONOLINGUAL = True
+    SUPPORTS_NOTES = False
 
 
 class INIFormatTest(BaseFormatTest):
@@ -938,6 +1056,7 @@ class INIFormatTest(BaseFormatTest):
     NEW_UNIT_KEY = "[test]key"
     EXPECTED_FLAGS = ""
     MONOLINGUAL = True
+    SUPPORTS_NOTES = False
 
 
 class InnoSetupINIFormatTest(INIFormatTest):
@@ -954,7 +1073,7 @@ class XWikiPropertiesFormatTest(PropertiesFormatTest):
     COUNT_CONTENT = 8
     EXT = "properties"
     MASK = "java/xwiki_*.properties"
-    EXPECTED_PATH = "java/xwiki_cs-CZ.properties"
+    EXPECTED_PATH = "java/xwiki_cs_CZ.properties"
     FIND = "job.question.button.confirm"
     FIND_CONTEXT = "job.question.button.confirm"
     FIND_MATCH = "Confirm the operation {0}"
@@ -974,7 +1093,7 @@ class XWikiPropertiesFormatTest(PropertiesFormatTest):
         unit, add = new_language.find_unit("job.status.success", "")
         self.assertTrue(add)
         unit.set_target("Fait")
-        new_language.add_unit(unit.unit)
+        new_language.add_unit(unit)
         new_language.save()
 
         # Read new content
@@ -987,7 +1106,7 @@ class XWikiPropertiesFormatTest(PropertiesFormatTest):
         self.assertEqual(expected + "\n", newdata)
 
 
-class XWikiPagePropertiesFormatTest(PropertiesFormatTest):
+class XWikiPagePropertiesFormatTest(XMLMixin, PropertiesFormatTest):
     FORMAT = XWikiPagePropertiesFormat
     FILE = TEST_XWIKI_PAGE_PROPERTIES
     SOURCE_FILE = TEST_XWIKI_PAGE_PROPERTIES_SOURCE
@@ -1046,7 +1165,7 @@ class XWikiPagePropertiesFormatTest(PropertiesFormatTest):
             units[index].context, units[index].source
         )
         self.assertTrue(create)
-        translation_data.add_unit(unit_to_translate.unit)
+        translation_data.add_unit(unit_to_translate)
         translation_data.all_units[index].unit = unit_to_translate.unit
         unit_to_translate.set_target(target)
 
@@ -1098,7 +1217,7 @@ class XWikiPagePropertiesFormatTest(PropertiesFormatTest):
         self.assert_same(testdata, newdata)
 
 
-class XWikiFullPageFormatTest(BaseFormatTest):
+class XWikiFullPageFormatTest(XMLMixin, BaseFormatTest):
     FORMAT = XWikiFullPageFormat
     FILE = TEST_XWIKI_FULL_PAGE
     SOURCE_FILE = TEST_XWIKI_FULL_PAGE_SOURCE
@@ -1170,7 +1289,7 @@ class XWikiFullPageFormatTest(BaseFormatTest):
             units[index].context, units[index].source
         )
         self.assertTrue(create)
-        translation_data.add_unit(unit_to_translate.unit)
+        translation_data.add_unit(unit_to_translate)
         translation_data.all_units[index].unit = unit_to_translate.unit
         unit_to_translate.set_target(target)
 
@@ -1250,6 +1369,7 @@ class StringsdictFormatTest(XMLMixin, BaseFormatTest):
     NEW_UNIT_MATCH = b"<string>Source string</string>"
     MONOLINGUAL = True
     EXPECTED_FLAGS = ""
+    SUPPORTS_NOTES = False
 
     def test_get_plural(self) -> None:
         # Use up-to-date languages database and not the one from fixture

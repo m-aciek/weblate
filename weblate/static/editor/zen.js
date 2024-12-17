@@ -46,15 +46,24 @@
      * - scroll down if in bottom half of the window
      */
     $document.on("focus", ".zen .translation-editor", function () {
+      const editor = $(this);
+      const container = editor.closest(".translator").closest("tr");
       const current = $window.scrollTop();
       const rowOffset = $(this).closest("tbody").offset().top;
       if (rowOffset < current || rowOffset - current > $window.height() / 2) {
+        // Scroll to view source string
         $([document.documentElement, document.body]).animate(
           {
             scrollTop: rowOffset,
           },
           100,
         );
+        // Stick the editor to the bottom of the screen when out of view
+        $(".sticky-bottom").removeClass("sticky-bottom"); // Hide previous
+        container?.addClass("sticky-bottom");
+        container.find(".hide-sticky").on("click", () => {
+          container.removeClass("sticky-bottom");
+        });
       }
     });
 
@@ -165,7 +174,7 @@
       url: form.attr("action"),
       data: payload,
       dataType: "json",
-      error: (jqXHR, textStatus, errorThrown) => {
+      error: (jqXhr, textStatus, errorThrown) => {
         addAlert(errorThrown);
       },
       success: (data) => {

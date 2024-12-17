@@ -27,6 +27,7 @@ from django.utils.cache import get_conditional_response
 from django.utils.http import http_date
 from django.utils.translation import activate, gettext, gettext_lazy, pgettext_lazy
 from django.views.decorators.gzip import gzip_page
+from django.views.generic.base import View
 from django.views.generic.edit import FormView
 
 from weblate.formats.models import EXPORTERS, FILE_FORMATS
@@ -40,6 +41,7 @@ from weblate.vcs.git import LocalRepository
 if TYPE_CHECKING:
     from django.db.models import Model
 
+    from weblate.auth.models import AuthenticatedHttpRequest
     from weblate.trans.mixins import BaseURLMixin
 
 
@@ -110,7 +112,7 @@ def get_percent_color(percent) -> str:
     return "#f6664c"
 
 
-def get_page_limit(request, default):
+def get_page_limit(request: AuthenticatedHttpRequest, default):
     """Return page and limit as integers."""
     try:
         limit = int(request.GET.get("limit", default))
@@ -140,7 +142,7 @@ def sort_objects(object_list, sort_by: str):
     return sorted(object_list, key=key, reverse=reverse), sort_by
 
 
-def get_paginator(request, object_list, page_limit=None):
+def get_paginator(request: AuthenticatedHttpRequest, object_list, page_limit=None):
     """Return paginator and current page."""
     page, limit = get_page_limit(request, page_limit or settings.DEFAULT_PAGE_LIMIT)
     sort_by = request.GET.get("sort_by")
@@ -154,18 +156,20 @@ def get_paginator(request, object_list, page_limit=None):
         return paginator.page(paginator.num_pages)
 
 
-class PathViewMixin:
+class PathViewMixin(View):
     supported_path_types: tuple[type[Model | BaseURLMixin] | None, ...] = ()
+    request: AuthenticatedHttpRequest
 
     def get_path_object(self):
         if not self.supported_path_types:
-            raise ValueError("Specifying supported path types is required")
+            msg = "Specifying supported path types is required"
+            raise ValueError(msg)
         return parse_path(
             self.request, self.kwargs.get("path", ""), self.supported_path_types
         )
 
-    def setup(self, request, **kwargs) -> None:
-        super().setup(request, **kwargs)
+    def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:  # type: ignore[override]
+        super().setup(request, *args, **kwargs)
         self.path_object = self.get_path_object()
 
 
@@ -188,7 +192,7 @@ SORT_CHOICES = {
 SORT_LOOKUP = {key.replace("-", ""): value for key, value in SORT_CHOICES.items()}
 
 
-def get_sort_name(request, obj=None):
+def get_sort_name(request: AuthenticatedHttpRequest, obj=None):
     """Get sort name."""
     if hasattr(obj, "component") and obj.component.is_glossary:
         default = "source"
@@ -204,7 +208,7 @@ def get_sort_name(request, obj=None):
 
 
 def parse_path(  # noqa: C901
-    request,
+    request: AuthenticatedHttpRequest | None,
     path: list[str] | tuple[str, ...] | None,
     types: tuple[type[Model | BaseURLMixin] | None, ...],
     *,
@@ -212,21 +216,28 @@ def parse_path(  # noqa: C901
 ):
     if None in types and not path:
         return None
+    if not skip_acl and request is None:
+        msg = "Request needs to be provided for ACL check"
+        raise TypeError(msg)
 
     allowed_types = {x for x in types if x is not None}
     acting_user = request.user if request else None
 
     def check_type(cls) -> None:
         if cls not in allowed_types:
-            raise UnsupportedPathObjectError(f"Not supported object type: {cls}")
+            msg = f"Not supported object type: {cls}"
+            raise UnsupportedPathObjectError(msg)
 
     if path is None:
-        raise UnsupportedPathObjectError("Missing path")
+        msg = "Missing path"
+        raise UnsupportedPathObjectError(msg)
 
     path = list(path)
 
     # Language URL
     if path[:2] == ["-", "-"] and len(path) == 3:
+        if path[2] == "-" and None in types:
+            return None
         check_type(Language)
         return get_object_or_404(Language, code=path[2])
 
@@ -246,10 +257,11 @@ def parse_path(  # noqa: C901
         return ProjectLanguage(project, language)
 
     if not allowed_types & {Component, Category, Translation, Unit}:
-        raise UnsupportedPathObjectError("No remaining supported object type")
+        msg = "No remaining supported object type"
+        raise UnsupportedPathObjectError(msg)
 
     # Component/category structure
-    current = project
+    current: Project | Category | Component = project
     category_args = {"category": None}
     while path:
         slug = path.pop(0)
@@ -276,18 +288,19 @@ def parse_path(  # noqa: C901
             continue
 
         # Nothing more to try
-        raise Http404(f"Object {slug} not found in {current}")
+        msg = f"Object {slug} not found in {current}"
+        raise Http404(msg)
 
     # Nothing left, return current object
     if not path:
         if not isinstance(current, tuple(allowed_types)):
-            raise UnsupportedPathObjectError(
-                f"Not supported object type: {current.__class__}"
-            )
+            msg = f"Not supported object type: {current.__class__}"
+            raise UnsupportedPathObjectError(msg)
         return current
 
     if not allowed_types & {Translation, Unit}:
-        raise UnsupportedPathObjectError("No remaining supported object type")
+        msg = "No remaining supported object type"
+        raise UnsupportedPathObjectError(msg)
 
     translation = get_object_or_404(current.translation_set, language__code=path.pop(0))
     if not path:
@@ -295,12 +308,14 @@ def parse_path(  # noqa: C901
         return translation
 
     if len(path) > 1:
-        raise UnsupportedPathObjectError(f"Invalid path left: {'/'.join(path)}")
+        msg = f"Invalid path left: {'/'.join(path)}"
+        raise UnsupportedPathObjectError(msg)
 
     unitid = path.pop(0)
 
     if not unitid.isdigit():
-        raise Http404(f"Invalid unit id: {unitid}")
+        msg = f"Invalid unit id: {unitid}"
+        raise Http404(msg)
 
     check_type(Unit)
     return get_object_or_404(translation.unit_set, pk=int(unitid))
@@ -357,7 +372,8 @@ def parse_path_units(
     elif obj is None:
         unit_set = Unit.objects.filter_access(request.user)
     else:
-        raise TypeError(f"Unsupported result: {obj}")
+        msg = f"Unsupported result: {obj}"
+        raise TypeError(msg)
 
     return obj, unit_set, context
 
@@ -379,26 +395,31 @@ def guess_filemask_from_doc(data, docfile=None) -> None:
     data["filemask"] = "{}/{}{}".format(data.get("slug", "translations"), "*", ext)
 
 
-def create_component_from_doc(data, docfile):
+def create_component_from_doc(data, docfile, target_language: Language | None = None):
     # Calculate filename
     uploaded = docfile or data["docfile"]
     guess_filemask_from_doc(data, uploaded)
     filemask = data["filemask"]
-    filename = filemask.replace(
-        "*",
-        data["source_language"].code
+    file_language_code = (
+        target_language.code
+        if target_language  # bilingual file
+        else data["source_language"].code
         if "source_language" in data
-        else settings.DEFAULT_LANGUAGE,
+        else settings.DEFAULT_LANGUAGE
     )
+    filename = filemask.replace("*", file_language_code)
     # Create fake component (needed to calculate path)
     fake = Component(
         project=data["project"],
         slug=data["slug"],
         name=data["name"],
         category=data.get("category", None),
-        template=filename,
         filemask=filemask,
     )
+
+    if not target_language:
+        fake.template = filename
+
     # Create repository
     LocalRepository.from_files(fake.full_path, {filename: uploaded.read()})
     return fake
@@ -427,7 +448,9 @@ def try_set_language(lang) -> None:
         activate("en")
 
 
-def import_message(request, count, message_none, message_ok) -> None:
+def import_message(
+    request: AuthenticatedHttpRequest, count, message_none, message_ok
+) -> None:
     if count == 0:
         messages.warning(request, message_none)
     else:
@@ -497,9 +520,11 @@ def download_translation_file(
         try:
             exporter_cls = EXPORTERS[fmt]
         except KeyError as exc:
-            raise Http404(f"Conversion to {fmt} is not supported") from exc
+            msg = f"Conversion to {fmt} is not supported"
+            raise Http404(msg) from exc
         if not exporter_cls.supports(translation):
-            raise Http404("File format is not compatible with this translation")
+            msg = "File format is not compatible with this translation"
+            raise Http404(msg)
         exporter = exporter_cls(translation=translation)
         units = translation.unit_set.prefetch_full().order_by("position")
         if query_string:
@@ -511,7 +536,7 @@ def download_translation_file(
         try:
             translation.commit_pending("download", None)
         except Exception:
-            report_error(cause="Download commit", project=translation.component.project)
+            report_error("Download commit", project=translation.component.project)
 
         filenames = translation.filenames
 
@@ -521,7 +546,8 @@ def download_translation_file(
                 or f".{translation.component.file_format_cls.extension()}"
             )
             if not os.path.exists(filenames[0]):
-                raise Http404("File not found")
+                msg = "File not found"
+                raise Http404(msg)
             # Create response
             response = FileResponse(
                 open(filenames[0], "rb"),  # noqa: SIM115
@@ -567,18 +593,20 @@ def get_form_errors(form):
             }
 
 
-def show_form_errors(request, form) -> None:
+def show_form_errors(request: AuthenticatedHttpRequest, form) -> None:
     """Show all form errors as a message."""
     for error in get_form_errors(form):
         messages.error(request, error)
 
 
 class ErrorFormView(FormView):
+    request: AuthenticatedHttpRequest
+
     def form_invalid(self, form):
         """If the form is invalid, redirect to the supplied URL."""
         show_form_errors(self.request, form)
         return HttpResponseRedirect(self.get_success_url())
 
-    def get(self, request, *args, **kwargs):
+    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):
         """There is no GET view here."""
         return HttpResponseRedirect(self.get_success_url())

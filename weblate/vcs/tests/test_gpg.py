@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import subprocess
-from unittest import SkipTest
 
 from django.core.cache import cache
 from django.test import TestCase
@@ -43,7 +42,7 @@ class GPGTest(TestCase):
 
     def setUp(self) -> None:
         if self.gpg_error:
-            raise SkipTest(self.gpg_error)
+            self.skipTest(self.gpg_error)
 
     def check_errors(self) -> None:
         self.assertEqual(weblate.vcs.gpg.GPG_ERRORS, {})
@@ -53,7 +52,7 @@ class GPGTest(TestCase):
         WEBLATE_GPG_IDENTITY="Weblate <weblate@example.com>", WEBLATE_GPG_ALGO="rsa512"
     )
     def test_generate(self) -> None:
-        self.assertEqual(check_data_writable(), [])
+        self.assertEqual(check_data_writable(app_configs=None, databases=None), [])
         self.assertIsNone(get_gpg_key(silent=True))
         key = generate_gpg_key()
         self.check_errors()
@@ -65,7 +64,7 @@ class GPGTest(TestCase):
         WEBLATE_GPG_IDENTITY="Weblate <weblate@example.com>", WEBLATE_GPG_ALGO="rsa512"
     )
     def test_get(self) -> None:
-        self.assertEqual(check_data_writable(), [])
+        self.assertEqual(check_data_writable(app_configs=None, databases=None), [])
         # This will generate new key
         key = get_gpg_sign_key()
         self.check_errors()
@@ -81,7 +80,7 @@ class GPGTest(TestCase):
         WEBLATE_GPG_IDENTITY="Weblate <weblate@example.com>", WEBLATE_GPG_ALGO="rsa512"
     )
     def test_public(self) -> None:
-        self.assertEqual(check_data_writable(), [])
+        self.assertEqual(check_data_writable(app_configs=None, databases=None), [])
         # This will generate new key
         key = get_gpg_public_key()
         self.check_errors()

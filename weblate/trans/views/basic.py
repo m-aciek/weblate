@@ -1,21 +1,23 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.urls import reverse
 from django.utils.html import format_html
 from django.utils.http import urlencode
 from django.utils.translation import gettext
 from django.views.decorators.cache import never_cache
 from django.views.generic import RedirectView
 
+from weblate.auth.models import AuthenticatedHttpRequest
 from weblate.formats.models import EXPORTERS
 from weblate.lang.models import Language
 from weblate.trans.exceptions import FileParseError
@@ -70,9 +72,12 @@ from weblate.utils.views import (
     try_set_language,
 )
 
+if TYPE_CHECKING:
+    from weblate.auth.models import AuthenticatedHttpRequest, User
+
 
 @never_cache
-def list_projects(request):
+def list_projects(request: AuthenticatedHttpRequest):
     """List all projects."""
     query_string = ""
     projects = request.user.allowed_projects
@@ -105,7 +110,9 @@ def list_projects(request):
     )
 
 
-def add_ghost_translations(component, user, translations, generator, **kwargs) -> None:
+def add_ghost_translations(
+    component, user: User, translations, generator, **kwargs
+) -> None:
     """Add ghost translations for user languages to the list."""
     if component.can_add_new_language(user, fast=True):
         existing = {translation.language.code for translation in translations}
@@ -118,7 +125,7 @@ def add_ghost_translations(component, user, translations, generator, **kwargs) -
             translations.append(generator(component, language, **kwargs))
 
 
-def show_engage(request, path):
+def show_engage(request: AuthenticatedHttpRequest, path):
     # Legacy URL
     if len(path) == 2:
         return redirect("engage", permanent=True, path=[path[0], "-", path[1]])
@@ -194,7 +201,7 @@ def show_engage(request, path):
 
 
 @never_cache
-def show(request, path):
+def show(request: AuthenticatedHttpRequest, path):
     obj = parse_path(
         request,
         path,
@@ -219,10 +226,11 @@ def show(request, path):
         return show_category_language(request, obj)
     if isinstance(obj, Translation):
         return show_translation(request, obj)
-    raise TypeError(f"Not supported show: {obj}")
+    msg = f"Not supported show: {obj}"
+    raise TypeError(msg)
 
 
-def show_project_language(request, obj):
+def show_project_language(request: AuthenticatedHttpRequest, obj: ProjectLanguage):
     language_object = obj.language
     project_object = obj.project
     user = request.user
@@ -246,7 +254,11 @@ def show_project_language(request, obj):
         existing = {translation.component.slug for translation in translations}
         missing = project_object.get_child_components_filter(
             lambda qs: qs.exclude(slug__in=existing)
+            .prefetch()
+            .prefetch_related("source_language")
         )
+        for item in missing:
+            item.project = project_object
         translations.extend(
             GhostTranslation(component, language_object)
             for component in missing
@@ -276,16 +288,13 @@ def show_project_language(request, obj):
             "announcement_form": optional_form(
                 AnnouncementForm, user, "project.edit", obj
             ),
-            "licenses": project_object.component_set.exclude(license="").order_by(
-                "license"
-            ),
             "language_stats": project_object.stats.get_single_language_stats(
                 language_object
             ),
             "delete_form": optional_form(
                 ProjectLanguageDeleteForm, user, "translation.delete", obj, obj=obj
             ),
-            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj),
+            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj, obj=obj),
             "bulk_state_form": optional_form(
                 BulkEditForm,
                 user,
@@ -299,7 +308,7 @@ def show_project_language(request, obj):
     )
 
 
-def show_category_language(request, obj):
+def show_category_language(request: AuthenticatedHttpRequest, obj):
     language_object = obj.language
     category_object = obj.category
     user = request.user
@@ -341,16 +350,13 @@ def show_category_language(request, obj):
             "search_form": SearchForm(
                 user, language=language_object, initial=SearchForm.get_initial(request)
             ),
-            "licenses": obj.category.get_child_components_access(user)
-            .exclude(license="")
-            .order_by("license"),
             "language_stats": category_object.stats.get_single_language_stats(
                 language_object
             ),
             "delete_form": optional_form(
                 CategoryLanguageDeleteForm, user, "translation.delete", obj, obj=obj
             ),
-            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj),
+            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj, obj=obj),
             "bulk_state_form": optional_form(
                 BulkEditForm,
                 user,
@@ -364,7 +370,7 @@ def show_category_language(request, obj):
     )
 
 
-def show_project(request, obj):
+def show_project(request: AuthenticatedHttpRequest, obj):
     user = request.user
 
     all_changes = obj.change_set.filter_components(request.user).prefetch()
@@ -429,7 +435,7 @@ def show_project(request, obj):
                 request=request,
                 instance=obj,
             ),
-            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj),
+            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj, obj=obj),
             "bulk_state_form": optional_form(
                 BulkEditForm,
                 user,
@@ -441,15 +447,11 @@ def show_project(request, obj):
             ),
             "components": components,
             "categories": prefetch_stats(obj.category_set.filter(category=None)),
-            "licenses": sorted(
-                (component for component in all_components if component.license),
-                key=lambda component: component.license,
-            ),
         },
     )
 
 
-def show_category(request, obj):
+def show_category(request: AuthenticatedHttpRequest, obj):
     user = request.user
 
     all_changes = (
@@ -495,6 +497,7 @@ def show_category(request, obj):
             "add_form": AddCategoryForm(request, obj) if obj.can_add_category else None,
             "last_changes": last_changes,
             "last_announcements": last_announcements,
+            "reports_form": ReportsForm({"category": obj}),
             "language_stats": [stat.obj or stat for stat in language_stats],
             "search_form": SearchForm(user, initial=SearchForm.get_initial(request)),
             "announcement_form": optional_form(
@@ -511,7 +514,7 @@ def show_category(request, obj):
                 request=request,
                 instance=obj,
             ),
-            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj),
+            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj, obj=obj),
             "bulk_state_form": optional_form(
                 BulkEditForm,
                 user,
@@ -523,20 +526,18 @@ def show_category(request, obj):
             ),
             "components": components,
             "categories": prefetch_stats(obj.category_set.all()),
-            "licenses": sorted(
-                (component for component in all_components if component.license),
-                key=lambda component: component.license,
-            ),
         },
     )
 
 
-def show_component(request, obj):
+def show_component(request: AuthenticatedHttpRequest, obj: Component):
     user = request.user
+
+    obj.project.project_languages.preload_workflow_settings()
 
     last_changes = obj.change_set.prefetch().recent(skip_preload="component")
 
-    translations = prefetch_stats(list(obj.translation_set.prefetch()))
+    translations = prefetch_stats(list(obj.translation_set.prefetch_meta()))
 
     # Show ghost translations for user languages
     add_ghost_translations(obj, user, translations, GhostTranslation)
@@ -557,7 +558,7 @@ def show_component(request, obj):
             "translations": translations,
             "reports_form": ReportsForm({"component": obj}),
             "last_changes": last_changes,
-            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj),
+            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj, obj=obj),
             "bulk_state_form": optional_form(
                 BulkEditForm,
                 user,
@@ -591,7 +592,7 @@ def show_component(request, obj):
     )
 
 
-def show_translation(request, obj):
+def show_translation(request: AuthenticatedHttpRequest, obj):
     component = obj.component
     project = component.project
     last_changes = obj.change_set.prefetch().recent(skip_preload="translation")
@@ -642,6 +643,7 @@ def show_translation(request, obj):
             "object": obj,
             "project": project,
             "component": obj.component,
+            "supports_plural": component.file_format_cls.supports_plural,
             "form": form,
             "download_form": DownloadForm(obj, auto_id="id_dl_%s"),
             "autoform": optional_form(
@@ -653,7 +655,7 @@ def show_translation(request, obj):
                 user=user,
             ),
             "search_form": search_form,
-            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj),
+            "replace_form": optional_form(ReplaceForm, user, "unit.edit", obj, obj=obj),
             "bulk_state_form": optional_form(
                 BulkEditForm,
                 user,
@@ -664,6 +666,7 @@ def show_translation(request, obj):
                 project=project,
             ),
             "new_unit_form": get_new_unit_form(obj, user),
+            "new_unit_plural_form": get_new_unit_form(obj, user, is_source_plural=True),
             "announcement_form": optional_form(
                 AnnouncementForm, user, "component.edit", obj
             ),
@@ -678,7 +681,7 @@ def show_translation(request, obj):
 
 
 @never_cache
-def data_project(request, project):
+def data_project(request: AuthenticatedHttpRequest, project):
     obj = parse_path(request, [project], (Project,))
     return render(
         request,
@@ -695,7 +698,7 @@ def data_project(request, project):
 @login_required
 @session_ratelimit_post("language", logout_user=False)
 @transaction.atomic
-def new_language(request, path):
+def new_language(request: AuthenticatedHttpRequest, path):
     obj = parse_path(request, path, (Component,))
     user = request.user
 
@@ -716,6 +719,7 @@ def new_language(request, path):
                 "details": {},
             }
             with obj.repository.lock:
+                obj.commit_pending("add language", None)
                 for language in Language.objects.filter(code__in=langs):
                     kwargs["details"]["language"] = language.code
                     if can_add:
@@ -742,12 +746,20 @@ def new_language(request, path):
                             ),
                         )
                 try:
-                    if added and not obj.create_translations(request=request):
-                        messages.warning(
+                    if added and not obj.create_translations(
+                        request=request, run_async=True
+                    ):
+                        messages.success(
                             request,
                             gettext(
-                                "The translation will be updated in the background."
+                                "All languages have been added, updates of translations are in progress."
                             ),
+                        )
+                        result = "{}?info=1".format(
+                            reverse(
+                                "show_progress",
+                                kwargs={"path": result.get_url_path()},
+                            )
                         )
                 except FileParseError:
                     pass
@@ -773,16 +785,16 @@ def new_language(request, path):
 
 
 @never_cache
-def healthz(request):
+def healthz(request: AuthenticatedHttpRequest):
     """Make simple health check endpoint."""
     return HttpResponse("ok")
 
 
 @never_cache
-def show_component_list(request, name):
+def show_component_list(request: AuthenticatedHttpRequest, name):
     obj = get_object_or_404(ComponentList, slug__iexact=name)
     components = prefetch_tasks(
-        prefetch_stats(obj.components.filter_access(request.user).prefetch())
+        prefetch_stats(obj.components.filter_access(request.user).order().prefetch())
     )
 
     return render(
@@ -791,16 +803,12 @@ def show_component_list(request, name):
         {
             "object": obj,
             "components": components,
-            "licenses": sorted(
-                (component for component in components if component.license),
-                key=lambda component: component.license,
-            ),
         },
     )
 
 
 @never_cache
-def guide(request, path):
+def guide(request: AuthenticatedHttpRequest, path):
     obj = parse_path(request, path, (Component,))
 
     return render(

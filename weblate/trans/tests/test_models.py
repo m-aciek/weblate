@@ -5,18 +5,22 @@
 """Test for translation models."""
 
 import os
+from datetime import timedelta
 
 from django.core.management.color import no_style
 from django.db import connection, transaction
 from django.test import LiveServerTestCase, TestCase
 from django.test.utils import override_settings
+from django.utils import timezone
 
 from weblate.auth.models import Group, User
 from weblate.checks.models import Check
 from weblate.lang.models import Language, Plural
+from weblate.trans.exceptions import SuggestionSimilarToTranslationError
 from weblate.trans.models import (
     Announcement,
     AutoComponentList,
+    Change,
     Comment,
     Component,
     ComponentList,
@@ -25,7 +29,11 @@ from weblate.trans.models import (
     Unit,
     Vote,
 )
-from weblate.trans.tests.utils import RepoTestMixin, create_test_user
+from weblate.trans.tests.utils import (
+    RepoTestMixin,
+    create_another_user,
+    create_test_user,
+)
 from weblate.utils.django_hacks import immediate_on_commit, immediate_on_commit_leave
 from weblate.utils.files import remove_tree
 from weblate.utils.state import STATE_TRANSLATED
@@ -139,6 +147,51 @@ class ProjectTest(RepoTestCase):
             suggestion = Suggestion.objects.add(unit, ["Test"], None)
             Vote.objects.create(suggestion=suggestion, value=Vote.POSITIVE, user=user)
         component.project.delete()
+
+    def test_add_suggestion_validation(self) -> None:
+        with transaction.atomic():
+            component = self.create_po(
+                suggestion_voting=True, suggestion_autoaccept=True
+            )
+            user = create_test_user()
+            another_user = create_another_user()
+            translation = component.translation_set.get(language_code="cs")
+            unit: Unit = translation.unit_set.all()[0]
+
+            unit.translate(user, "Translation of unit ", STATE_TRANSLATED)
+
+            # check that another user submitting the same target raises an error
+            with self.assertRaises(SuggestionSimilarToTranslationError):
+                Suggestion.objects.add(
+                    unit,
+                    ["Translation of unit"],
+                    None,
+                    user=another_user,
+                    raise_exception=True,
+                )
+
+            # check that same operation doesn't raise an error if raise_exception=False but returns false
+            self.assertFalse(
+                Suggestion.objects.add(
+                    unit,
+                    ["Translation of unit"],
+                    None,
+                    user=another_user,
+                    raise_exception=False,
+                )
+            )
+
+            # check that user submitting suggestion twice doesn't create duplicated suggestions
+            suggestion = Suggestion.objects.add(
+                unit, ["New suggestion"], None, user=another_user, raise_exception=True
+            )
+            suggestion_count = Suggestion.objects.count()
+            self.assertTrue(bool(suggestion))
+            suggestion = Suggestion.objects.add(
+                unit, ["New suggestion"], None, user=another_user, raise_exception=True
+            )
+            self.assertFalse(suggestion)
+            self.assertEqual(suggestion_count, Suggestion.objects.count())
 
     def test_delete_all(self) -> None:
         project = self.create_project()
@@ -495,4 +548,39 @@ class AnnouncementTest(ModelTestCase):
             ),
             1,
             "test de",
+        )
+
+
+class ChangeTest(ModelTestCase):
+    """Test(s) for Change model."""
+
+    def test_day_filtering(self) -> None:
+        Change.objects.all().delete()
+        for days_since in range(3):
+            change = Change.objects.create(action=Change.ACTION_CREATE_PROJECT)
+            change.timestamp -= timedelta(days=days_since)
+            change.save()
+
+        # filter by day with date
+        self.assertEqual(
+            Change.objects.filter_by_day(
+                timezone.now().date() - timedelta(days=1)
+            ).count(),
+            1,
+        )
+        # filter by day with datetime
+        self.assertEqual(
+            Change.objects.filter_by_day(timezone.now() - timedelta(days=1)).count(),
+            1,
+        )
+
+        # filter since_day with date
+        self.assertEqual(
+            Change.objects.since_day(timezone.now().date() - timedelta(days=1)).count(),
+            2,
+        )
+        # filter since_day with datetime
+        self.assertEqual(
+            Change.objects.since_day(timezone.now() - timedelta(days=1)).count(),
+            2,
         )

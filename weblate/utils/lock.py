@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from contextlib import suppress
+from typing import TYPE_CHECKING, cast
 
 import sentry_sdk
 from django.core.cache import cache
@@ -13,6 +14,9 @@ from filelock import FileLock, Timeout
 from redis_lock import AlreadyAcquired, NotAcquired
 
 from weblate.utils.cache import is_redis_cache
+
+if TYPE_CHECKING:
+    from django_redis.cache import RedisCache
 
 
 class WeblateLockTimeoutError(Exception):
@@ -26,10 +30,10 @@ class WeblateLock:
         self,
         lock_path: str,
         scope: str,
-        key: int,
+        key: int | str,
         slug: str,
         cache_template: str = "lock:{scope}:{key}",
-        file_template: str | None = "{slug}-{scope}.lock",
+        file_template: str = "{slug}-{scope}.lock",
         timeout: int = 1,
     ) -> None:
         self._timeout = timeout
@@ -41,7 +45,7 @@ class WeblateLock:
         if is_redis_cache():
             # Prefer Redis locking as it works distributed
             self._name = self._format_template(cache_template)
-            self._lock = cache.lock(
+            self._lock = cast("RedisCache", cache).lock(
                 key=self._name,
                 expire=3600,
                 auto_renewal=True,
@@ -67,9 +71,8 @@ class WeblateLock:
             return
 
         if not lock_result:
-            raise WeblateLockTimeoutError(
-                f"Lock on {self._name} could not be acquired in {self._timeout}s"
-            )
+            msg = f"Lock on {self._name} could not be acquired in {self._timeout}s"
+            raise WeblateLockTimeoutError(msg)
 
     def _enter_file(self) -> None:
         # Fall back to file based locking
@@ -82,7 +85,7 @@ class WeblateLock:
         self._depth += 1
         if self._depth > 1:
             return
-        with sentry_sdk.start_span(op="lock.wait", description=self._name):
+        with sentry_sdk.start_span(op="lock.wait", name=self._name):
             self._enter_implementation()
 
     def __exit__(self, exc_type, exc_value, traceback):

@@ -14,7 +14,7 @@ from collections.abc import Iterable, Iterator
 from hashlib import md5
 from html import escape, unescape
 from itertools import chain
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 from urllib.parse import quote
 
 from django.core.cache import cache
@@ -25,21 +25,21 @@ from requests.exceptions import HTTPError, RequestException
 
 from weblate.checks.utils import highlight_string
 from weblate.lang.models import Language, PluralMapper
-from weblate.logger import LOGGER
 from weblate.utils.errors import report_error
 from weblate.utils.hash import calculate_dict_hash, calculate_hash, hash_to_checksum
 from weblate.utils.requests import request
-from weblate.utils.search import Comparer
+from weblate.utils.similarity import Comparer
 from weblate.utils.site import get_site_url
 
 if TYPE_CHECKING:
     from requests.auth import AuthBase
 
+    from weblate.auth.models import User
     from weblate.machinery.forms import BaseMachineryForm
     from weblate.trans.models import Unit
 
 
-def get_machinery_language(language):
+def get_machinery_language(language: Language) -> Language:
     if language.code.endswith("_devel"):
         return Language.objects.get(code=language.code[:-6])
     return language
@@ -76,18 +76,28 @@ class SettingsDict(TypedDict, total=False):
     model: str
     persona: str
     style: str
+    custom_model: str
+    bucket_name: str
+    context_vector: str
+    deployment: str
+    azure_endpoint: str
 
 
-class TranslationResultDict(TypedDict, total=False):
+class TranslationResultDict(TypedDict):
     text: str
     quality: int
     service: str
     source: str
-    # TODO: only following are actually optional, byt this can be specified
-    # in Python 3.11+
-    show_quality: bool
-    origin: str
-    origin_url: str
+    show_quality: NotRequired[bool]
+    origin: NotRequired[str]
+    origin_url: NotRequired[str]
+    delete_url: NotRequired[str]
+
+
+class UnitMemoryResultDict(TypedDict, total=False):
+    quality: list[int]
+    translation: list[str]
+    origin: list[BatchMachineTranslation] | None
 
 
 DownloadTranslations = Iterable[TranslationResultDict]
@@ -109,7 +119,7 @@ class BatchMachineTranslation:
     accounting_key = "external"
     force_uncleanup = False
     hightlight_syntax = False
-    settings_form: None | type[BaseMachineryForm] = None
+    settings_form: type[BaseMachineryForm] | None = None
     request_timeout = 5
     is_available = True
     replacement_start = "[X"
@@ -125,7 +135,7 @@ class BatchMachineTranslation:
         self.rate_limit_cache = f"{self.mtid}-rate-limit"
         self.languages_cache = f"{self.mtid}-languages"
         self.comparer = Comparer()
-        self.supported_languages_error: None | Exception = None
+        self.supported_languages_error: Exception | None = None
         self.supported_languages_error_age: float = 0
         self.settings = settings
 
@@ -138,11 +148,13 @@ class BatchMachineTranslation:
         except Exception as error:
             raise ValidationError(
                 gettext("Could not fetch supported languages: %s") % error
-            )
+            ) from error
         try:
             self.download_multiple_translations("en", "de", [("test", None)], None, 75)
         except Exception as error:
-            raise ValidationError(gettext("Could not fetch translation: %s") % error)
+            raise ValidationError(
+                gettext("Could not fetch translation: %s") % error
+            ) from error
 
     @property
     def api_base_url(self):
@@ -176,7 +188,7 @@ class BatchMachineTranslation:
         """Add authentication headers to request."""
         return {}
 
-    def get_auth(self) -> None | tuple[str, str] | AuthBase:
+    def get_auth(self) -> tuple[str, str] | AuthBase | None:
         return None
 
     def check_failure(self, response) -> None:
@@ -217,24 +229,27 @@ class BatchMachineTranslation:
 
     def map_language_code(self, code: str) -> str:
         """Map language code to service specific."""
-        if code.endswith("_devel"):
-            code = code[:-6]
+        code = code.removesuffix("_devel")
         if code in self.language_map:
             return self.language_map[code]
         return code
 
-    def report_error(self, message) -> None:
+    def report_error(
+        self, cause: str, extra_log: str | None = None, message: bool = False
+    ) -> None:
         """Report error situations."""
-        report_error(cause="Machinery error")
-        LOGGER.error(message, self.name)
+        report_error(
+            f"machinery[{self.name}]: {cause}", extra_log=extra_log, message=message
+        )
 
     @cached_property
     def supported_languages(self):
         """Return list of supported languages."""
         # Try using list from cache
-        languages = cache.get(self.languages_cache)
-        if languages is not None:
-            return languages
+        languages_cache = cache.get(self.languages_cache)
+        if languages_cache is not None:
+            # hiredis-py 3 makes list from set
+            return set(languages_cache)
 
         if self.is_rate_limited():
             return set()
@@ -245,7 +260,7 @@ class BatchMachineTranslation:
         except Exception as exc:
             self.supported_languages_error = exc
             self.supported_languages_error_age = time.time()
-            self.report_error("Could not fetch languages from %s, using defaults")
+            self.report_error("Could not fetch languages, using defaults")
             return set()
 
         # Update cache
@@ -280,7 +295,7 @@ class BatchMachineTranslation:
         return exc.response.status_code in {456, 429, 401, 403, 503}
 
     def get_cache_key(
-        self, scope: str, *, parts: Iterable[str | int] = (), text: None | str = None
+        self, scope: str, *, parts: Iterable[str | int] = (), text: str | None = None
     ) -> str:
         """
         Cache key for caching translations.
@@ -316,14 +331,14 @@ class BatchMachineTranslation:
         return re.escape(text[:-1]) + " *" + re.escape(text[-1:])
 
     def format_replacement(
-        self, h_start: int, h_end: int, h_text: str, h_kind: None | Unit
+        self, h_start: int, h_end: int, h_text: str, h_kind: Unit | None
     ) -> str:
         """Generate a single replacement."""
         return f"{self.replacement_start}{h_start}{self.replacement_end}"
 
     def get_highlights(
         self, text: str, unit
-    ) -> Iterable[tuple[int, int, str, None | Unit]]:
+    ) -> Iterable[tuple[int, int, str, Unit | None]]:
         for h_start, h_end, h_text in highlight_string(
             text, unit, hightlight_syntax=self.hightlight_syntax
         ):
@@ -364,7 +379,10 @@ class BatchMachineTranslation:
 
     def get_language_possibilities(self, language: Language) -> Iterator[str]:
         code = language.code
-        yield self.map_language_code(code)
+        mapped_code = self.map_language_code(code)
+        if not mapped_code:
+            return
+        yield mapped_code
         code = code.replace("-", "_")
         while "_" in code:
             code = code.rsplit("_", 1)[0]
@@ -374,7 +392,8 @@ class BatchMachineTranslation:
         self, source_language: Language, target_language: Language
     ) -> tuple[str, str]:
         if source_language == target_language and not self.same_languages:
-            raise UnsupportedLanguageError("Same languages")
+            msg = "Same languages"
+            raise UnsupportedLanguageError(msg)
 
         for source in self.get_language_possibilities(source_language):
             for target in self.get_language_possibilities(target_language):
@@ -387,20 +406,25 @@ class BatchMachineTranslation:
             self.supported_languages_error = None
             self.supported_languages_error_age = 0
 
-        raise UnsupportedLanguageError("Not supported")
+        msg = "Not supported"
+        raise UnsupportedLanguageError(msg)
 
-    def get_cached(self, source, language, text, threshold, replacements):
+    def get_cached(
+        self, unit, source, language, text, threshold, replacements, *extra_parts
+    ):
         if not self.cache_translations:
             return None, None
         cache_key = self.get_cache_key(
-            "translation", parts=(source, language, threshold), text=text
+            "translation",
+            parts=(source, language, threshold, *extra_parts),
+            text=text,
         )
         result = cache.get(cache_key)
         if result and (replacements or self.force_uncleanup):
             self.uncleanup_results(replacements, result)
         return cache_key, result
 
-    def search(self, unit, text, user):
+    def search(self, unit, text, user: User | None):
         """Search for known translations of `text`."""
         translation = unit.translation
         try:
@@ -490,7 +514,7 @@ class BatchMachineTranslation:
 
             # Try cached results
             cache_key, result = self.get_cached(
-                source, language, text, threshold, replacements
+                unit, source, language, text, threshold, replacements
             )
             if result is not None:
                 output[original_source] = result
@@ -517,7 +541,7 @@ class BatchMachineTranslation:
                 if self.is_rate_limit_error(exc):
                     self.set_rate_limit()
 
-                self.report_error("Could not fetch translations from %s")
+                self.report_error("Could not fetch translations")
                 if isinstance(exc, MachineTranslationError):
                     raise
                 raise MachineTranslationError(self.get_error_message(exc)) from exc
@@ -525,13 +549,16 @@ class BatchMachineTranslation:
             # Postprocess translations
             for text, result in translations.items():
                 for _unit, original_source, replacements in pending[text]:
-                    for item in result:
+                    # Always operate on copy of the dictionaries
+                    partial = [x.copy() for x in result]
+
+                    for item in partial:
                         item["original_source"] = original_source
                     if cache_key:
-                        cache.set(cache_key, result, 30 * 86400)
+                        cache.set(cache_key, partial, 30 * 86400)
                     if replacements or self.force_uncleanup:
-                        self.uncleanup_results(replacements, result)
-                    output[original_source] = result
+                        self.uncleanup_results(replacements, partial)
+                    output[original_source] = partial
         return output
 
     def get_error_message(self, exc: Exception) -> str:
@@ -571,7 +598,7 @@ class BatchMachineTranslation:
         translations = self._translate(source, language, sources, user, threshold)
 
         for unit in units:
-            result = unit.machinery
+            result: UnitMemoryResultDict = unit.machinery
             if min(result.get("quality", ()), default=0) >= self.max_score:
                 continue
             translation_lists = [translations[text] for text in unit.plural_map]
@@ -648,7 +675,7 @@ class InternalMachineTranslation(MachineTranslation):
         """Disable rate limiting."""
         return False
 
-    def get_language_possibilities(self, language: Language) -> Iterator[Language]:
+    def get_language_possibilities(self, language: Language) -> Iterator[Language]:  # type: ignore[override]
         yield get_machinery_language(language)
 
 
@@ -656,7 +683,16 @@ class GlossaryMachineTranslationMixin(MachineTranslation):
     glossary_name_format = (
         "weblate:{project}:{source_language}:{target_language}:{checksum}"
     )
+    glossary_name_format_pattern = (
+        r"weblate:(\d+):([A-z0-9@_-]+):([A-z0-9@_-]+):([a-f0-9]+)"
+    )
+
     glossary_count_limit = 0
+
+    def delete_cache(self) -> None:
+        """Delete general caches and glossary cache."""
+        super().delete_cache()
+        cache.delete(self.get_cache_key("glossaries"))
 
     def is_glossary_supported(self, source_language: str, target_language: str) -> bool:
         return True
@@ -680,7 +716,7 @@ class GlossaryMachineTranslationMixin(MachineTranslation):
     ) -> None:
         raise NotImplementedError
 
-    def get_glossaries(self, use_cache: bool = True):
+    def get_glossaries(self, use_cache: bool = True) -> dict[str, str]:
         cache_key = self.get_cache_key("glossaries")
         if use_cache:
             cached = cache.get(cache_key)
@@ -692,9 +728,30 @@ class GlossaryMachineTranslationMixin(MachineTranslation):
         cache.set(cache_key, result, 24 * 3600)
         return result
 
+    def tsv_checksum(self, tsv: str) -> str:
+        """Calculate checksum of given TSV glossary."""
+        return hash_to_checksum(calculate_hash(tsv)) if tsv else ""
+
+    def get_cached(
+        self, unit, source, language, text, threshold, replacements, *extra_parts
+    ):
+        """Retrieve cached translation with glossary checksum."""
+        from weblate.glossary.models import get_glossary_tsv
+
+        return super().get_cached(
+            unit,
+            source,
+            language,
+            text,
+            threshold,
+            replacements,
+            self.tsv_checksum(get_glossary_tsv(unit.translation)),
+            *extra_parts,
+        )
+
     def get_glossary_id(
         self, source_language: str, target_language: str, unit: Unit | None
-    ) -> int | str | None:
+    ) -> str | None:
         from weblate.glossary.models import get_glossary_tsv
 
         if unit is None:
@@ -712,7 +769,7 @@ class GlossaryMachineTranslationMixin(MachineTranslation):
             return None
 
         # Calculate hash to check for changes
-        glossary_checksum = hash_to_checksum(calculate_hash(glossary_tsv))
+        glossary_checksum = self.tsv_checksum(glossary_tsv)
         glossary_name = self.glossary_name_format.format(
             project=translation.component.project.id,
             source_language=source_language,
@@ -761,9 +818,18 @@ class GlossaryMachineTranslationMixin(MachineTranslation):
         glossaries = self.get_glossaries(use_cache=False)
         return glossaries[glossary_name]
 
+    def match_name_format(self, string: str) -> re.Match | None:
+        """
+        Match glossary name against format.
 
-class XMLMachineTranslationMixin:
+        Only way so far to identify glossaries from memories
+        """
+        return re.match(self.glossary_name_format_pattern, string)
+
+
+class XMLMachineTranslationMixin(BatchMachineTranslation):
     hightlight_syntax = True
+    force_uncleanup = True
 
     def unescape_text(self, text: str) -> str:
         """Unescaping of the text with replacements."""
@@ -774,7 +840,7 @@ class XMLMachineTranslationMixin:
         return escape(text)
 
     def format_replacement(
-        self, h_start: int, h_end: int, h_text: str, h_kind: None | Unit
+        self, h_start: int, h_end: int, h_text: str, h_kind: Unit | None
     ) -> str:
         """Generate a single replacement."""
         raise NotImplementedError

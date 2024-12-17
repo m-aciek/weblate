@@ -2,6 +2,10 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from django.utils.translation import gettext_lazy
 
 from weblate.addons.base import BaseAddon
@@ -11,13 +15,18 @@ from weblate.trans.bulk import bulk_perform
 from weblate.trans.models import Unit
 from weblate.utils.state import STATE_FUZZY, STATE_TRANSLATED
 
+if TYPE_CHECKING:
+    from weblate.auth.models import User
+
 
 class FlagBase(BaseAddon):
-    events = (AddonEvent.EVENT_UNIT_PRE_CREATE,)
+    events: set[AddonEvent] = {
+        AddonEvent.EVENT_UNIT_PRE_CREATE,
+    }
     icon = "flag.svg"
 
     @classmethod
-    def can_install(cls, component, user):
+    def can_install(cls, component, user: User | None):
         # Following formats support fuzzy flag, so avoid messing up with them
         if component.file_format in {"ts", "po", "po-mono"}:
             return False
@@ -84,7 +93,9 @@ class SameEditAddon(FlagBase):
 
 
 class BulkEditAddon(BaseAddon):
-    events = (AddonEvent.EVENT_COMPONENT_UPDATE,)
+    events: set[AddonEvent] = {
+        AddonEvent.EVENT_COMPONENT_UPDATE,
+    }
     name = "weblate.flags.bulk"
     verbose = gettext_lazy("Bulk edit")
     description = gettext_lazy("Bulk edit flags, labels, or states of strings.")

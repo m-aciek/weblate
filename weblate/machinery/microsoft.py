@@ -35,18 +35,10 @@ class MicrosoftCognitiveTranslation(XMLMachineTranslationMixin, MachineTranslati
     settings_form = MicrosoftMachineryForm
 
     language_map = {
-        "zh-hant": "zh-Hant",
-        "zh-hans": "zh-Hans",
-        "zh-tw": "zh-Hant",
-        "zh-cn": "zh-Hans",
-        "tlh": "tlh-Latn",
-        "tlh-qaak": "tlh-Piqd",
-        "nb": "no",
-        "bs-latn": "bs-Latn",
-        "sr": "sr-Latn",
-        "sr-latn": "sr-Latn",
-        "sr-cyrl": "sr-Cyrl",
-        "mn": "mn-Mong",
+        "zh_Hant": "zh-hant",
+        "zh_Hans": "zh-hans",
+        "zh_TW": "zh-hant",
+        "zh_CN": "zh-hans",
     }
 
     @classmethod
@@ -56,8 +48,8 @@ class MicrosoftCognitiveTranslation(XMLMachineTranslationMixin, MachineTranslati
     def __init__(self, settings: SettingsDict) -> None:
         """Check configuration."""
         super().__init__(settings)
-        self._access_token: None | str = None
-        self._token_expiry: None | datetime = None
+        self._access_token: str | None = None
+        self._token_expiry: datetime | None = None
 
         # check settings for Microsoft region prefix
         region = "" if not self.settings["region"] else f"{self.settings['region']}."
@@ -161,7 +153,7 @@ class MicrosoftCognitiveTranslation(XMLMachineTranslationMixin, MachineTranslati
         }
 
     def format_replacement(
-        self, h_start: int, h_end: int, h_text: str, h_kind: None | Unit
+        self, h_start: int, h_end: int, h_text: str, h_kind: Unit | None
     ):
         """Generate a single replacement."""
         if h_kind is None:
@@ -178,7 +170,7 @@ class MicrosoftCognitiveTranslation(XMLMachineTranslationMixin, MachineTranslati
     def get_highlights(self, text, unit):
         result = list(super().get_highlights(text, unit))
 
-        for term in get_glossary_terms(unit):
+        for term in get_glossary_terms(unit, include_variants=False):
             for start, end in term.glossary_positions:
                 glossary_highlight = (start, end, text[start:end], term)
                 handled = False

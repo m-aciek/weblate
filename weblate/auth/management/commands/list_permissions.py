@@ -36,9 +36,9 @@ class Command(BaseCommand):
         self.stdout.write("Managing per-project access control\n\n")
 
         for name in ACL_GROUPS:
-            self.stdout.write(f"{name}\n\n\n")
+            self.stdout.write(f"`{name}`\n\n\n")
 
-        self.stdout.write("\n\n")
+        self.stdout.write("\nList of privileges\n\n")
 
         last = ""
 
@@ -65,7 +65,17 @@ class Command(BaseCommand):
             )
         table.append((GROUP_NAMES[last], rows))
 
-        rows = [(name, "") for _key, name in GLOBAL_PERMISSIONS]
+        rows = [
+            (
+                name,
+                ", ".join(
+                    f":guilabel:`{name}`"
+                    for name, permissions in ROLES
+                    if key in permissions
+                ),
+            )
+            for key, name in GLOBAL_PERMISSIONS
+        ]
         table.append(("Site wide privileges", rows))
 
         len_1 = max(len(group) for group, _rows in table)
@@ -85,15 +95,21 @@ class Command(BaseCommand):
                 self.stdout.write(row.format(scope if number == 0 else "", name, role))
             self.stdout.write(sep)
 
+        self.stdout.write("\nList of built-in roles\n\n")
+
+        self.stdout.write(".. list-table::\n\n")
+
         for name, permissions in ROLES:
-            self.stdout.write(f"`{name}`")
-            self.stdout.write("    ", ending="")
+            self.stdout.write(f"   * - `{name}`")
+            self.stdout.write("     - ", ending="")
             self.stdout.write(
-                ", ".join(
-                    f":guilabel:`{PERMISSION_NAMES[perm]}`"
+                "\n       ".join(
+                    f"* :guilabel:`{PERMISSION_NAMES[perm]}`"
                     for perm in sorted(permissions)
                 )
             )
+
+        self.stdout.write("\nList of teams\n\n")
 
         for name, roles, _selection in GROUPS:
             self.stdout.write(f"`{name}`\n\n\n")

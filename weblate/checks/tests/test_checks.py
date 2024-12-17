@@ -16,7 +16,7 @@ from weblate.checks.flags import Flags
 from weblate.lang.models import Language, Plural
 
 if TYPE_CHECKING:
-    from weblate.checks.base import Check
+    from weblate.checks.base import BaseCheck
 
 
 class MockLanguage(Language):
@@ -63,9 +63,9 @@ class MockProject:
 class MockComponent:
     """Mock component object."""
 
-    def __init__(self) -> None:
+    def __init__(self, source_language: str = "en") -> None:
         self.id = 1
-        self.source_language = MockLanguage("en")
+        self.source_language = MockLanguage(source_language)
         self.project = MockProject()
         self.name = "MockComponent"
         self.file_format = "auto"
@@ -75,9 +75,9 @@ class MockComponent:
 class MockTranslation:
     """Mock translation object."""
 
-    def __init__(self, code="cs") -> None:
+    def __init__(self, code: str = "cs", source_language: str = "en") -> None:
         self.language = MockLanguage(code)
-        self.component = MockComponent()
+        self.component = MockComponent(source_language)
         self.is_template = False
         self.is_source = False
         self.plural = self.language.plural
@@ -92,14 +92,14 @@ class MockUnit:
 
     def __init__(
         self,
-        id_hash=None,
-        flags="",
-        code="cs",
-        source="",
-        note="",
-        is_source=None,
-        target="",
-        context="",
+        id_hash: str | None = None,
+        flags: str | Flags = "",
+        code: str = "cs",
+        source: str | list[str] = "",
+        note: str = "",
+        is_source: bool | None = None,
+        target: str | list[str] = "",
+        context: str = "",
     ) -> None:
         if id_hash is None:
             id_hash = random.randint(0, 65536)  # noqa: S311
@@ -147,24 +147,24 @@ class MockUnit:
 class CheckTestCase(SimpleTestCase):
     """Generic test, also serves for testing base class."""
 
-    check: None | Check = None
+    check: BaseCheck | None = None
     default_lang = "cs"
 
     def setUp(self) -> None:
         self.test_empty: tuple[str, str, str] = ("", "", "")
         self.test_good_matching: tuple[str, str, str] = ("string", "string", "")
         self.test_good_none: tuple[str, str, str] = ("string", "string", "")
-        self.test_good_ignore: None | tuple[str, str, str] = None
-        self.test_good_flag: None | tuple[str, str, str] = None
-        self.test_failure_1: None | tuple[str, str, str] = None
-        self.test_failure_2: None | tuple[str, str, str] = None
-        self.test_failure_3: None | tuple[str, str, str] = None
+        self.test_good_ignore: tuple[str, str, str] | None = None
+        self.test_good_flag: tuple[str, str, str] | None = None
+        self.test_failure_1: tuple[str, str, str] | None = None
+        self.test_failure_2: tuple[str, str, str] | None = None
+        self.test_failure_3: tuple[str, str, str] | None = None
         self.test_ignore_check: tuple[str, str, str] = (
             "x",
             "x",
             self.check.ignore_string if self.check else "",
         )
-        self.test_highlight: None | tuple[str, str, list[tuple[int, int, str]]] = None
+        self.test_highlight: tuple[str, str, list[tuple[int, int, str]]] | None = None
 
     def do_test(self, expected, data, lang=None) -> None:
         """Perform single check if we have data to test."""

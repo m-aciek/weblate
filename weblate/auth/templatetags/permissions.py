@@ -11,6 +11,7 @@ register = template.Library()
 def perm(context, permission, obj=None):
     try:
         user = context["user"]
-    except KeyError:
-        return False
+    except KeyError as error:
+        msg = "Missing user in context, could not perform permission check"
+        raise ValueError(msg) from error
     return user.has_perm(permission, obj)

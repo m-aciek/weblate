@@ -6,7 +6,6 @@
 
 import os
 from tempfile import NamedTemporaryFile
-from unittest import SkipTest
 
 from weblate.checks.tests.test_checks import MockUnit
 from weblate.formats.convert import (
@@ -42,15 +41,14 @@ class ConvertFormatTest(BaseFormatTest):
 
     def test_convert(self) -> None:
         if not self.CONVERT_TEMPLATE:
-            raise SkipTest(f"Test template not provided for {self.FORMAT.format_id}")
-        template = NamedTemporaryFile(delete=False, mode="w+")
-        translation = NamedTemporaryFile(delete=False, mode="w+")
+            self.skipTest(f"Test template not provided for {self.FORMAT.format_id}")
+        translation = template = None
         try:
             # Generate test files
-            template.write(self.CONVERT_TEMPLATE)
-            template.close()
-            translation.write(self.CONVERT_TRANSLATION)
-            translation.close()
+            with NamedTemporaryFile(delete=False, mode="w+") as template:
+                template.write(self.CONVERT_TEMPLATE)
+            with NamedTemporaryFile(delete=False, mode="w+") as translation:
+                translation.write(self.CONVERT_TRANSLATION)
 
             # Parse
             storage = self.FORMAT(
@@ -78,8 +76,10 @@ class ConvertFormatTest(BaseFormatTest):
             with open(translation.name) as handle:
                 self.assertEqual(handle.read(), self.CONVERT_EXPECTED)
         finally:
-            os.unlink(template.name)
-            os.unlink(translation.name)
+            if template:
+                os.unlink(template.name)
+            if translation:
+                os.unlink(translation.name)
 
 
 class HTMLFormatTest(ConvertFormatTest):

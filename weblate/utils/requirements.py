@@ -50,13 +50,15 @@ REQUIRES = [
     "hiredis",
     "sentry_sdk",
     "Cython",
-    "misaka",
+    "mistletoe",
     "GitPython",
     "borgbackup",
     "pyparsing",
     "ahocorasick_rs",
     "python-redis-lock",
     "charset-normalizer",
+    "cyrtranslit",
+    "drf_spectacular",
 ]
 
 OPTIONAL = [
@@ -67,10 +69,11 @@ OPTIONAL = [
     "tesserocr",
     "akismet",
     "boto3",
-    "zeep",
     "aeidon",
     "iniparse",
     "mysqlclient",
+    "google-cloud-translate",
+    "openai",
 ]
 
 
@@ -85,9 +88,8 @@ def get_version_module(name, optional=False):
     except PackageNotFoundError as exc:
         if optional:
             return None
-        raise ImproperlyConfigured(
-            f"Missing dependency {name}, please install using: pip install {name}"
-        ) from exc
+        msg = f"Missing dependency {name}, please install using: pip install {name}"
+        raise ImproperlyConfigured(msg) from exc
     url = package.get("Home-page")
     if url is None and (project_urls := package.get_all("Project-URL")):
         for project_url in project_urls:
@@ -148,7 +150,8 @@ def get_versions():
     try:
         result.append(("Git", "https://git-scm.com/", GitRepository.get_version()))
     except OSError as exc:
-        raise ImproperlyConfigured("Could not run git, please install it.") from exc
+        msg = "Could not run git, please install it."
+        raise ImproperlyConfigured(msg) from exc
 
     return result
 
@@ -160,7 +163,7 @@ def get_db_version():
                 cursor.execute("SHOW server_version")
                 version = cursor.fetchone()
         except (RuntimeError, DatabaseError):
-            report_error(cause="PostgreSQL version check")
+            report_error("PostgreSQL version check")
             return None
 
         return (
@@ -172,7 +175,7 @@ def get_db_version():
         with connection.cursor() as cursor:
             version = cursor.connection.get_server_info()
     except (RuntimeError, DatabaseError):
-        report_error(cause="MySQL version check")
+        report_error("MySQL version check")
         return None
     return (
         f"{connection.display_name} sever",
@@ -188,7 +191,7 @@ def get_cache_version():
         try:
             version = cache.client.get_client().info()["redis_version"]
         except RuntimeError:
-            report_error(cause="Redis version check")
+            report_error("Redis version check")
             return None
 
         return ("Redis server", "https://redis.io/", version)

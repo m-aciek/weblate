@@ -30,6 +30,7 @@ WLT.Utils = (() => ({
 
 WLT.Editor = (() => {
   let lastEditor = null;
+  let hasChanges = false;
 
   function EditorBase() {
     const translationAreaSelector = ".translation-editor";
@@ -40,6 +41,7 @@ WLT.Editor = (() => {
 
     this.$editor.on("input", translationAreaSelector, (e) => {
       WLT.Utils.markTranslated($(e.target).closest("form"));
+      hasChanges = true;
     });
 
     this.$editor.on("focusin", translationAreaSelector, function () {
@@ -70,10 +72,10 @@ WLT.Editor = (() => {
     });
 
     /* Copy source text */
-    this.$editor.on("click", "[data-clone-text]", function (e) {
+    this.$editor.on("click", "[data-clone-value]", function (e) {
       const $this = $(this);
       const $document = $(document);
-      const cloneText = this.getAttribute("data-clone-text");
+      const cloneText = this.getAttribute("data-clone-value");
 
       let row = $this.closest(".zen-unit");
       if (row.length === 0) {
@@ -103,6 +105,7 @@ WLT.Editor = (() => {
         });
       }
       WLT.Utils.markFuzzy($this.closest("form"));
+      hasChanges = true;
       return false;
     });
 
@@ -114,6 +117,7 @@ WLT.Editor = (() => {
 
       container.find(".translation-editor").attr("dir", direction);
       container.find(".highlighted-output").attr("dir", direction);
+      hasChanges = true;
     });
 
     /* Special characters */
@@ -126,12 +130,22 @@ WLT.Editor = (() => {
         .find(".translation-editor")
         .insertAtCaret(text);
       e.preventDefault();
+      hasChanges = true;
     });
 
     this.initHighlight();
     this.init();
 
     this.$translationArea[0].focus();
+
+    // Skip confirmation
+    this.$editor.on("click", ".skip", (e) => {
+      if (hasChanges) {
+        return confirm(
+          gettext("You have unsaved changes. Are you sure you want to skip?"),
+        );
+      }
+    });
   }
 
   EditorBase.prototype.init = () => {};
@@ -145,6 +159,7 @@ WLT.Editor = (() => {
       const $this = $(this);
       insertEditor(this.getAttribute("data-value"), $this);
       e.preventDefault();
+      hasChanges = true;
     });
 
     /* and shortcuts */

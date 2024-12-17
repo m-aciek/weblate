@@ -157,7 +157,12 @@ class PythonFormatCheckTest(CheckTestCase):
             source="%(count)d",
             target="%(languages)d",
             extra_flags="python-format",
-            translation=Translation(component=Component(file_format="po")),
+            translation=Translation(
+                component=Component(
+                    file_format="po",
+                    source_language=Language("en"),
+                )
+            ),
         )
         check = Check(unit=unit)
         self.assertHTMLEqual(
@@ -176,7 +181,12 @@ class PythonFormatCheckTest(CheckTestCase):
             source="%d %s",
             target="%s %d",
             extra_flags="python-format",
-            translation=Translation(component=Component(file_format="po")),
+            translation=Translation(
+                component=Component(
+                    file_format="po",
+                    source_language=Language("en"),
+                )
+            ),
         )
         check = Check(unit=unit)
         self.assertEqual(
@@ -514,7 +524,12 @@ class PerlBraceFormatCheckTest(CheckTestCase):
             source="{foo}",
             target="{bar}",
             extra_flags="es-format",
-            translation=Translation(component=Component(file_format="po")),
+            translation=Translation(
+                component=Component(
+                    file_format="po",
+                    source_language=Language("en"),
+                )
+            ),
         )
         check = Check(unit=unit)
         self.assertHTMLEqual(
@@ -574,6 +589,9 @@ class PythonBraceFormatCheckTest(CheckTestCase):
 
     def test_escaping(self) -> None:
         self.assertFalse(self.check.check_format("{{ string }}", "string", False, None))
+        self.assertFalse(
+            self.check.check_format("{{ string }}", "{{ string }}", False, None)
+        )
 
     def test_attribute_format(self) -> None:
         self.assertFalse(
@@ -583,6 +601,70 @@ class PythonBraceFormatCheckTest(CheckTestCase):
     def test_wrong_attribute_format(self) -> None:
         self.assertTrue(
             self.check.check_format("{s.foo} string", "{s.bar} string", False, None)
+        )
+
+    def test_extra_close_bracket(self) -> None:
+        self.assertTrue(
+            self.check.check_format("{s} string", "{s}} string", False, None)
+        )
+
+    def test_extra_open_bracket(self) -> None:
+        self.assertTrue(
+            self.check.check_format("{s} string", "{ {s} string", False, None)
+        )
+
+    def test_extra_open_bracket_extra(self) -> None:
+        self.assertTrue(self.check.check_format("string", "{ {s} string", False, None))
+
+    def test_wrong_order(self) -> None:
+        self.assertTrue(self.check.check_format("string", "}s{ string", False, None))
+
+    def test_escape_bracket(self) -> None:
+        self.assertFalse(
+            self.check.check_format("{{ {{ {s} }}", "{{ {{ {s} }}", False, None)
+        )
+
+    def test_description(self) -> None:
+        unit = Unit(
+            source="{s} {a}",
+            target="a a",
+            extra_flags="python-brace-format",
+            translation=Translation(
+                component=Component(
+                    file_format="po",
+                    source_language=Language("en"),
+                )
+            ),
+        )
+        check = Check(unit=unit)
+        self.assertHTMLEqual(
+            self.check.get_description(check),
+            """
+            The following format strings are missing:
+            <span class="hlcheck" data-value="{a}">{a}</span>,
+            <span class="hlcheck" data-value="{s}">{s}</span>
+            """,
+        )
+
+    def test_description_braces(self) -> None:
+        unit = Unit(
+            source="{s}",
+            target="{ {s} }",
+            extra_flags="python-brace-format",
+            translation=Translation(
+                component=Component(
+                    file_format="po",
+                    source_language=Language("en"),
+                )
+            ),
+        )
+        check = Check(unit=unit)
+        self.assertHTMLEqual(
+            self.check.get_description(check),
+            """
+            Single <span class="hlcheck" data-value="{">{</span> encountered in the format string.<br>
+            Single <span class="hlcheck" data-value="}">}</span> encountered in the format string.
+            """,
         )
 
 
@@ -677,6 +759,11 @@ class JavaFormatCheckTest(CheckTestCase):
 
     def test_escaping(self) -> None:
         self.assertFalse(self.check.check_format("%% s %%", "string", False, None))
+
+    def test_escaping_translation(self) -> None:
+        self.assertFalse(
+            self.check.check_format("Something failed", "Something %%s", False, None)
+        )
 
     def test_format(self) -> None:
         self.assertFalse(self.check.check_format("%s string", "%s string", False, None))
@@ -1065,7 +1152,9 @@ class RubyFormatCheckTest(CheckTestCase):
 class PluralTest(FixtureTestCase):
     check = PythonFormatCheck()
 
-    def do_check(self, sources, targets, translation, flags: str = ""):
+    def do_check(
+        self, sources: list[str], targets: list[str], translation, flags: str = ""
+    ):
         return self.check.check_target_unit(
             sources,
             targets,
@@ -1080,7 +1169,12 @@ class PluralTest(FixtureTestCase):
     def test_arabic(self) -> None:
         arabic = Language.objects.get(code="ar")
         translation = Translation(
-            language=arabic, plural=arabic.plural, component=Component(file_format="po")
+            language=arabic,
+            plural=arabic.plural,
+            component=Component(
+                file_format="po",
+                source_language=Language("en"),
+            ),
         )
         # Singular, correct format string
         self.assertFalse(self.do_check(["hello %s"], ["hell %s"], translation))
@@ -1106,7 +1200,12 @@ class PluralTest(FixtureTestCase):
     def test_arabic_strict(self) -> None:
         arabic = Language.objects.get(code="ar")
         translation = Translation(
-            language=arabic, plural=arabic.plural, component=Component(file_format="po")
+            language=arabic,
+            plural=arabic.plural,
+            component=Component(
+                file_format="po",
+                source_language=Language("en"),
+            ),
         )
         self.assertTrue(
             self.do_check(
@@ -1125,7 +1224,12 @@ class PluralTest(FixtureTestCase):
     def test_non_format_singular_fa(self) -> None:
         czech = Language.objects.get(code="fa")
         translation = Translation(
-            language=czech, plural=czech.plural, component=Component(file_format="po")
+            language=czech,
+            plural=czech.plural,
+            component=Component(
+                file_format="po",
+                source_language=Language("en"),
+            ),
         )
         self.assertFalse(
             self.do_check(
@@ -1137,7 +1241,10 @@ class PluralTest(FixtureTestCase):
         translation = Translation(
             language=czech,
             plural=czech.plural,
-            component=Component(file_format="aresource"),
+            component=Component(
+                file_format="aresource",
+                source_language=Language("en"),
+            ),
         )
         self.assertTrue(
             self.do_check(
@@ -1150,7 +1257,12 @@ class PluralTest(FixtureTestCase):
     def test_non_format_singular(self) -> None:
         czech = Language.objects.get(code="cs")
         translation = Translation(
-            language=czech, plural=czech.plural, component=Component(file_format="po")
+            language=czech,
+            plural=czech.plural,
+            component=Component(
+                file_format="po",
+                source_language=Language("en"),
+            ),
         )
         self.assertFalse(
             self.do_check(
@@ -1179,7 +1291,10 @@ class PluralTest(FixtureTestCase):
         translation = Translation(
             language=language,
             plural=language.plural,
-            component=Component(file_format="po"),
+            component=Component(
+                file_format="po",
+                source_language=Language("en"),
+            ),
         )
         self.assertFalse(
             self.do_check(
@@ -1208,7 +1323,10 @@ class PluralTest(FixtureTestCase):
         translation = Translation(
             language=language,
             plural=language.plural,
-            component=Component(file_format="po"),
+            component=Component(
+                file_format="po",
+                source_language=Language("en"),
+            ),
         )
         self.assertTrue(
             self.do_check(
@@ -1223,7 +1341,10 @@ class PluralTest(FixtureTestCase):
         translation = Translation(
             language=language,
             plural=language.plural,
-            component=Component(file_format="po"),
+            component=Component(
+                file_format="po",
+                source_language=Language("en"),
+            ),
         )
         self.assertFalse(
             self.do_check(
@@ -1238,7 +1359,10 @@ class PluralTest(FixtureTestCase):
         translation = Translation(
             language=language,
             plural=language.plural,
-            component=Component(file_format="po"),
+            component=Component(
+                file_format="po",
+                source_language=Language("en"),
+            ),
         )
         self.assertFalse(
             self.do_check(
@@ -1358,7 +1482,12 @@ class ESTemplateLiteralsCheckTest(CheckTestCase):
             source="${foo}",
             target="${bar}",
             extra_flags="es-format",
-            translation=Translation(component=Component(file_format="po")),
+            translation=Translation(
+                component=Component(
+                    file_format="po",
+                    source_language=Language("en"),
+                )
+            ),
         )
         check = Check(unit=unit)
         self.assertHTMLEqual(
@@ -1500,5 +1629,20 @@ class MultipleUnnamedFormatsCheckTestCase(SimpleTestCase):
         self.assertFalse(
             self.check.check_source(
                 ["Test %s"], MockUnit(flags="c-format,python-format")
+            )
+        )
+
+    def test_good_brace_format(self) -> None:
+        self.assertFalse(
+            self.check.check_source(
+                ["Recognition {progress}% ({current_job}/{total_jobs})"],
+                MockUnit(flags="python-brace-format"),
+            )
+        )
+
+    def test_bad_brace_format(self) -> None:
+        self.assertTrue(
+            self.check.check_source(
+                ["Recognition {}% ({}/{})"], MockUnit(flags="python-brace-format")
             )
         )

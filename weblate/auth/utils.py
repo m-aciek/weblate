@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from email.errors import HeaderDefect
 from email.headerregistry import Address
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,7 @@ from weblate.auth.data import (
 )
 
 if TYPE_CHECKING:
-    from weblate.auth.models import Group, Role
+    from weblate.auth.models import Group, Permission, Role
 
 
 def is_django_permission(permission: str):
@@ -37,23 +38,35 @@ def is_django_permission(permission: str):
     return "_" in parts[1] and parts[1] != "add_more"
 
 
-def migrate_permissions_list(model, permissions):
+def migrate_permissions_list(
+    model: type[Permission], permissions: tuple[tuple[str, str], ...]
+) -> set[int]:
     ids = set()
-    # Update/create permissions
+    # Get all existing permissions
+    existing_objects = model.objects.filter(
+        codename__in=[perm[0] for perm in permissions]
+    )
+    existing = {permission.codename: permission for permission in existing_objects}
+
+    # Iterate over expected permissions
     for code, name in permissions:
-        instance, created = model.objects.get_or_create(
-            codename=code, defaults={"name": name}
-        )
+        try:
+            instance = existing[code]
+        except KeyError:
+            # Missing, create one
+            instance = model.objects.create(codename=code, name=name)
+        else:
+            # Update if needed
+            if instance.name != name:
+                instance.name = name
+                instance.save(update_fields=["name"])
         ids.add(instance.pk)
-        if not created and instance.name != name:
-            instance.name = name
-            instance.save(update_fields=["name"])
     return ids
 
 
-def migrate_permissions(model) -> None:
+def migrate_permissions(model: type[Permission]) -> None:
     """Create permissions as defined in the data."""
-    ids = set()
+    ids: set[int] = set()
     # Per object permissions
     ids.update(migrate_permissions_list(model, PERMISSIONS))
     # Global permissions
@@ -62,7 +75,7 @@ def migrate_permissions(model) -> None:
     model.objects.exclude(id__in=ids).delete()
 
 
-def migrate_roles(model, perm_model) -> set[str]:
+def migrate_roles(model: type[Role], perm_model: type[Permission]) -> set[str]:
     """Create roles as defined in the data."""
     result = set()
     for role, permissions in ROLES:
@@ -112,16 +125,18 @@ def create_anonymous(model, group_model, update=True) -> None:
             },
         )
     except IntegrityError as error:
-        raise ValueError(
+        msg = (
             f"Anonymous user ({settings.ANONYMOUS_USER_NAME}) and could not be created, "
             f"most likely because other user is using noreply@weblate.org e-mail.: {error}"
-        ) from error
+        )
+        raise ValueError(msg) from error
     if user.is_active:
-        raise ValueError(
+        msg = (
             f"Anonymous user ({settings.ANONYMOUS_USER_NAME}) already exists and is "
             "active, please change the ANONYMOUS_USER_NAME setting or mark the user "
             "as not active in the admin interface."
         )
+        raise ValueError(msg)
 
     if created or update:
         user.set_unusable_password()
@@ -131,12 +146,16 @@ def create_anonymous(model, group_model, update=True) -> None:
         )
 
 
-def format_address(display_name, email):
+def format_address(display_name: str, email: str) -> str:
     """Format e-mail address with display name."""
     # While Address does quote the name following RFC 5322,
     # git still doesn't like <> being used in the string
-    return str(
-        Address(
-            display_name=display_name.replace("<", "").replace(">", ""), addr_spec=email
+    try:
+        address = Address(
+            display_name=display_name.replace("<", "").replace(">", ""),
+            addr_spec=email,
         )
-    )
+    except HeaderDefect as error:
+        msg = f"Invalid e-mail address '{email}': {error}"
+        raise ValueError(msg) from error
+    return str(address)

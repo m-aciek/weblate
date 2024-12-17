@@ -15,15 +15,23 @@ Installation
 
 1. Add ``weblate.gitexport`` to installed apps in :file:`settings.py`:
 
-.. code-block:: python
+   .. code-block:: python
 
-    INSTALLED_APPS += ("weblate.gitexport",)
+       INSTALLED_APPS += ("weblate.gitexport",)
 
 2. Export existing repositories by migrating your database after installation:
 
-.. code-block:: sh
+   .. code-block:: sh
 
-    weblate migrate
+       weblate migrate
+
+.. hint::
+
+   Git exporter is turned on in our official Docker image. To turn it of, use:
+
+   .. code-block:: sh
+
+      WEBLATE_REMOVE_APPS=weblate.gitexport
 
 Usage
 +++++
@@ -78,6 +86,17 @@ Installation
 .. code-block:: sh
 
     weblate migrate
+
+Billing plan creation and assignment
+++++++++++++++++++++++++++++++++++++
+
+You first need to create a billing plan to activate billing. Navigate to the `Administration` section (represented by the wrench icon) and open the `Tools` screen. From there, proceed to the `Django admin interface`.
+
+In the Django admin interface, locate the `BILLING` section and add a billing plan. For instance, you can add a `Free` plan with no cost.
+
+If you wish to assign a billing plan to an existing project, this can also be done within the `Django admin interface` using the `Customer billings` option.
+
+Lastly, the `Django admin interface` provides an `Invoice` option for logging your customer payments.
 
 Usage
 +++++
@@ -254,7 +273,7 @@ Rate limiting
 
 .. versionchanged:: 4.6
 
-      The rate limiting no longer applies to superusers.
+      The rate limiting no longer applies to signed in superusers.
 
 Several operations in Weblate are rate limited. At most
 :setting:`RATELIMIT_ATTEMPTS` attempts are allowed within :setting:`RATELIMIT_WINDOW` seconds.
@@ -265,23 +284,25 @@ The following operations are subject to rate limiting:
 +-----------------------------------+--------------------+------------------+------------------+----------------+
 | Name                              | Scope              | Allowed attempts | Ratelimit window | Lockout period |
 +===================================+====================+==================+==================+================+
-| Registration                      | ``REGISTRATION``   |                5 |              300 |            600 |
+| Registration                      | ``REGISTRATION``   | 5                | 300              | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
-| Sending message to admins         | ``MESSAGE``        |                2 |              300 |            600 |
+| Sending message to admins         | ``MESSAGE``        | 2                | 300              | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
-| Password authentication on sign in| ``LOGIN``          |                5 |              300 |            600 |
+| Password authentication on sign in| ``LOGIN``          | 5                | 300              | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
-| Sitewide search                   | ``SEARCH``         |                6 |               60 |             60 |
+| Sitewide search                   | ``SEARCH``         | 6                | 60               | 60             |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
-| Translating                       | ``TRANSLATE``      |               30 |               60 |            600 |
+| Translating                       | ``TRANSLATE``      | 30               | 60               | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
-| Adding to glossary                | ``GLOSSARY``       |               30 |               60 |            600 |
+| Adding to glossary                | ``GLOSSARY``       | 30               | 60               | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
-| Starting translation into a new   | ``LANGUAGE``       |                2 |              300 |            600 |
+| Starting translation into a new   | ``LANGUAGE``       | 2                | 300              | 600            |
 | language                          |                    |                  |                  |                |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
-| Creating new project              | ``PROJECT``        |                5 |              600 |            600 |
+| Creating new project              | ``PROJECT``        | 5                | 600              | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
+
+The rate limiting is based on sessions when user is signed in and on IP address if not.
 
 If a user fails to sign in :setting:`AUTH_LOCK_ATTEMPTS` times, password authentication will be turned off on the account until having gone through the process of having its password reset.
 
@@ -295,6 +316,8 @@ The API has separate rate limiting settings, see :ref:`api-rate`.
    :ref:`reverse-proxy`,
    :ref:`api-rate`
 
+.. _fedora-messaging:
+
 Fedora Messaging integration
 ----------------------------
 
@@ -304,3 +327,7 @@ You can hook additional services on changes happening in Weblate using this.
 The Fedora Messaging integration is available as a separate Python module
 ``weblate-fedora-messaging``. Please see
 <https://github.com/WeblateOrg/fedora_messaging/> for setup instructions.
+
+.. seealso::
+
+   :ref:`schema-messaging`

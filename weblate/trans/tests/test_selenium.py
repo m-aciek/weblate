@@ -11,7 +11,6 @@ import warnings
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
-from unittest import SkipTest
 
 from django.conf import settings
 from django.core import mail
@@ -64,7 +63,9 @@ TEST_BACKENDS = (
 SOURCE_FONT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "static",
+    "js",
     "vendor",
+    "fonts",
     "font-source",
     "TTF",
     "SourceSans3-Bold.ttf",
@@ -76,12 +77,7 @@ class SeleniumTests(
 ):
     _driver: WebDriver | None = None
     _driver_error: str = ""
-    image_path = os.path.join(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        ),
-        "test-images",
-    )
+    image_path = os.path.join(settings.BASE_DIR, "test-images")
     site_domain = ""
 
     @contextmanager
@@ -111,8 +107,9 @@ class SeleniumTests(
         options.add_experimental_option("prefs", {"intl.accept_languages": "en,en_US"})
 
         # Need to revert fontconfig custom config for starting chrome
-        backup_fc = os.environ["FONTCONFIG_FILE"]
-        del os.environ["FONTCONFIG_FILE"]
+        backup_fc = os.environ.get("FONTCONFIG_FILE")
+        if backup_fc is not None:
+            del os.environ["FONTCONFIG_FILE"]
 
         # Force English locales, the --lang and accept_language settings does not
         # work in some cases
@@ -127,7 +124,8 @@ class SeleniumTests(
                 raise
 
         # Restore custom fontconfig settings
-        os.environ["FONTCONFIG_FILE"] = backup_fc
+        if backup_fc is not None:
+            os.environ["FONTCONFIG_FILE"] = backup_fc
         # Restore locales
         if backup_lang is None:
             del os.environ["LANG"]
@@ -147,7 +145,7 @@ class SeleniumTests(
     def driver(self) -> WebDriver:
         if self._driver is None:
             warnings.warn(f"Selenium error: {self._driver_error}", stacklevel=1)
-            raise SkipTest(f"Webdriver not available: {self._driver_error}")
+            self.skipTest(f"Webdriver not available: {self._driver_error}")
         return self._driver
 
     def setUp(self) -> None:
@@ -200,7 +198,8 @@ class SeleniumTests(
     def upload_file(self, element, filename) -> None:
         filename = os.path.abspath(filename)
         if not os.path.exists(filename):
-            raise ValueError(f"Test file not found: {filename}")
+            msg = f"Test file not found: {filename}"
+            raise ValueError(msg)
         element.send_keys(filename)
 
     def clear_field(self, element):
@@ -285,7 +284,7 @@ class SeleniumTests(
             self.click(htmlid="logout-button")
 
         # We should be back on home page
-        self.driver.find_element(By.ID, "browse-projects")
+        self.driver.find_element(By.ID, "dashboard-return")
 
     def register_user(self):
         # registration page
@@ -481,7 +480,7 @@ class SeleniumTests(
         language = Language.objects.get(code="cs")
 
         source = cast(
-            Unit,
+            "Unit",
             Unit.objects.get(source=text, translation__language=language).source_unit,
         )
         source.explanation = "Help text for automatic translation tool"
@@ -1105,7 +1104,6 @@ class SeleniumTests(
         self.create_temp()
         try:
             self.open_manage()
-            self.screenshot("support.png")
             with self.wait_for_page_load():
                 self.click("Backups")
             element = self.driver.find_element(By.ID, "id_repository")
@@ -1123,6 +1121,12 @@ class SeleniumTests(
             self.screenshot("support-discovery.png")
         finally:
             self.remove_temp()
+
+    def test_manage(self) -> None:
+        self.open_manage()
+        self.screenshot("support.png")
+        self.click("Appearance")
+        self.screenshot("appearance-settings.png")
 
     def test_explanation(self) -> None:
         project = self.create_component()

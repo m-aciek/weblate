@@ -19,7 +19,7 @@ from django.dispatch import receiver
 from django.urls import reverse
 from django.utils.translation import gettext_lazy
 
-from weblate.auth.models import get_anonymous
+from weblate.auth.models import User, get_anonymous
 from weblate.checks.flags import Flags
 from weblate.screenshots.fields import ScreenshotField
 from weblate.trans.mixins import UserDisplayMixin
@@ -35,7 +35,7 @@ class ScreenshotQuerySet(models.QuerySet):
     def order(self):
         return self.order_by("name")
 
-    def filter_access(self, user):
+    def filter_access(self, user: User):
         result = self
         if user.needs_project_filter:
             result = result.filter(
@@ -83,7 +83,7 @@ class Screenshot(models.Model, UserDisplayMixin):
     def __str__(self) -> str:
         return self.name
 
-    def get_absolute_url(self):
+    def get_absolute_url(self) -> str:
         return reverse("screenshot", kwargs={"pk": self.pk})
 
     def __init__(self, *args, **kwargs) -> None:
@@ -108,7 +108,7 @@ def change_screenshot_assignment(sender, instance, action, **kwargs) -> None:
 
 
 @receiver(post_delete, sender=Screenshot)
-def update_alerts_on_screenshot_delete(sender, instance, **kwargs):
+def update_alerts_on_screenshot_delete(sender, instance, **kwargs) -> None:
     # Update the unused screenshot alert if screenshot is deleted
     if instance.translation.component.alert_set.filter(
         name="UnusedScreenshot"
@@ -125,7 +125,7 @@ def validate_screenshot_image(component, filename) -> bool:
             validate_bitmap(image_file)
     except ValidationError as error:
         component.log_error("failed to validate screenshot %s: %s", filename, error)
-        report_error(cause="Could not validate image from repository")
+        report_error("Could not validate image from repository")
         return False
     return True
 

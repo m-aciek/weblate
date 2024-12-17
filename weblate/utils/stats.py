@@ -16,7 +16,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
-from django.db.models import Count, Model, Q
+from django.db.models import Count, F, Model, Q
 from django.db.models.functions import Length
 from django.urls import reverse
 from django.utils import timezone
@@ -38,6 +38,8 @@ from weblate.utils.state import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from weblate.trans.models import Component, Project
 
 StatItem = int | float | str | datetime | None
 StatDict = dict[str, StatItem]
@@ -83,7 +85,7 @@ SOURCE_KEYS = frozenset(
     )
 )
 
-# TODO: Drop in Weblate 5.5
+# TODO: Drop in Weblate 6
 LEGACY_KEYS = {
     "unapproved",
     "unapproved_chars",
@@ -143,7 +145,7 @@ class BaseStats:
         self._loaded: bool = False
         self._pending_save: bool = False
         self.last_change_cache = None
-        self._collected_update_objects: None | list[BaseStats] = None
+        self._collected_update_objects: list[BaseStats] | None = None
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}:{self.cache_key}>"
@@ -255,14 +257,15 @@ class BaseStats:
             # Legacy keys were calculated on demand before and are precalculated
             # since Weblate 5.2, so they are missing on stats calculated before.
             # Using zero here is most likely a wrong value, but safe and cheap.
-            # TODO: Drop in Weblate 5.5
+            # TODO: Drop in Weblate 6
             if name in LEGACY_KEYS:
                 return 0
             raise
 
     def __getattr__(self, name: str):
         if name.startswith("_"):
-            raise AttributeError(f"Invalid stats for {self}: {name}")
+            msg = f"Invalid stats for {self}: {name}"
+            raise AttributeError(msg)
 
         self.ensure_loaded()
 
@@ -271,7 +274,7 @@ class BaseStats:
             return self.calculate_percent(name)
 
         if name == "stats_timestamp":
-            # TODO: Drop in Weblate 5.5
+            # TODO: Drop in Weblate 6
             # Migration path for legacy stat data
             return self._data.get(name, 0)
 
@@ -281,7 +284,8 @@ class BaseStats:
             self._pending_save = True
             self.calculate_by_name(name)
             if name not in self._data:
-                raise AttributeError(f"Unsupported stats for {self}: {name}")
+                msg = f"Unsupported stats for {self}: {name}"
+                raise AttributeError(msg)
             if not was_pending:
                 self.save()
                 self._pending_save = False
@@ -343,6 +347,7 @@ class BaseStats:
 
     def clear(self) -> None:
         """Clear local cache."""
+        self._loaded = True
         self._data = {}
 
     def store(self, key: str, value: StatItem) -> None:
@@ -360,9 +365,7 @@ class BaseStats:
             self.save(update_parents=update_parents)
 
     def calculate_basic(self) -> None:
-        with sentry_sdk.start_span(
-            op="stats", description=f"CALCULATE {self.cache_key}"
-        ):
+        with sentry_sdk.start_span(op="stats", name=f"CALCULATE {self.cache_key}"):
             self.ensure_loaded()
             self._calculate_basic()
 
@@ -507,6 +510,7 @@ class TranslationStats(BaseStats):
             "active_checks_count",
             "dismissed_checks_count",
             "suggestion_count",
+            "source_label_count",
             "label_count",
             "comment_count",
             "num_chars",
@@ -520,6 +524,7 @@ class TranslationStats(BaseStats):
             active_checks_count=Count("check", filter=Q(check__dismissed=False)),
             dismissed_checks_count=Count("check", filter=Q(check__dismissed=True)),
             suggestion_count=Count("suggestion"),
+            source_label_count=Count("source_unit__labels"),
             label_count=Count("source_unit__labels"),
             comment_count=Count("comment", filter=Q(comment__resolved=False)),
             num_chars=Length("source"),
@@ -531,6 +536,7 @@ class TranslationStats(BaseStats):
             get_active_checks_count,
             get_dismissed_checks_count,
             get_suggestion_count,
+            get_source_label_count,
             get_label_count,
             get_comment_count,
             get_num_chars,
@@ -549,7 +555,11 @@ class TranslationStats(BaseStats):
             unit for unit in units if get_state(unit) >= STATE_TRANSLATED
         ]
         units_todo = [unit for unit in units if get_state(unit) < STATE_TRANSLATED]
-        units_unlabeled = [unit for unit in units if not get_label_count(unit)]
+        units_unlabeled = [
+            unit
+            for unit in units
+            if not get_source_label_count(unit) and not get_label_count(unit)
+        ]
         units_allchecks = [unit for unit in units if get_active_checks_count(unit)]
         units_translated_checks = [
             unit
@@ -847,7 +857,7 @@ class AggregatingStats(BaseStats):
 
         # Ensure all objects have data available so that we can use _dict directly
         for stats_obj in all_stats:
-            if "all" not in stats_obj._data:
+            if "all" not in stats_obj._data:  # noqa: SLF001
                 stats_obj.calculate_basic()
                 stats_obj.save()
 
@@ -903,6 +913,10 @@ class ParentAggregatingStats(AggregatingStats):
 class LanguageStats(AggregatingStats):
     def get_child_objects(self):
         return self._object.translation_set.only("id", "language")
+
+    @property
+    def language(self):
+        return self._object
 
 
 class ComponentStats(AggregatingStats):
@@ -1050,7 +1064,7 @@ class ProjectLanguage(BaseURLMixin):
     def get_url_path(self):
         return [*self.project.get_url_path(), "-", self.language.code]
 
-    def get_absolute_url(self):
+    def get_absolute_url(self) -> str:
         return reverse("show", kwargs={"path": self.get_url_path()})
 
     def get_translate_url(self):
@@ -1088,16 +1102,11 @@ class ProjectLanguage(BaseURLMixin):
         workflow_settings = WorkflowSetting.objects.filter(
             Q(project=None) | Q(project=self.project),
             language=self.language,
-        )
+        ).order_by(F("project").desc(nulls_last=True))
         if len(workflow_settings) == 0:
             return None
-        if len(workflow_settings) == 1:
-            return workflow_settings[0]
-        # We should have two objects here, return project specific one
-        for workflow_setting in workflow_settings:
-            if workflow_setting.project_id == self.project.id:
-                return workflow_setting
-        raise WorkflowSetting.DoesNotExist
+        # Project specific is first, project NULL is last
+        return workflow_settings[0]
 
 
 class ProjectLanguageStats(SingleLanguageStats):
@@ -1153,7 +1162,7 @@ class CategoryLanguage(BaseURLMixin):
     def get_url_path(self):
         return [*self.category.get_url_path(), "-", self.language.code]
 
-    def get_absolute_url(self):
+    def get_absolute_url(self) -> str:
         return reverse("show", kwargs={"path": self.get_url_path()})
 
     def get_translate_url(self):
@@ -1279,6 +1288,62 @@ class GlobalStats(ParentAggregatingStats):
     def cache_key(self) -> str:
         return "stats-global"
 
+    def get_single_language_stats(self, language):
+        return LanguageStats(language)
+
+    def get_language_stats(self):
+        return prefetch_stats(
+            self.get_single_language_stats(language)
+            for language in Language.objects.have_translation()
+        )
+
+    # The following fields are used in MetricsSerializer in API
+    def get_languages(self):
+        return Language.objects.count()
+
+    def get_users(self):
+        from weblate.auth.models import User
+
+        return User.objects.count()
+
+    def get_projects(self):
+        from weblate.trans.models import Project
+
+        return Project.objects.count()
+
+    def get_components(self):
+        from weblate.trans.models import Component
+
+        return Component.objects.count()
+
+    def get_translations(self):
+        from weblate.trans.models import Translation
+
+        return Translation.objects.count()
+
+    def get_checks(self):
+        from weblate.checks.models import Check
+
+        return Check.objects.count()
+
+    def get_configuration_errors(self):
+        from weblate.wladmin.models import ConfigurationError
+
+        return ConfigurationError.objects.filter(ignored=False).count()
+
+    def get_suggestions(self):
+        from weblate.trans.models import Suggestion
+
+        return Suggestion.objects.count()
+
+    def get_celery_queues(self):
+        from weblate.utils.celery import get_queue_stats
+
+        return get_queue_stats()
+
+    def get_name(self):
+        return settings.SITE_TITLE
+
 
 class GhostStats(BaseStats):
     basic_keys = SOURCE_KEYS
@@ -1318,7 +1383,13 @@ class GhostStats(BaseStats):
 
 
 class GhostProjectLanguageStats(GhostStats):
-    def __init__(self, component, language, is_shared=None) -> None:
+    language: Language
+    component: Component
+    is_shared: Project | None
+
+    def __init__(
+        self, component: Component, language: Language, is_shared: Project | None = None
+    ) -> None:
         super().__init__(component.stats)
         self.language = language
         self.component = component

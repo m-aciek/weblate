@@ -102,7 +102,8 @@ class WeblateComponentCommand(BaseCommand):
                 # warn on no match
                 if not found.exists():
                     self.stderr.write(f"{arg!r} did not match any components")
-                    raise CommandError("Nothing to process!")
+                    msg = "Nothing to process!"
+                    raise CommandError(msg)
 
                 # merge results
                 result |= found
@@ -112,7 +113,8 @@ class WeblateComponentCommand(BaseCommand):
             self.stderr.write(" * Use --all to select all components")
             self.stderr.write(" * Use --file-format to filter based on the file format")
             self.stderr.write(" * Specify at least one <project/component> argument")
-            raise CommandError("Nothing to process!")
+            msg = "Nothing to process!"
+            raise CommandError(msg)
 
         return result
 
@@ -174,20 +176,22 @@ class WeblateTranslationCommand(BaseCommand):
             component = Component.objects.get(
                 project__slug=options["project"], slug=options["component"]
             )
-        except Component.DoesNotExist:
-            raise CommandError("No matching translation component found!")
+        except Component.DoesNotExist as error:
+            msg = "No matching translation component found!"
+            raise CommandError(msg) from error
         try:
             return Translation.objects.get(
                 component=component, language__code=options["language"]
             )
-        except Translation.DoesNotExist:
+        except Translation.DoesNotExist as error:
             if options.get("add"):
                 language = Language.objects.fuzzy_get(options["language"])
                 if component.add_new_language(language, None):
                     return Translation.objects.get(
                         component=component, language=language
                     )
-            raise CommandError("No matching translation project found!")
+            msg = "No matching translation project found!"
+            raise CommandError(msg) from error
 
     def handle(self, *args, **options) -> None:
         raise NotImplementedError

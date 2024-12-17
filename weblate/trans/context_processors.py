@@ -1,8 +1,10 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
 import random
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from django.conf import settings
@@ -14,6 +16,9 @@ import weblate.utils.version
 from weblate.configuration.views import CustomCSSView
 from weblate.utils.site import get_site_domain, get_site_url
 from weblate.wladmin.models import ConfigurationError, get_support_status
+
+if TYPE_CHECKING:
+    from weblate.auth.models import AuthenticatedHttpRequest
 
 WEBLATE_URL = "https://weblate.org/"
 DONATE_URL = "https://weblate.org/donate/"
@@ -44,19 +49,6 @@ CONTEXT_SETTINGS = [
 ]
 
 CONTEXT_APPS = ["billing", "legal", "gitexport"]
-
-
-def add_error_logging_context(context) -> None:
-    if (
-        hasattr(settings, "ROLLBAR")
-        and "client_token" in settings.ROLLBAR
-        and "environment" in settings.ROLLBAR
-    ):
-        context["rollbar_token"] = settings.ROLLBAR["client_token"]
-        context["rollbar_environment"] = settings.ROLLBAR["environment"]
-    else:
-        context["rollbar_token"] = None
-        context["rollbar_environment"] = None
 
 
 def add_settings_context(context) -> None:
@@ -112,12 +104,17 @@ def get_interledger_payment_pointer():
     return random.choice(interledger_payment_pointers)  # noqa: S311
 
 
-def weblate_context(request):
+def weblate_context(request: AuthenticatedHttpRequest):
     """Context processor to inject various useful variables into context."""
     if url_has_allowed_host_and_scheme(request.GET.get("next", ""), allowed_hosts=None):
         login_redirect_url = request.GET["next"]
-    else:
+    elif request.resolver_match is None or (
+        not request.resolver_match.view_name.startswith("social:")
+        and request.resolver_match.view_name != "logout"
+    ):
         login_redirect_url = request.get_full_path()
+    else:
+        login_redirect_url = ""
 
     # Load user translations if user is authenticated
     watched_projects = None
@@ -171,7 +168,6 @@ def weblate_context(request):
         "theme": theme,
     }
 
-    add_error_logging_context(context)
     add_settings_context(context)
     add_optional_context(context)
 

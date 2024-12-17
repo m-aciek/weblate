@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
@@ -16,6 +18,12 @@ from weblate.trans.mixins import CacheKeyMixin, ComponentCategoryMixin, PathMixi
 from weblate.trans.models.change import Change
 from weblate.utils.stats import CategoryStats
 from weblate.utils.validators import validate_slug
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from weblate.auth.models import User
+    from weblate.trans.models import Component
 
 
 class CategoryQuerySet(models.QuerySet):
@@ -127,7 +135,10 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
 
     def _get_childs_depth(self):
         return 1 + max(
-            (child._get_childs_depth() for child in self.category_set.all()),
+            (
+                child._get_childs_depth()  # noqa: SLF001
+                for child in self.category_set.all()
+            ),
             default=0,
         )
 
@@ -172,7 +183,7 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
             old = Category.objects.get(pk=self.id)
             self.check_rename(old, validate=True)
 
-    def get_child_components_access(self, user):
+    def get_child_components_access(self, user: User):
         """List child components."""
         return self.component_set.filter_access(user).prefetch().order()
 
@@ -188,7 +199,7 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
         )
 
     @cached_property
-    def all_components(self):
+    def all_components(self) -> Iterable[Component]:
         from weblate.trans.models import Component
 
         return Component.objects.filter(
@@ -196,6 +207,22 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
             | Q(category__category=self)
             | Q(category__category__category=self)
         )
+
+    @property
+    def all_repo_components(self) -> Iterable[Component]:
+        included = set()
+        # Yield all components with repo
+        for component in self.all_components:
+            if not component.linked_component_id:
+                included.add(component.pk)
+                yield component
+        # Include possibly linked components outside the category
+        for component in self.all_components:
+            if (
+                component.linked_component_id
+                and component.linked_component_id not in included
+            ):
+                yield component.linked_component
 
     @cached_property
     def all_component_ids(self):
@@ -231,3 +258,7 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
         return set(
             self.all_components.values_list("source_language_id", flat=True).distinct()
         )
+
+    def get_widgets_url(self) -> str:
+        """Return absolute URL for widgets."""
+        return self.project.get_widgets_url()

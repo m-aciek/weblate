@@ -2,7 +2,10 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 from contextlib import suppress
+from typing import TYPE_CHECKING, cast
 
 from django.conf import settings
 from django.contrib.auth import logout
@@ -17,12 +20,22 @@ from weblate.utils.cache import is_redis_cache
 from weblate.utils.hash import calculate_checksum
 from weblate.utils.request import get_ip_address
 
+if TYPE_CHECKING:
+    from django_redis.cache import RedisCache
 
-def get_cache_key(scope: str, request=None, address=None, user=None) -> str:
+    from weblate.auth.models import AuthenticatedHttpRequest, User
+
+
+def get_cache_key(
+    scope: str,
+    request: AuthenticatedHttpRequest | None = None,
+    address: str | None = None,
+    user: User | None = None,
+) -> str:
     """Generate cache key for request."""
-    if (request and request.user.is_authenticated) or user:
-        if user is None:
-            user = request.user
+    if request is not None and request.user.is_authenticated and user is None:
+        user = request.user
+    if user is not None:
         key = user.id
         origin = "user"
     else:
@@ -33,7 +46,9 @@ def get_cache_key(scope: str, request=None, address=None, user=None) -> str:
     return f"ratelimit-{origin}-{scope}-{key}"
 
 
-def reset_rate_limit(scope, request=None, address=None, user=None) -> None:
+def reset_rate_limit(
+    scope, request: AuthenticatedHttpRequest | None = None, address=None, user=None
+) -> None:
     """Reset rate limit."""
     cache.delete(get_cache_key(scope, request, address, user))
 
@@ -45,7 +60,7 @@ def get_rate_setting(scope: str, suffix: str):
     return getattr(settings, f"RATELIMIT_{suffix}")
 
 
-def revert_rate_limit(scope, request) -> None:
+def revert_rate_limit(scope, request: AuthenticatedHttpRequest) -> None:
     """
     Revert rate limit to previous state.
 
@@ -54,7 +69,7 @@ def revert_rate_limit(scope, request) -> None:
     key = get_cache_key(scope, request)
 
     with suppress(ValueError):
-        # Try to decrease cache key
+        # Try to increase bucket if it exists
         cache.incr(key)
 
 
@@ -65,7 +80,7 @@ def rate_limit(key: str, attempts: int, window: int) -> bool:
         if cache.get(key) is None:
             cache.set(key, attempts, window)
     else:
-        cache.set(key, attempts, window, nx=True)  # types: ignore[call-arg]
+        cast("RedisCache", cache).set(key, attempts, window, nx=True)
 
     try:
         # Count current event
@@ -79,7 +94,7 @@ def rate_limit(key: str, attempts: int, window: int) -> bool:
     return current < 0
 
 
-def check_rate_limit(scope: str, request) -> bool:
+def check_rate_limit(scope: str, request: AuthenticatedHttpRequest) -> bool:
     """Check authentication rate limit."""
     if request.user.is_superuser:
         return True
@@ -106,7 +121,7 @@ def session_ratelimit_post(scope: str, logout_user: bool = True):
     def session_ratelimit_post_inner(function):
         """Session based rate limiting for POST requests."""
 
-        def rate_wrap(request, *args, **kwargs):
+        def rate_wrap(request: AuthenticatedHttpRequest, *args, **kwargs):
             if request.method == "POST" and not check_rate_limit(scope, request):
                 # Rotate session token
                 rotate_token(request)

@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING, overload
 
+import sentry_sdk
 from django.conf import settings
 from django.core.cache import cache
 from django.db import models, transaction
 from django.db.models import Count, Q
-from django.db.models.base import post_save
+from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.html import escape, format_html
@@ -21,43 +23,75 @@ from weblate.lang.models import Language
 from weblate.trans.mixins import UserDisplayMixin
 from weblate.trans.models.alert import ALERTS
 from weblate.trans.models.project import Project
+from weblate.trans.signals import change_bulk_create
 from weblate.utils.decorators import disable_for_loaddata
 from weblate.utils.pii import mask_email
 from weblate.utils.state import StringState
 
 if TYPE_CHECKING:
-    from datetime import datetime
+    from collections.abc import Iterable
 
+    from weblate.auth.models import User
     from weblate.trans.models import Translation
 
 
 CHANGE_PROJECT_LOOKUP_KEY = "change:project-lookup"
 
+PREFETCH_FIELDS = (
+    "user",
+    "author",
+    "translation",
+    "component",
+    "project",
+    "component__source_language",
+    "unit",
+    "unit__source_unit",
+    "translation__language",
+    "translation__plural",
+)
+
+
+def dt_as_day_range(dt: datetime | date) -> tuple[datetime, datetime]:
+    """
+    Convert given datetime/date to a range for that day.
+
+    The resulting tuple contains the start of the day (00:00:00) and end of the
+    day (23:59:59.999999).
+    """
+    if isinstance(dt, date):
+        dt = timezone.make_aware(datetime.combine(dt, datetime.min.time()))
+    return (
+        dt.replace(hour=0, minute=0, second=0, microsecond=0),
+        dt.replace(hour=23, minute=59, second=59, microsecond=999999),
+    )
+
 
 class ChangeQuerySet(models.QuerySet["Change"]):
-    def content(self, prefetch=False):
+    def content(self, prefetch=False) -> ChangeQuerySet:
         """Return queryset with content changes."""
         base = self
         if prefetch:
             base = base.prefetch()
         return base.filter(action__in=Change.ACTIONS_CONTENT)
 
-    def for_category(self, category):
+    def for_category(self, category) -> ChangeQuerySet:
         return self.filter(
             Q(component_id__in=category.all_component_ids) | Q(category=category)
         )
 
-    def filter_announcements(self):
+    def filter_announcements(self) -> ChangeQuerySet:
         return self.filter(action=Change.ACTION_ANNOUNCEMENT)
 
-    def count_stats(self, days: int, step: int, dtstart: datetime):
+    def count_stats(
+        self, days: int, step: int, dtstart: datetime
+    ) -> list[tuple[datetime, int]]:
         """Count the number of changes in a given period grouped by step days."""
         # Count number of changes
         result = []
         for _unused in range(0, days, step):
             # Calculate interval
             int_start = dtstart
-            int_end = int_start + timezone.timedelta(days=step)
+            int_end = int_start + timedelta(days=step)
 
             # Count changes
             int_base = self.filter(timestamp__range=(int_start, int_end))
@@ -80,10 +114,10 @@ class ChangeQuerySet(models.QuerySet["Change"]):
         translation=None,
         language=None,
         user=None,
-    ):
+    ) -> list[tuple[datetime, int]]:
         """Core of daily/weekly/monthly stats calculation."""
         # Get range (actually start)
-        dtstart = timezone.now() - timezone.timedelta(days=days + 1)
+        dtstart = timezone.now() - timedelta(days=days + 1)
 
         # Base for filtering
         base = self.all()
@@ -106,26 +140,33 @@ class ChangeQuerySet(models.QuerySet["Change"]):
 
         return base.count_stats(days, step, dtstart)
 
-    def prefetch(self):
+    def prefetch_for_get(self) -> ChangeQuerySet:
+        return self.select_related(
+            "alert",
+            "screenshot",
+            "announcement",
+            "suggestion",
+            "comment",
+            *PREFETCH_FIELDS,
+        )
+
+    def prefetch(self) -> ChangeQuerySet:
         """
         Fetch related fields at once to avoid loading them individually.
 
         Call prefetch or prefetch_list later on paginated results to complete.
         """
-        return self.prefetch_related(
-            "user",
-            "author",
-            "translation",
-            "component",
-            "project",
-            "component__source_language",
-            "unit",
-            "unit__source_unit",
-            "translation__language",
-            "translation__plural",
-        )
+        return self.prefetch_related(*PREFETCH_FIELDS)
 
-    def preload_list(self, results, skip: str | None = None):
+    @overload
+    def preload_list(
+        self, results: ChangeQuerySet, skip: str | None = None
+    ) -> ChangeQuerySet: ...
+    @overload
+    def preload_list(
+        self, results: list[Change], skip: str | None = None
+    ) -> list[Change]: ...
+    def preload_list(self, results, skip=None):
         """Companion for prefetch to fill in nested references."""
         for item in results:
             if item.component and skip != "component":
@@ -141,7 +182,7 @@ class ChangeQuerySet(models.QuerySet["Change"]):
         date_range: tuple[datetime, datetime] | None = None,
         *,
         values_list: tuple[str, ...] = (),
-    ):
+    ) -> Iterable[tuple]:
         """Return list of authors."""
         authors = self.content()
         if date_range is not None:
@@ -151,39 +192,50 @@ class ChangeQuerySet(models.QuerySet["Change"]):
             .values("author")
             .annotate(change_count=Count("id"))
             .values_list(
-                "author__email", "author__full_name", "change_count", *values_list
+                "author__email",
+                "author__username",
+                "author__full_name",
+                "change_count",
+                *values_list,
             )
         )
 
-    def order(self):
+    def order(self) -> ChangeQuerySet:
         return self.order_by("-timestamp")
 
-    def recent(self, *, count: int = 10, skip_preload: str | None = None):
+    def recent(
+        self, *, count: int = 10, skip_preload: str | None = None
+    ) -> list[Change]:
         """
         Return recent changes to show on object pages.
 
         This uses iterator() as server-side cursors are typically
         more effective here.
         """
-        result = []
-        with transaction.atomic():
+        result: list[Change] = []
+        with transaction.atomic(), sentry_sdk.start_span(op="change.recent"):
             for change in self.order().iterator(chunk_size=count):
                 result.append(change)
                 if len(result) >= count:
                     break
             return self.preload_list(result, skip_preload)
 
-    def bulk_create(self, *args, **kwargs):
+    def bulk_create(self, *args, **kwargs) -> list[Change]:
         """
         Bulk creation of changes.
 
         Add processing to bulk creation.
         """
+        from weblate.accounts.notifications import dispatch_changes_notifications
+
         changes = super().bulk_create(*args, **kwargs)
-        # Executes post save to ensure messages are sent as notifications
-        # or to fedora messaging
-        for change in changes:
-            post_save.send(change.__class__, instance=change, created=True)
+
+        # Dispatch notifications
+        dispatch_changes_notifications(changes)
+
+        # Executes post save to ensure messages are sent to fedora messaging
+        change_bulk_create.send(Change, instances=changes)
+
         # Store last content change in cache for improved performance
         translations = set()
         for change in reversed(changes):
@@ -197,7 +249,7 @@ class ChangeQuerySet(models.QuerySet["Change"]):
                 translations.add(change.translation_id)
         return changes
 
-    def filter_components(self, user):
+    def filter_components(self, user: User) -> ChangeQuerySet:
         if not user.needs_component_restrictions_filter:
             return self
         return self.filter(
@@ -206,12 +258,12 @@ class ChangeQuerySet(models.QuerySet["Change"]):
             | Q(component_id__in=user.component_permissions)
         )
 
-    def filter_projects(self, user):
+    def filter_projects(self, user: User) -> ChangeQuerySet:
         if not user.needs_project_filter:
             return self
         return self.filter(project__in=user.allowed_projects)
 
-    def lookup_project_rename(self, name: str) -> Project:
+    def lookup_project_rename(self, name: str) -> Project | None:
         lookup = cache.get(CHANGE_PROJECT_LOOKUP_KEY)
         if lookup is None:
             lookup = self.generate_project_rename_lookup()
@@ -223,12 +275,28 @@ class ChangeQuerySet(models.QuerySet["Change"]):
             return None
 
     def generate_project_rename_lookup(self) -> dict[str, int]:
-        lookup = {}
+        lookup: dict[str, int] = {}
         for change in self.filter(action=Change.ACTION_RENAME_PROJECT).order():
-            if change.old not in lookup:
+            if change.old not in lookup and change.project_id is not None:
                 lookup[change.old] = change.project_id
         cache.set(CHANGE_PROJECT_LOOKUP_KEY, lookup, 3600 * 24 * 7)
         return lookup
+
+    def filter_by_day(self, dt: datetime | date) -> ChangeQuerySet:
+        """
+        Filter changes by given date.
+
+        Optimized to use Database index by not converting timestamp to date object
+        """
+        return self.filter(timestamp__range=dt_as_day_range(dt))
+
+    def since_day(self, dt: datetime | date) -> ChangeQuerySet:
+        """
+        Filter changes since given date.
+
+        Optimized to use Database index by not converting timestamp to date object
+        """
+        return self.filter(timestamp__gte=dt_as_day_range(dt)[0])
 
 
 class ChangeManager(models.Manager["Change"]):
@@ -358,6 +426,7 @@ class Change(models.Model, UserDisplayMixin):
     ACTION_STRING_UPLOAD_UPDATE = 72
     ACTION_NEW_UNIT_UPLOAD = 73
     ACTION_SOURCE_UPLOAD = 74
+    ACTION_COMPLETED_COMPONENT = 75
 
     ACTION_CHOICES = (
         # Translators: Name of event in the history
@@ -501,6 +570,8 @@ class Change(models.Model, UserDisplayMixin):
         (ACTION_NEW_UNIT_UPLOAD, gettext_lazy("String added in the upload")),
         # Translators: Name of event in the history
         (ACTION_SOURCE_UPLOAD, gettext_lazy("Translation updated by source upload")),
+        # Translators: Name of event in the history
+        (ACTION_COMPLETED_COMPONENT, gettext_lazy("Component translation completed")),
     )
     ACTIONS_DICT = dict(ACTION_CHOICES)
     ACTION_STRINGS = {
@@ -664,12 +735,19 @@ class Change(models.Model, UserDisplayMixin):
         verbose_name_plural = "history events"
 
     def __str__(self) -> str:
+        if self.user:
+            # Translators: condensed rendering of a change action in history
+            return gettext("%(action)s at %(time)s on %(translation)s by %(user)s") % {
+                "action": self.get_action_display(),
+                "time": self.timestamp,
+                "translation": self.translation or self.component or self.project,
+                "user": self.get_user_display(False),
+            }
         # Translators: condensed rendering of a change action in history
-        return gettext("%(action)s at %(time)s on %(translation)s by %(user)s") % {
+        return gettext("%(action)s at %(time)s on %(translation)s") % {
             "action": self.get_action_display(),
             "time": self.timestamp,
-            "translation": self.translation,
-            "user": self.get_user_display(False),
+            "translation": self.translation or self.component or self.project,
         }
 
     def save(self, *args, **kwargs) -> None:
@@ -692,7 +770,7 @@ class Change(models.Model, UserDisplayMixin):
         if self.action == Change.ACTION_RENAME_PROJECT:
             Change.objects.generate_project_rename_lookup()
 
-    def get_absolute_url(self):
+    def get_absolute_url(self) -> str:
         """Return link either to unit or translation."""
         if self.unit is not None:
             return self.unit.get_absolute_url()
@@ -702,9 +780,11 @@ class Change(models.Model, UserDisplayMixin):
             return self.translation.get_absolute_url()
         if self.component is not None:
             return self.component.get_absolute_url()
+        if self.category is not None:
+            return self.category.get_absolute_url()
         if self.project is not None:
             return self.project.get_absolute_url()
-        return None
+        return "/"
 
     @property
     def path_object(self):
@@ -713,6 +793,8 @@ class Change(models.Model, UserDisplayMixin):
             return self.translation
         if self.component is not None:
             return self.component
+        if self.category is not None:
+            return self.category
         if self.project is not None:
             return self.project
         return None
@@ -755,6 +837,11 @@ class Change(models.Model, UserDisplayMixin):
             self.language = self.translation.language
         if self.component:
             self.project = self.component.project
+            self.category = self.component.category
+        if (self.user is None or not self.user.is_authenticated) and (
+            ip_address := self.get_ip_address()
+        ):
+            self.details["ip_address"] = ip_address
 
     @property
     def plural_count(self):
@@ -803,11 +890,15 @@ class Change(models.Model, UserDisplayMixin):
         from weblate.utils.markdown import render_markdown
 
         details = self.details
+        action = self.action
 
-        if self.action in {self.ACTION_ANNOUNCEMENT, self.ACTION_AGREEMENT_CHANGE}:
+        if action in {self.ACTION_ANNOUNCEMENT, self.ACTION_AGREEMENT_CHANGE}:
             return render_markdown(self.target)
 
-        if self.action in {
+        if action == self.ACTION_COMMENT_DELETE and "comment" in details:
+            return render_markdown(details["comment"])
+
+        if action in {
             self.ACTION_ADDON_CREATE,
             self.ACTION_ADDON_CHANGE,
             self.ACTION_ADDON_REMOVE,
@@ -817,10 +908,10 @@ class Change(models.Model, UserDisplayMixin):
             except KeyError:
                 return self.target
 
-        if self.action in self.AUTO_ACTIONS and self.auto_status:
-            return str(self.AUTO_ACTIONS[self.action])
+        if action in self.AUTO_ACTIONS and self.auto_status:
+            return str(self.AUTO_ACTIONS[action])
 
-        if self.action == self.ACTION_UPDATE:
+        if action == self.ACTION_UPDATE:
             reason = details.get("reason", "content changed")
             filename = format_html(
                 "<code>{}</code>",
@@ -836,10 +927,11 @@ class Change(models.Model, UserDisplayMixin):
             elif reason == "new file":
                 message = gettext("File “{}” was added.")
             else:
-                raise ValueError(f"Unknown reason: {reason}")
+                msg = f"Unknown reason: {reason}"
+                raise ValueError(msg)
             return format_html(escape(message), filename)
 
-        if self.action == self.ACTION_LICENSE_CHANGE:
+        if action == self.ACTION_LICENSE_CHANGE:
             not_available = pgettext("License information not available", "N/A")
             return gettext(
                 'The license of the "%(component)s" component was changed '
@@ -858,12 +950,12 @@ class Change(models.Model, UserDisplayMixin):
             self.ACTION_INVITE_USER,
             self.ACTION_REMOVE_USER,
         }
-        if self.action == self.ACTION_ACCESS_EDIT:
+        if action == self.ACTION_ACCESS_EDIT:
             for number, name in Project.ACCESS_CHOICES:
                 if number == details["access_control"]:
                     return name
             return "Unknown {}".format(details["access_control"])
-        if self.action in user_actions:
+        if action in user_actions:
             if "username" in details:
                 result = details["username"]
             else:
@@ -871,7 +963,7 @@ class Change(models.Model, UserDisplayMixin):
             if "group" in details:
                 result = f"{result} ({details['group']})"
             return result
-        if self.action in {
+        if action in {
             self.ACTION_ADDED_LANGUAGE,
             self.ACTION_REQUESTED_LANGUAGE,
         }:
@@ -879,18 +971,18 @@ class Change(models.Model, UserDisplayMixin):
                 return Language.objects.get(code=details["language"])
             except Language.DoesNotExist:
                 return details["language"]
-        if self.action == self.ACTION_ALERT:
+        if action == self.ACTION_ALERT:
             try:
                 return ALERTS[details["alert"]].verbose
             except KeyError:
                 return details["alert"]
-        if self.action == self.ACTION_PARSE_ERROR:
+        if action == self.ACTION_PARSE_ERROR:
             return "{filename}: {error_message}".format(**details)
-        if self.action == self.ACTION_HOOK:
+        if action == self.ACTION_HOOK:
             return "{service_long_name}: {repo_url}, {branch}".format(**details)
-        if self.action == self.ACTION_COMMENT and "comment" in details:
+        if action == self.ACTION_COMMENT and "comment" in details:
             return render_markdown(details["comment"])
-        if self.action in {self.ACTION_RESET, self.ACTION_MERGE, self.ACTION_REBASE}:
+        if action in {self.ACTION_RESET, self.ACTION_MERGE, self.ACTION_REBASE}:
             return format_html(
                 "{}<br/><br/>{}<br/>{}",
                 self.get_action_display(),
@@ -912,11 +1004,15 @@ class Change(models.Model, UserDisplayMixin):
     def get_source(self):
         return self.details.get("source", self.unit.source)
 
-    def get_ip_address(self):
-        if self.suggestion and "address" in self.suggestion.userdetails:
-            return self.suggestion.userdetails["address"]
-        if self.comment and "address" in self.comment.userdetails:
-            return self.comment.userdetails["address"]
+    def get_ip_address(self) -> str | None:
+        if ip_address := self.details.get("ip_address"):
+            return ip_address
+        if self.suggestion and (
+            ip_address := self.suggestion.userdetails.get("address")
+        ):
+            return ip_address
+        if self.comment and (ip_address := self.comment.userdetails.get("address")):
+            return ip_address
         return None
 
     def show_unit_state(self):
@@ -930,8 +1026,6 @@ class Change(models.Model, UserDisplayMixin):
 @receiver(post_save, sender=Change)
 @disable_for_loaddata
 def change_notify(sender, instance, created=False, **kwargs) -> None:
-    from weblate.accounts.notifications import is_notificable_action
-    from weblate.accounts.tasks import notify_change
+    from weblate.accounts.notifications import dispatch_changes_notifications
 
-    if is_notificable_action(instance.action):
-        notify_change.delay_on_commit(instance.pk)
+    dispatch_changes_notifications([instance])

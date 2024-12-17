@@ -9,7 +9,7 @@ Custom automatic fixups
 You can also implement your own automatic fixup in addition to the standard ones and
 include them in :setting:`AUTOFIX_LIST`.
 
-The automatic fixes are powerful, but can also cause damage;  be careful when
+The automatic fixes are powerful, but can also cause damage; be careful when
 writing one.
 
 For example, the following automatic fixup would replace every occurrence of the string
@@ -297,6 +297,8 @@ Here is a list of flags currently accepted:
     Skip the :ref:`check-multiple-failures` quality check.
 ``ignore-unnamed-format``
     Skip the :ref:`check-unnamed-format` quality check.
+``ignore-prohibited-initial-character``
+    Skip the :ref:`check-prohibited-initial-character` quality check.
 ``ignore-optional-plural``
     Skip the :ref:`check-optional-plural` quality check.
 

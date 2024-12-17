@@ -17,23 +17,54 @@ permissions:
 
 jobs:
   mypy:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+    - name: Get changed files
+      if: github.event_name == 'pull_request'
+      id: changed-files
+      uses: tj-actions/changed-files@v45
+      with:
+        files: '**.py'
+    - name: List all changed files
+      if: github.event_name == 'pull_request'
+      env:
+        ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+      run: |
+        touch changed-files.txt
+        for file in ${ALL_CHANGED_FILES}; do
+          echo "$file" >> changed-files.txt
+        done
+        cat changed-files.txt
+
     - name: Install apt dependencies
       run: sudo ./ci/apt-install
+    - uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+        cache-dependency-glob: ''
+        cache-suffix: '3.13'
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
-    - name: Install dependencies
-      run: ./ci/pip-install mypy
+        python-version: '3.13'
 
     - name: Run mypy
-      uses: liskin/gh-problem-matcher-wrap@v3
-      with:
-        linters: mypy
-        run: mypy --show-column-numbers weblate
+      run: uv run --no-sources --all-extras --group types mypy --show-column-numbers weblate > mypy.log
       # Temporary hack until we have this fully working
       continue-on-error: true
+    - name: Report mypy
+      if: always()
+      run: |
+        echo "::add-matcher::.github/matchers/mypy.json"
+        if [ -f changed-files.txt ] ; then
+          if grep --silent --fixed-strings --file=changed-files.txt mypy.log ; then
+            grep --fixed-strings --file=changed-files.txt mypy.log
+          fi
+        else
+          cat mypy.log
+        fi
+        echo "::remove-matcher owner=mypy::"

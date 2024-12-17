@@ -7,13 +7,14 @@ from __future__ import annotations
 import os.path
 from contextlib import suppress
 from datetime import timedelta
+from functools import partial
 
 from appconf import AppConf
 from django.conf import settings
 from django.contrib import admin
 from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Prefetch, Q
 from django.db.models.signals import m2m_changed, post_delete, post_save, pre_delete
 from django.dispatch import receiver
@@ -114,7 +115,7 @@ class BillingQuerySet(models.QuerySet["Billing"]):
             )
         )
 
-    def for_user(self, user):
+    def for_user(self, user: User):
         if user.has_perm("billing.manage"):
             return self.all().order_by("state")
         return (
@@ -234,7 +235,7 @@ class Billing(models.Model):
             update_fields=update_fields,
         )
 
-    def get_absolute_url(self):
+    def get_absolute_url(self) -> str:
         return reverse("billing-detail", kwargs={"pk": self.pk})
 
     @cached_property
@@ -352,10 +353,13 @@ class Billing(models.Model):
     def unit_count(self):
         return sum(p.stats.all for p in self.all_projects)
 
+    def get_last_invoice_object(self):
+        return self.invoice_set.order_by("-start")[0]
+
     @admin.display(description=gettext_lazy("Last invoice"))
     def last_invoice(self):
         try:
-            invoice = self.invoice_set.order_by("-start")[0]
+            invoice = self.get_last_invoice_object()
         except IndexError:
             return gettext("N/A")
         return f"{invoice.start} - {invoice.end}"
@@ -374,7 +378,7 @@ class Billing(models.Model):
             )
             and (
                 plan.display_limit_hosted_strings == 0
-                or self.count_strings <= plan.display_limit_hosted_strings
+                or self.count_hosted_strings <= plan.display_limit_hosted_strings
             )
             and (
                 plan.display_limit_strings == 0
@@ -463,9 +467,11 @@ class Billing(models.Model):
             yield LibreCheck(
                 bool(project.web),
                 format_html(
-                    '<a href="{0}">{1}</a>, <a href="{2}">{2}</a>',
+                    '<a href="{0}">{1}</a>, <a href="{2}">{3}</a>',
                     project.get_absolute_url(),
                     project,
+                    project.web
+                    or reverse("settings", kwargs={"path": project.get_url_path()}),
                     project.web or gettext("Project website missing!"),
                 ),
             )
@@ -478,19 +484,37 @@ class Billing(models.Model):
             % len(components),
         )
         for component in components:
+            license_name = component.get_license_display()
+            if not component.libre_license:
+                if not license_name:
+                    license_name = format_html(
+                        "<strong>{0}</strong>", gettext("Missing license")
+                    )
+                else:
+                    license_name = format_html(
+                        "{0} (<strong>{1}</strong>)",
+                        license_name,
+                        gettext("Not a libre license"),
+                    )
+            if component.license_url:
+                license_name = format_html(
+                    '<a href="{0}">{1}</a>', component.license_url, license_name
+                )
+            repo_url = component.repo
+            if repo_url.startswith("https://"):
+                repo_url = format_html('<a href="{0}">{0}</a>', repo_url)
             yield LibreCheck(
                 component.libre_license,
                 format_html(
                     """
                     <a href="{0}">{1}</a>,
-                    <a href="{2}">{3}</a>,
-                    <a href="{4}">{4}</a>,
-                    {5}""",
+                    {2},
+                    {3},
+                    {4}""",
                     component.get_absolute_url(),
                     component.name,
-                    component.license_url or "#",
-                    component.get_license_display() or gettext("Missing license"),
-                    component.repo,
+                    license_name,
+                    repo_url,
                     component.get_file_format_display(),
                 ),
                 component=component,
@@ -563,7 +587,8 @@ class Invoice(models.Model):
             return
 
         if self.end <= self.start:
-            raise ValidationError("Start has be to before end!")
+            msg = "Start has be to before end!"
+            raise ValidationError(msg)
 
         if not self.billing_id:
             return
@@ -577,11 +602,10 @@ class Invoice(models.Model):
             overlapping = overlapping.exclude(pk=self.pk)
 
         if overlapping.exists():
-            raise ValidationError(
-                "Overlapping invoices exist: {}".format(
-                    ", ".join(str(x) for x in overlapping)
-                )
+            msg = "Overlapping invoices exist: {}".format(
+                ", ".join(str(x) for x in overlapping)
             )
+            raise ValidationError(msg)
 
 
 @receiver(post_save, sender=Component)
@@ -599,27 +623,41 @@ def update_project_bill(sender, instance, **kwargs) -> None:
 @receiver(pre_delete, sender=Component)
 @receiver(post_delete, sender=Translation)
 @disable_for_loaddata
-def record_project_bill(sender, instance, **kwargs) -> None:
+def record_project_bill(
+    sender, instance: Project | Component | Translation, **kwargs
+) -> None:
     if isinstance(instance, Translation):
-        instance = instance.component
+        try:
+            instance = instance.component
+        except Component.DoesNotExist:
+            # Happens during component removal
+            return
     if isinstance(instance, Component):
         instance = instance.project
-    # Track billings to update for delete_project_bill
-    instance.billings_to_update = list(instance.billing_set.all())
+    # Collect billings to update for delete_project_bill
+    instance.billings_to_update = list(
+        instance.billing_set.values_list("pk", flat=True)
+    )
 
 
 @receiver(post_delete, sender=Project)
 @receiver(post_delete, sender=Component)
 @receiver(post_delete, sender=Translation)
 @disable_for_loaddata
-def delete_project_bill(sender, instance, **kwargs) -> None:
+def delete_project_bill(
+    sender, instance: Project | Component | Translation, **kwargs
+) -> None:
+    from weblate.billing.tasks import billing_check
+
     if isinstance(instance, Translation):
         instance = instance.component
     if isinstance(instance, Component):
         instance = instance.project
-    # This is set in record_project_bill
-    for billing in instance.billings_to_update:
-        billing.check_limits()
+    # This is collected in record_project_bill
+    for billing_id in instance.billings_to_update:
+        transaction.on_commit(partial(billing_check, billing_id))
+    # Clear the list to avoid repeated trigger
+    instance.billings_to_update.clear()
 
 
 @receiver(post_save, sender=Invoice)

@@ -1,7 +1,9 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
 from django.db.models import Count, Q
 from django.http import Http404
@@ -18,6 +20,9 @@ from weblate.utils.random import get_random_identifier
 from weblate.utils.state import STATE_TRANSLATED
 from weblate.utils.stats import ProjectLanguage
 from weblate.utils.views import PathViewMixin
+
+if TYPE_CHECKING:
+    from weblate.auth.models import AuthenticatedHttpRequest
 
 
 class CheckWrapper:
@@ -131,7 +136,8 @@ class CheckList(PathViewMixin, ListView):
                     unit__translation__component__project=self.path_object.project,
                 )
             else:
-                raise TypeError(f"Unsupported {self.path_object}")
+                msg = f"Unsupported {self.path_object}"
+                raise TypeError(msg)
             result = [
                 CheckWrapper(**item, path_object=self.path_object)
                 for item in all_checks.values("name").annotate(
@@ -201,7 +207,8 @@ class CheckList(PathViewMixin, ListView):
             ).order_by("language__code")
         else:
             # Translation should never reach this, it is handled in get()
-            raise TypeError(f"Unsupported {self.path_object}")
+            msg = f"Unsupported {self.path_object}"
+            raise TypeError(msg)
 
         return self.postprocess_queryset(result)
 
@@ -232,20 +239,22 @@ class CheckList(PathViewMixin, ListView):
             context["column_title"] = gettext("Component")
             context["translate_links"] = True
         else:
-            raise TypeError(f"Type not supported: {self.path_object}")
+            msg = f"Type not supported: {self.path_object}"
+            raise TypeError(msg)
         return context
 
-    def setup(self, request, **kwargs) -> None:
+    def setup(self, request: AuthenticatedHttpRequest, **kwargs) -> None:
         super().setup(request, **kwargs)
         self.check_obj = None
         name = kwargs.get("name")
         if name and name != "-":
             try:
                 self.check_obj = CHECKS[name]
-            except KeyError:
-                raise Http404("No check matches the given query.")
+            except KeyError as error:
+                msg = "No check matches the given query."
+                raise Http404(msg) from error
 
-    def get(self, request, *args, **kwargs):
+    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):
         if isinstance(self.path_object, Translation) and self.check_obj:
             return redirect(
                 f"{self.path_object.get_translate_url()}?q={self.check_obj.url_id} OR dismissed_{self.check_obj.url_id}"
@@ -253,7 +262,7 @@ class CheckList(PathViewMixin, ListView):
         return super().get(request, *args, **kwargs)
 
 
-def render_check(request, unit_id, check_id):
+def render_check(request: AuthenticatedHttpRequest, unit_id, check_id):
     """Render endpoint for checks."""
     try:
         obj = Check.objects.get(unit_id=unit_id, name=check_id)
@@ -261,5 +270,9 @@ def render_check(request, unit_id, check_id):
         unit = get_object_or_404(Unit, pk=int(unit_id))
         obj = Check(unit=unit, dismissed=False, name=check_id)
     request.user.check_access_component(obj.unit.translation.component)
+
+    if obj.check_obj is None:
+        msg = "No check object found."
+        raise Http404(msg)
 
     return obj.check_obj.render(request, obj.unit)

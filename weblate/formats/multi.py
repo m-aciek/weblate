@@ -32,7 +32,7 @@ class MultiUnit(TranslationUnit):
         unit: TranslationUnit,
         template: TranslationUnit | None = None,
     ) -> None:
-        super().__init__(parent, None, None)
+        super().__init__(parent, None, template)
         self.units = [unit]
 
     def merge(self, unit) -> None:
@@ -138,7 +138,7 @@ class MultiFormatMixin(TranslationFormat):
                 result[id_hash].merge(unit)
             else:
                 if not isinstance(unit, MultiUnit):
-                    unit = MultiUnit(unit.parent, unit)
+                    unit = MultiUnit(unit.parent, unit, template=unit.template)
                 result[id_hash] = unit
         return list(result.values())
 
@@ -164,6 +164,13 @@ class MultiFormatMixin(TranslationFormat):
 
     def _get_all_monolingual_units(self):
         return self.merge_multi(super()._get_all_monolingual_units())
+
+    def add_unit(self, unit: TranslationUnit) -> None:
+        if isinstance(unit, MultiUnit):
+            for child in unit.units:
+                super().add_unit(child)
+        else:
+            super().add_unit(unit)
 
 
 class MultiCSVUtf8Format(MultiFormatMixin, CSVUtf8Format):

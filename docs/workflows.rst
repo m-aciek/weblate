@@ -27,7 +27,7 @@ Per-project customization can be done on each language page of the project.
 
 All workflow settings can be overridden, the only limitation is that
 :ref:`project-translation_review` needs to be turned on and can only be
-disabled in customization.
+disabled in the per-language customization.
 
 The first existing setting applies:
 
@@ -76,6 +76,10 @@ Approved
     it.
 
     This state is only available when reviews are enabled.
+Read-only
+    String is read-only as a result of having ``read-only`` :ref:`flag
+    <custom-checks>`, being a non-editable source string, or marked such in the
+    translation file.
 Suggestions
     Suggestions are stored in Weblate only and not in the translation file.
 
@@ -103,7 +107,7 @@ This is also the default setup in Weblate.
   sure about the change.
 
 +----------------------------------+-------------+------------------------------------+
-| Setting                          |   Value     |   Note                             |
+| Setting                          | Value       | Note                               |
 +==================================+=============+====================================+
 | Enable reviews                   | off         | Configured at project level.       |
 +----------------------------------+-------------+------------------------------------+
@@ -128,22 +132,22 @@ Peer review
 -----------
 
 With this workflow, anybody can add a suggestion, which needs approval
-from additional member(s) before it is accepted as a translation.
+from additional members before it is accepted as a translation.
 
 * *Any user* can add suggestions.
 * *Any user* can vote for suggestions.
 * Suggestions become translations when given a predetermined number of votes.
 
 +---------------------------------+-------------+------------------------------------+
-| Setting                         |   Value     |   Note                             |
+| Setting                         | Value       | Note                               |
 +=================================+=============+====================================+
 | Enable reviews                  | off         | Configured at project level.       |
 +---------------------------------+-------------+------------------------------------+
 | Enable suggestions              | on          |                                    |
 +---------------------------------+-------------+------------------------------------+
-| Suggestion voting               | off         |                                    |
+| Suggestion voting               | on          |                                    |
 +---------------------------------+-------------+------------------------------------+
-| Automatically accept suggestions| 1           | You can set higher value to        |
+| Automatically accept suggestions| 2           | You can set higher value to        |
 |                                 |             | require more peer reviews.         |
 +---------------------------------+-------------+------------------------------------+
 | Translators group               | `Users`     | Or `Translate` with                |
@@ -168,11 +172,11 @@ consistent and that the quality is good.
 * Suggestions can also be used to suggest changes for approved strings.
 
 +---------------------------------+-------------+------------------------------------+
-| Setting                         |   Value     |   Note                             |
+| Setting                         | Value       | Note                               |
 +=================================+=============+====================================+
 | Enable reviews                  | on          | Configured at project level.       |
 +---------------------------------+-------------+------------------------------------+
-| Enable suggestions              | off         | Useful for users to be able        |
+| Enable suggestions              | on          | Useful for users to be able        |
 |                                 |             | to suggest when they are not sure. |
 +---------------------------------+-------------+------------------------------------+
 | Suggestion voting               | off         |                                    |
@@ -266,8 +270,8 @@ source strings. Once enabled, users can report issues with source strings.
 The actual process depends on whether bilingual or monolingual formats are in use.
 
 For monolingual formats, source string review functions similarly to
-:ref:`reviews` — once an issue with a source string is reported, it is marked as
-:guilabel:`Needs editing`.
+:ref:`reviews` — once an issue with a source string is reported, the source
+string is marked as :guilabel:`Needs editing`.
 
 Bilingual formats do not allow direct editing of source strings (these
 are typically extracted directly from the source code). In this case, a

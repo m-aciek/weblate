@@ -28,7 +28,8 @@ def icon(name):
     Inlining is necessary to be able to apply CSS styles on the path.
     """
     if not name:
-        raise ValueError("Empty icon name")
+        msg = "Empty icon name"
+        raise ValueError(msg)
 
     if name not in CACHE:
         if name.startswith("state/"):
@@ -39,7 +40,7 @@ def icon(name):
             with open(icon_file) as handle:
                 CACHE[name] = mark_safe(handle.read())  # noqa: S308
         except OSError:
-            report_error(cause="Could not load icon")
+            report_error("Could not load icon")
             return ""
 
     return CACHE[name]

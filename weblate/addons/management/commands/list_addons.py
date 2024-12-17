@@ -2,23 +2,48 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from textwrap import wrap
+from __future__ import annotations
 
+from textwrap import wrap
+from typing import TYPE_CHECKING
+
+from weblate.addons.events import POST_CONFIGURE_EVENTS, AddonEvent
 from weblate.addons.models import ADDONS, Addon
 from weblate.trans.models import Component, Project
 from weblate.utils.management.base import BaseCommand
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+SKIP_FIELDS: tuple[tuple[str, str]] = (
+    ("weblate.flags.bulk", "path"),  # Used internally only
+)
+
+
+def event_link(event: AddonEvent) -> str:
+    return f"addon-event-{event.label.lower().replace(' ', '-')}"
+
+
+def sorted_events(events: Iterable[AddonEvent]) -> Iterable[AddonEvent]:
+    return sorted(events, key=lambda event: event.label)
 
 
 class Command(BaseCommand):
     help = "List installed add-ons"
 
     @staticmethod
-    def get_help_text(field, name):
+    def get_help_text(field, name: str):
         result = []
         if field.help_text:
             result.append(str(field.help_text))
         choices = getattr(field, "choices", None)
-        if choices and name not in {"component", "engines", "file_format"}:
+        if choices and name not in {
+            "component",
+            "engines",
+            "file_format",
+            "source",
+            "target",
+        }:
             if result:
                 result.append("")
             result.append("Available choices:")
@@ -30,8 +55,17 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options) -> None:
         """List installed add-ons."""
+        self.stdout.write(".. _addon-event-install:\n\n")
+        self.stdout.write("Add-on installation\n")
+        self.stdout.write("-------------------\n\n")
+        for event in sorted_events(AddonEvent):
+            self.stdout.write(f".. _{event_link(event)}:\n\n")
+            self.stdout.write(f"{event.label}\n")
+            self.stdout.write("-" * len(event.label))
+            self.stdout.write("\n\n")
+        self.stdout.write("\n")
         fake_addon = Addon(component=Component(project=Project(pk=-1), pk=-1))
-        for _unused, obj in sorted(ADDONS.items()):
+        for addon_name, obj in sorted(ADDONS.items()):
             self.stdout.write(f".. _addon-{obj.name}:")
             self.stdout.write("\n")
             self.stdout.write(obj.verbose)
@@ -41,8 +75,13 @@ class Command(BaseCommand):
             if obj.settings_form:
                 form = obj(fake_addon).get_settings_form(None)
                 table = [
-                    (f"``{name}``", str(field.label), self.get_help_text(field, name))
+                    (
+                        f"``{name}``",
+                        str(field.label),
+                        self.get_help_text(field, name),
+                    )
                     for name, field in form.fields.items()
+                    if (addon_name, name) not in SKIP_FIELDS
                 ]
                 prefix = ":Configuration: "
                 name_width = max(len(name) for name, _label, _help_text in table)
@@ -76,7 +115,11 @@ class Command(BaseCommand):
                     )
             else:
                 self.stdout.write(":Configuration: `This add-on has no configuration.`")
-            events = ", ".join(event.label for event in obj.events)
+            events = ", ".join(
+                f":ref:`{event_link(event)}`" for event in sorted_events(obj.events)
+            )
+            if POST_CONFIGURE_EVENTS & set(obj.events):
+                events = f":ref:`addon-event-install`, {events}"
             self.stdout.write(f":Triggers: {events}")
             self.stdout.write("\n")
             self.stdout.write("\n".join(wrap(obj.description, 79)))

@@ -2,6 +2,10 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from django.core.exceptions import PermissionDenied
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -13,26 +17,35 @@ from weblate.trans.models import Change, Component, Project
 from weblate.utils import messages
 from weblate.utils.views import PathViewMixin, get_paginator
 
+if TYPE_CHECKING:
+    from weblate.addons.base import BaseAddon
+    from weblate.auth.models import AuthenticatedHttpRequest
+
 
 class AddonList(PathViewMixin, ListView):
     paginate_by = None
     model = Addon
     supported_path_types = (None, Component, Project)
+    path_object: Component | Project | None
+    request: AuthenticatedHttpRequest
 
     def get_queryset(self):
         if isinstance(self.path_object, Component):
             if not self.request.user.has_perm("component.edit", self.path_object):
-                raise PermissionDenied("Can not edit component")
+                msg = "Can not edit component"
+                raise PermissionDenied(msg)
             self.kwargs["component_obj"] = self.path_object
             return Addon.objects.filter_component(self.path_object)
         if isinstance(self.path_object, Project):
             if not self.request.user.has_perm("project.edit", self.path_object):
-                raise PermissionDenied("Can not edit project")
+                msg = "Can not edit project"
+                raise PermissionDenied(msg)
             self.kwargs["project_obj"] = self.path_object
             return Addon.objects.filter_project(self.path_object)
 
         if not self.request.user.has_perm("management.addons"):
-            raise PermissionDenied("Can not manage add-ons")
+            msg = "Can not manage add-ons"
+            raise PermissionDenied(msg)
         return Addon.objects.filter_sitewide()
 
     def get_success_url(self):
@@ -95,7 +108,7 @@ class AddonList(PathViewMixin, ListView):
 
         return result
 
-    def post(self, request, **kwargs):
+    def post(self, request: AuthenticatedHttpRequest, **kwargs):
         obj = self.path_object
         obj_component, obj_project = None, None
 
@@ -105,7 +118,7 @@ class AddonList(PathViewMixin, ListView):
             obj_project = obj
 
         name = request.POST.get("name")
-        addon = ADDONS.get(name)
+        addon: type[BaseAddon] = ADDONS.get(name)
         installed = {x.addon.name for x in self.get_queryset()}
         if (
             not name
@@ -157,26 +170,31 @@ class AddonList(PathViewMixin, ListView):
 
 class BaseAddonView(DetailView):
     model = Addon
+    request: AuthenticatedHttpRequest
 
-    def get_object(self):
+    def get_object(self):  # type: ignore[override]
         obj = super().get_object()
         if obj.component and not self.request.user.has_perm(
             "component.edit", obj.component
         ):
-            raise PermissionDenied("Can not edit component")
+            msg = "Can not edit component"
+            raise PermissionDenied(msg)
         if obj.project and not self.request.user.has_perm("project.edit", obj.project):
-            raise PermissionDenied("Can not edit project")
+            msg = "Can not edit project"
+            raise PermissionDenied(msg)
         if (
             obj.project is None
             and obj.component is None
             and not self.request.user.has_perm("management.addons")
         ):
-            raise PermissionDenied("Can not manage add-ons")
+            msg = "Can not manage add-ons"
+            raise PermissionDenied(msg)
         return obj
 
 
 class AddonDetail(BaseAddonView, UpdateView):
     template_name_suffix = "_detail"
+    object: Addon
 
     def get_form(self, form_class=None):
         return self.object.addon.get_settings_form(
@@ -199,7 +217,7 @@ class AddonDetail(BaseAddonView, UpdateView):
             return reverse("manage-addons")
         return reverse("addons", kwargs={"path": target.get_url_path()})
 
-    def post(self, request, *args, **kwargs):
+    def post(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         obj = self.get_object()
         obj.acting_user = request.user
         if "delete" in request.POST:

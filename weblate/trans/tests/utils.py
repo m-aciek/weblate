@@ -1,7 +1,6 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-
 from __future__ import annotations
 
 import os.path
@@ -10,7 +9,6 @@ import sys
 from datetime import timedelta
 from tarfile import TarFile
 from tempfile import mkdtemp
-from unittest import SkipTest
 
 import social_core.backends.utils
 from celery.contrib.testing.tasks import ping  # type: ignore[import-untyped]
@@ -22,9 +20,9 @@ from django.utils import timezone
 from django.utils.functional import cached_property
 
 from weblate.auth.models import User
-from weblate.configuration.models import Setting
+from weblate.configuration.models import Setting, SettingCategory
 from weblate.formats.models import FILE_FORMATS
-from weblate.trans.models import Component, Project
+from weblate.trans.models import Category, Component, Project
 from weblate.utils.files import remove_tree
 from weblate.vcs.models import VCS_REGISTRY
 
@@ -167,6 +165,12 @@ class RepoTestMixin:
         self.addCleanup(remove_tree, project.full_path, True)
         return project
 
+    def create_category(self, project, **kwargs):
+        """Create test category."""
+        return Category.objects.create(
+            name="Test category", slug="test-category", project=project, **kwargs
+        )
+
     def format_local_path(self, path):
         """Format path for local access to the repository."""
         if sys.platform != "win32":
@@ -185,13 +189,13 @@ class RepoTestMixin:
     ):
         """Create real test component."""
         if file_format not in FILE_FORMATS:
-            raise SkipTest(f"File format {file_format} is not supported!")
+            self.skipTest(f"File format {file_format} is not supported!")
         if "project" not in kwargs:
             kwargs["project"] = self.create_project()
 
         repo = push = self.format_local_path(getattr(self, f"{vcs}_repo_path"))
         if vcs not in VCS_REGISTRY:
-            raise SkipTest(f"VCS {vcs} not available!")
+            self.skipTest(f"VCS {vcs} not available!")
 
         if "new_lang" not in kwargs:
             kwargs["new_lang"] = "contact"
@@ -232,7 +236,7 @@ class RepoTestMixin:
     def configure_mt() -> None:
         for engine in ["weblate", "weblate-translation-memory"]:
             Setting.objects.get_or_create(
-                category=Setting.CATEGORY_MT,
+                category=SettingCategory.MT,
                 name=engine,
                 defaults={"value": {}},
             )
@@ -436,7 +440,8 @@ class TempDirMixin:
     @property
     def tempdir(self) -> str:
         if self._tempdir is None:
-            raise ValueError("tempdir not initialized")
+            msg = "tempdir not initialized"
+            raise ValueError(msg)
         return self._tempdir
 
     def create_temp(self) -> None:
@@ -448,7 +453,7 @@ class TempDirMixin:
             self._tempdir = None
 
 
-def create_test_billing(user, invoice=True):
+def create_test_billing(user: User, invoice=True):
     from weblate.billing.models import Billing, Invoice, Plan
 
     plan = Plan.objects.create(

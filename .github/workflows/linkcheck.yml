@@ -1,0 +1,56 @@
+# Copyright © Michal Čihař <michal@weblate.org>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Linkcheck
+
+on:
+  push:
+    paths:
+    - docs/**.rst
+    - .github/workflows/linkcheck.yml
+  pull_request:
+    paths:
+    - docs/**.rst
+    - .github/workflows/linkcheck.yml
+  schedule:
+  - cron: 30 5 * * *
+
+permissions:
+  contents: read
+
+jobs:
+  linkcheck:
+    runs-on: ubuntu-24.04
+    name: Linkcheck
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+    - uses: astral-sh/setup-uv@v4
+    - name: Install apt dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y graphviz
+    - name: Install Python dependencies
+      run: uv sync --no-sources --only-group docs --frozen
+    - name: Sphinx linkcheck
+      run: |
+        . .venv/bin/activate
+        ./ci/run-docs linkcheck
+    - name: Sphinx linkcheck collect
+      if: always()
+      run: |
+        echo "::add-matcher::.github/matchers/sphinx-linkcheck.json"
+        echo "::add-matcher::.github/matchers/sphinx-linkcheck-warn.json"
+        sed 's@^@docs/@' docs/_build/linkcheck/output.txt
+        echo "::remove-matcher owner=sphinx::"
+        echo "::remove-matcher owner=sphinx-warn::"
+    - uses: actions/upload-artifact@v4.4.3
+      if: always()
+      with:
+        name: Linkcheck report
+        path: docs/_build/linkcheck/output.txt

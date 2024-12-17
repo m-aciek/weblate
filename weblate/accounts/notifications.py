@@ -8,12 +8,13 @@ from collections import defaultdict
 from copy import copy
 from email.utils import formataddr
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from dateutil.relativedelta import relativedelta
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.signing import TimestampSigner
-from django.db.models import Q
+from django.db.models import IntegerChoices, Q, QuerySet
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
@@ -26,11 +27,12 @@ from django.utils.translation import (
 )
 from siphashc import siphash
 
-from weblate.accounts.tasks import send_mails
+from weblate.accounts.tasks import OutgoingEmail, send_mails
 from weblate.auth.models import User
 from weblate.lang.models import Language
 from weblate.logger import LOGGER
-from weblate.trans.models import Alert, Change, Translation
+from weblate.trans.models import Alert, Change, Component, Project, Translation
+from weblate.utils.errors import report_error
 from weblate.utils.markdown import get_mention_users
 from weblate.utils.ratelimit import rate_limit
 from weblate.utils.site import get_site_domain, get_site_url
@@ -42,33 +44,24 @@ if TYPE_CHECKING:
 
     from django_stubs_ext import StrOrPromise
 
-FREQ_NONE = 0
-FREQ_INSTANT = 1
-FREQ_DAILY = 2
-FREQ_WEEKLY = 3
-FREQ_MONTHLY = 4
+    from weblate.accounts.models import Subscription
 
-FREQ_CHOICES = (
-    (FREQ_NONE, gettext_lazy("No notification")),
-    (FREQ_INSTANT, gettext_lazy("Instant notification")),
-    (FREQ_DAILY, gettext_lazy("Daily digest")),
-    (FREQ_WEEKLY, gettext_lazy("Weekly digest")),
-    (FREQ_MONTHLY, gettext_lazy("Monthly digest")),
-)
 
-SCOPE_ALL = 0
-SCOPE_WATCHED = 10
-SCOPE_ADMIN = 20
-SCOPE_PROJECT = 30
-SCOPE_COMPONENT = 40
+class NotificationFrequency(IntegerChoices):
+    FREQ_NONE = 0, gettext_lazy("No notification")
+    FREQ_INSTANT = 1, gettext_lazy("Instant notification")
+    FREQ_DAILY = 2, gettext_lazy("Daily digest")
+    FREQ_WEEKLY = 3, gettext_lazy("Weekly digest")
+    FREQ_MONTHLY = 4, gettext_lazy("Monthly digest")
 
-SCOPE_CHOICES = (
-    (SCOPE_ALL, "All"),
-    (SCOPE_WATCHED, "Watched"),
-    (SCOPE_ADMIN, "Administered"),
-    (SCOPE_PROJECT, "Project"),
-    (SCOPE_COMPONENT, "Component"),
-)
+
+class NotificationScope(IntegerChoices):
+    SCOPE_ALL = 0, "All"
+    SCOPE_WATCHED = 10, "Watched"
+    SCOPE_ADMIN = 20, "Administered"
+    SCOPE_PROJECT = 30, "Project"
+    SCOPE_COMPONENT = 40, "Component"
+
 
 NOTIFICATIONS: list[type[Notification]] = []
 NOTIFICATIONS_ACTIONS: dict[int, list[type[Notification]]] = {}
@@ -78,6 +71,7 @@ def get_email_headers(notification: str) -> dict[str, str]:
     return {
         "X-Mailer": "Weblate" if settings.HIDE_VERSION else USER_AGENT,
         "X-Weblate-Notification": notification,
+        "Message-ID": f"{uuid4()}@{get_site_domain()}",
     }
 
 
@@ -95,6 +89,14 @@ def is_notificable_action(action: int) -> bool:
     return action in NOTIFICATIONS_ACTIONS
 
 
+def dispatch_changes_notifications(changes: Iterable[Change]) -> None:
+    from weblate.accounts.tasks import notify_changes
+
+    notify_changes.delay_on_commit(
+        [change.pk for change in changes if is_notificable_action(change.action)]
+    )
+
+
 class Notification:
     actions: Iterable[int] = ()
     verbose: StrOrPromise = ""
@@ -105,24 +107,33 @@ class Notification:
     any_watched: bool = False
     required_attr: str | None = None
     skip_when_notify: list[Any] = []
+    perm_cache: dict[int, set[int]]
 
-    def __init__(self, outgoing, perm_cache=None) -> None:
-        self.outgoing = outgoing
-        self.subscription_cache = {}
+    def __init__(
+        self,
+        outgoing: list[OutgoingEmail],
+        perm_cache: dict[int, set[int]] | None = None,
+    ) -> None:
+        self.outgoing: list[OutgoingEmail] = outgoing
+        self.subscription_cache: dict[
+            tuple[str | int | None, ...], QuerySet[Subscription]
+        ] = {}
         self.child_notify: list[Notification] | None = None
         if perm_cache is not None:
             self.perm_cache = perm_cache
         else:
             self.perm_cache = {}
 
-    def get_language_filter(self, change, translation):
+    def get_language_filter(
+        self, change: Change, translation: Translation
+    ) -> Language | None:
         if self.filter_languages:
             return translation.language
         return None
 
-    @staticmethod
-    def get_freq_choices():
-        return FREQ_CHOICES
+    @classmethod
+    def get_freq_choices(cls):
+        return NotificationFrequency.choices
 
     @classmethod
     def get_choice(cls):
@@ -132,25 +143,36 @@ class Notification:
     def get_name(cls):
         return cls.__name__
 
-    def filter_subscriptions(self, project, component, translation, users, lang_filter):
+    def filter_subscriptions(
+        self,
+        project: Project | None,
+        component: Component | None,
+        translation: Translation | None,
+        users: list[int] | None,
+        lang_filter: Language | None,
+    ) -> QuerySet[Subscription]:
         from weblate.accounts.models import Subscription
 
         result = Subscription.objects.filter(notification=self.get_name())
         if users is not None:
             result = result.filter(user_id__in=users)
-        query = Q(scope__in=(SCOPE_ADMIN, SCOPE_ALL))
+        query = Q(
+            scope__in=(NotificationScope.SCOPE_ADMIN, NotificationScope.SCOPE_ALL)
+        )
         # Special case for site-wide announcements
         if self.any_watched and not project and not component:
-            query |= Q(scope=SCOPE_WATCHED)
+            query |= Q(scope=NotificationScope.SCOPE_WATCHED)
         if component:
             if not self.ignore_watched:
-                query |= Q(scope=SCOPE_WATCHED) & Q(
+                query |= Q(scope=NotificationScope.SCOPE_WATCHED) & Q(
                     user__profile__watched=component.project
                 )
             query |= Q(component=component)
         if project:
             if not self.ignore_watched:
-                query |= Q(scope=SCOPE_WATCHED) & Q(user__profile__watched=project)
+                query |= Q(scope=NotificationScope.SCOPE_WATCHED) & Q(
+                    user__profile__watched=project
+                )
             query |= Q(project=project)
         if lang_filter:
             result = result.filter(user__profile__languages=lang_filter)
@@ -162,7 +184,7 @@ class Notification:
 
     def get_subscriptions(self, change, project, component, translation, users):
         lang_filter = self.get_language_filter(change, translation)
-        cache_key = (
+        cache_key: tuple[int | str | None, ...] = (
             lang_filter.id if lang_filter else None,
             component.pk if component else None,
             project.pk if project else None,
@@ -182,7 +204,7 @@ class Notification:
         except ObjectDoesNotExist:
             return False
 
-    def is_admin(self, user, project):
+    def is_admin(self, user: User, project):
         if project is None:
             return False
 
@@ -225,7 +247,7 @@ class Notification:
                 or user.is_bot
                 # Admin for not admin projects
                 or (
-                    subscription.scope == SCOPE_ADMIN
+                    subscription.scope == NotificationScope.SCOPE_ADMIN
                     and not self.is_admin(user, project)
                 )
             ):
@@ -234,12 +256,16 @@ class Notification:
             last_user = user
             if subscription.frequency != frequency:
                 continue
-            if frequency == FREQ_INSTANT and self.should_skip(user, change):
+            if frequency == NotificationFrequency.FREQ_INSTANT and self.should_skip(
+                user, change
+            ):
                 continue
             last_user.current_subscription = subscription
             yield last_user
 
-    def send(self, address, subject, body, headers) -> None:
+    def send(
+        self, address: str, subject: str, body: str, headers: dict[str, str]
+    ) -> None:
         encoded_email = siphash("Weblate notifier", address)
         if rate_limit(f"notify:rate:{encoded_email}", 1000, 86400):
             LOGGER.info(
@@ -256,15 +282,23 @@ class Notification:
                     "headers": headers,
                 }
             )
+            # Avoid building huge queue of notifications
+            if len(self.outgoing) > 200:
+                send_mails.delay(self.outgoing)
+                self.outgoing.clear()
 
-    def render_template(self, suffix, context, digest=False):
+    def render_template(self, suffix: str, context: dict, digest: bool = False) -> str:
         """Render single mail template with given context."""
         base_name = self.digest_template if digest else self.template_name
         template_name = f"mail/{base_name}{suffix}"
         return render_to_string(template_name, context).strip()
 
     def get_context(
-        self, change=None, subscription=None, extracontext=None, changes=None
+        self,
+        change: Change | None = None,
+        subscription: Subscription | None = None,
+        extracontext: dict | None = None,
+        changes=None,
     ):
         """Return context for rendering mail."""
         result = {
@@ -277,8 +311,10 @@ class Notification:
         if changes is not None:
             result["changes"] = changes
         if subscription is not None:
-            result["unsubscribe_url"] = "{}?i={}".format(
-                reverse("unsubscribe"), TimestampSigner().sign(f"{subscription.pk}")
+            result["unsubscribe_url"] = get_site_url(
+                "{}?i={}".format(
+                    reverse("unsubscribe"), TimestampSigner().sign(f"{subscription.pk}")
+                )
             )
             result["subscription_user"] = subscription.user
         else:
@@ -358,7 +394,7 @@ class Notification:
     def _convert_change_skip(self, change):
         return change
 
-    def should_skip(self, user, change):
+    def should_skip(self, user: User, change):
         if not self.skip_when_notify:
             return False
         if self.child_notify is None:
@@ -369,13 +405,17 @@ class Notification:
         converted_change = self._convert_change_skip(change)
         return any(
             list(
-                child_notify.get_users(FREQ_INSTANT, converted_change, users=[user.pk])
+                child_notify.get_users(
+                    NotificationFrequency.FREQ_INSTANT,
+                    converted_change,
+                    users=[user.pk],
+                )
             )
             for child_notify in self.child_notify
         )
 
     def notify_immediate(self, change) -> None:
-        for user in self.get_users(FREQ_INSTANT, change):
+        for user in self.get_users(NotificationFrequency.FREQ_INSTANT, change):
             if change.project is None or user.can_access_project(change.project):
                 self.send_immediate(
                     user.profile.language,
@@ -392,20 +432,30 @@ class Notification:
             context = self.get_context(subscription=subscription, changes=changes)
             subject = self.render_template("_subject.txt", context, digest=True)
             context["subject"] = subject
-            LOGGER.info(
-                "sending digest notification %s on %d changes to %s",
-                self.get_name(),
-                len(changes),
-                email,
-            )
-            self.send(
-                email,
-                subject,
-                self.render_template(".html", context, digest=True),
-                self.get_headers(context),
-            )
+            try:
+                body = self.render_template(".html", context, digest=True)
+            except Exception:
+                report_error("Could not render changes", level="critical")
+                LOGGER.exception(
+                    "sending digest notification %s on %d changes to %s failed",
+                    self.get_name(),
+                    len(changes),
+                    email,
+                )
+            else:
+                LOGGER.info(
+                    "sending digest notification %s on %d changes to %s",
+                    self.get_name(),
+                    len(changes),
+                    email,
+                )
+                self.send(email, subject, body, self.get_headers(context))
 
-    def notify_digest(self, frequency, changes) -> None:
+    def notify_digest(
+        self,
+        frequency: NotificationFrequency,
+        changes: QuerySet[Change],
+    ) -> None:
         notifications = defaultdict(list)
         users = {}
         for change in changes:
@@ -414,13 +464,13 @@ class Notification:
                     notifications[user.pk].append(change)
                     users[user.pk] = user
         for user in users.values():
-            changes = notifications[user.pk]
+            user_changes = notifications[user.pk]
             parts = []
-            while len(changes) > 120:
-                parts.append(changes[:100])
-                changes = changes[100:]
-            if changes:
-                parts.append(changes)
+            while len(user_changes) > 120:
+                parts.append(user_changes[:100])
+                user_changes = user_changes[100:]
+            if user_changes:
+                parts.append(user_changes)
 
             for part in parts:
                 self.send_digest(
@@ -437,13 +487,19 @@ class Notification:
         )
 
     def notify_daily(self) -> None:
-        self.notify_digest(FREQ_DAILY, self.filter_changes(days=1))
+        self.notify_digest(
+            NotificationFrequency.FREQ_DAILY, self.filter_changes(days=1)
+        )
 
     def notify_weekly(self) -> None:
-        self.notify_digest(FREQ_WEEKLY, self.filter_changes(weeks=1))
+        self.notify_digest(
+            NotificationFrequency.FREQ_WEEKLY, self.filter_changes(weeks=1)
+        )
 
     def notify_monthly(self) -> None:
-        self.notify_digest(FREQ_MONTHLY, self.filter_changes(months=1))
+        self.notify_digest(
+            NotificationFrequency.FREQ_MONTHLY, self.filter_changes(months=1)
+        )
 
 
 @register_notification
@@ -530,6 +586,22 @@ class NewSuggestionNotificaton(Notification):
 
 
 @register_notification
+class LanguageTranslatedNotificaton(Notification):
+    actions = (Change.ACTION_COMPLETE,)
+    verbose = pgettext_lazy("Notification name", "Language was translated")
+    template_name = "translated_language"
+    required_attr = "translation"
+
+
+@register_notification
+class ComponentTranslatedNotificaton(Notification):
+    actions = (Change.ACTION_COMPLETED_COMPONENT,)
+    verbose = pgettext_lazy("Notification name", "Component was translated")
+    template_name = "translated_component"
+    required_attr = "component"
+
+
+@register_notification
 class NewCommentNotificaton(Notification):
     actions = (Change.ACTION_COMMENT,)
     verbose = pgettext_lazy("Notification name", "Comment was added")
@@ -594,12 +666,12 @@ class LastAuthorCommentNotificaton(Notification):
 
     def get_users(
         self,
-        frequency,
-        change=None,
-        project=None,
-        component=None,
-        translation=None,
-        users=None,
+        frequency: int,
+        change: Change | None = None,
+        project: Project | None = None,
+        component: Component | None = None,
+        translation: Translation | None = None,
+        users: list[int] | None = None,
     ):
         last_author = change.unit.get_last_content_change()[0]
         users = [] if last_author.is_anonymous else [last_author.pk]
@@ -666,7 +738,7 @@ class NewAnnouncementNotificaton(Notification):
     required_attr = "announcement"
     any_watched: bool = True
 
-    def should_skip(self, user, change) -> bool:
+    def should_skip(self, user: User, change) -> bool:
         return not change.announcement.notify
 
     def get_language_filter(self, change, translation):
@@ -680,8 +752,13 @@ class NewAlertNotificaton(Notification):
     template_name = "new_alert"
     required_attr = "alert"
 
-    def should_skip(self, user, change):
-        if change.alert.obj.link_wide:
+    def should_skip(self, user: User, change):
+        try:
+            alert = change.alert
+        except Alert.DoesNotExist:
+            # Alert was removed meanwhile
+            return False
+        if alert.obj.link_wide:
             # Notify for main component
             if not change.component.linked_component:
                 return False
@@ -690,8 +767,14 @@ class NewAlertNotificaton(Notification):
             fake = copy(change)
             fake.component = change.component.linked_component
             fake.project = fake.component.project
-            return bool(list(self.get_users(FREQ_INSTANT, fake, users=[user.pk])))
-        if change.alert.obj.project_wide:
+            return bool(
+                list(
+                    self.get_users(
+                        NotificationFrequency.FREQ_INSTANT, fake, users=[user.pk]
+                    )
+                )
+            )
+        if alert.obj.project_wide:
             first_component = change.component.project.component_set.order_by("id")[0]
             # Notify for the first component
             if change.component.id == first_component.id:
@@ -701,7 +784,13 @@ class NewAlertNotificaton(Notification):
             fake = copy(change)
             fake.component = first_component
             fake.project = fake.component.project
-            return bool(list(self.get_users(FREQ_INSTANT, fake, users=[user.pk])))
+            return bool(
+                list(
+                    self.get_users(
+                        NotificationFrequency.FREQ_INSTANT, fake, users=[user.pk]
+                    )
+                )
+            )
         return False
 
 
@@ -726,20 +815,27 @@ class MergeFailureNotification(Notification):
 class SummaryNotification(Notification):
     filter_languages = True
 
-    @staticmethod
-    def get_freq_choices():
-        return [x for x in FREQ_CHOICES if x[0] != FREQ_INSTANT]
+    @classmethod
+    def get_freq_choices(cls):
+        return [
+            x
+            for x in super().get_freq_choices()
+            if x[0] != NotificationFrequency.FREQ_INSTANT
+        ]
 
     def notify_daily(self) -> None:
-        self.notify_summary(FREQ_DAILY)
+        self.notify_summary(NotificationFrequency.FREQ_DAILY)
 
     def notify_weekly(self) -> None:
-        self.notify_summary(FREQ_WEEKLY)
+        self.notify_summary(NotificationFrequency.FREQ_WEEKLY)
 
     def notify_monthly(self) -> None:
-        self.notify_summary(FREQ_MONTHLY)
+        self.notify_summary(NotificationFrequency.FREQ_MONTHLY)
 
-    def notify_summary(self, frequency) -> None:
+    def notify_summary(
+        self,
+        frequency: NotificationFrequency,
+    ) -> None:
         users = {}
         notifications = defaultdict(list)
         for translation in prefetch_stats(Translation.objects.prefetch()):

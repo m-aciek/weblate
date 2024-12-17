@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   migrations:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         database: [postgresql, mysql]
@@ -33,6 +33,7 @@ jobs:
       CI_DB_PORT: '60000'
       CI_SELENIUM: '1'
       DJANGO_SETTINGS_MODULE: weblate.settings_test
+      UV_FROZEN: '1'
 
     steps:
     - uses: actions/checkout@v4
@@ -40,12 +41,20 @@ jobs:
       run: ./ci/services-up ${{ matrix.database }}
     - name: Install apt dependencies
       run: sudo ./ci/apt-install $CI_DATABASE
-    - name: Set up Python 3.11
+    - uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+        cache-dependency-glob: ''
+        # Do not share cache with tests as this uses python 3.11 for older versions
+        cache-suffix: multi
+    - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: 3.11
+        python-version: |
+          3.11
+          3.13
     - name: Install Python dependencies
-      run: ./ci/pip-install migrations
+      run: ./ci/pip-install latest
     - name: Check missing migrations
       run: ./ci/run-checkmigrate
     - name: Migrate from 5.0
@@ -60,11 +69,19 @@ jobs:
       run: ./ci/run-migrate 5.4.3
     - name: Migrate from 5.5
       run: ./ci/run-migrate 5.5
+    - name: Migrate from 5.6
+      run: ./ci/run-migrate 5.6
+    - name: Migrate from 5.7
+      run: ./ci/run-migrate 5.7
+    - name: Migrate from 5.8
+      run: ./ci/run-migrate 5.8
+    - name: Migrate from 5.9
+      run: ./ci/run-migrate 5.9
     - name: Coverage
       run: |
-        coverage combine
-        coverage xml
-    - uses: codecov/codecov-action@v4
+        uv run --no-sources coverage combine
+        uv run --no-sources coverage xml
+    - uses: codecov/codecov-action@v5
       with:
         token: ${{secrets.CODECOV_TOKEN}}
         flags: migrations

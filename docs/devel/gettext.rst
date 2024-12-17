@@ -218,19 +218,19 @@ To import such translation into Weblate, all you need to define are the followin
 fields when creating component (see :ref:`component` for detailed description
 of the fields):
 
-=============================== ==================================================
-Field                           Value
-=============================== ==================================================
-Source code repository          URL of the VCS repository with your project
-
-File mask                       ``po/*.po``
-
-Template for new translations   ``po/hello.pot``
-
-File format                     Choose :guilabel:`gettext PO file`
-
-New language                    Choose :guilabel:`Create new language file`
-=============================== ==================================================
++-------------------------------+--------------------------------------------------+
+| Field                         | Value                                            |
++===============================+==================================================+
+| Source code repository        | URL of the VCS repository with your project      |
++-------------------------------+--------------------------------------------------+
+| File mask                     | ``po/*.po``                                      |
++-------------------------------+--------------------------------------------------+
+| Template for new translations | ``po/hello.pot``                                 |
++-------------------------------+--------------------------------------------------+
+| File format                   | Choose :guilabel:`gettext PO file`               |
++-------------------------------+--------------------------------------------------+
+| New language                  | Choose :guilabel:`Create new language file`      |
++-------------------------------+--------------------------------------------------+
 
 And that's it, you're now ready to start translating your software!
 
@@ -244,5 +244,5 @@ And that's it, you're now ready to start translating your software!
 .. _msgmerge: https://www.gnu.org/software/gettext/manual/html_node/msgmerge-Invocation.html
 .. _msgfmt: https://www.gnu.org/software/gettext/manual/html_node/msgfmt-Invocation.html
 .. _msginit: https://www.gnu.org/software/gettext/manual/html_node/msginit-Invocation.html
-.. _intltool: https://freedesktop.org/wiki/Software/intltool/
+.. _intltool: https://www.freedesktop.org/wiki/Software/intltool/
 .. _pybabel: http://babel.pocoo.org/

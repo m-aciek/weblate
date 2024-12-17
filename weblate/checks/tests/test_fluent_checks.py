@@ -34,7 +34,7 @@ class MockFluentTransUnit(MockUnit):
         source: str,
         target: str = "",
         fluent_type: str | None = None,
-        unit_id: str | None = None,
+        unit_id: str = "",
         is_source: bool = False,
     ) -> None:
         self._fluent_type = fluent_type
@@ -287,7 +287,7 @@ class FluentSyntaxCheckTestBase:
     def test_syntax_errors(self) -> None:
         # The error message comes from translate, we just look for the prefix
         # and a non-empty error.
-        error_message = re.compile("^Fluent syntax error: .")
+        error_message = re.compile(r"^Fluent syntax error: .")
         for value in (
             "open { ref",
             "close } ref",

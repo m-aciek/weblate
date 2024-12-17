@@ -1,22 +1,28 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
 import os
 import shutil
 import stat
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 from translation_finder.finder import EXCLUDES
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if TYPE_CHECKING:
+    from pathlib import Path
+
+WEBLATE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(WEBLATE_DIR)
 DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
 DEFAULT_TEST_DIR = os.path.join(BASE_DIR, "data-test")
 BUILD_DIR = os.path.join(BASE_DIR, "build")
 VENV_DIR = os.path.join(BASE_DIR, ".venv")
 DOCS_DIR = os.path.join(BASE_DIR, "docs")
 SCRIPTS_DIR = os.path.join(BASE_DIR, "scripts")
+CLIENT_DIR = os.path.join(BASE_DIR, "client")
 EXAMPLES_DIR = os.path.join(BASE_DIR, "weblate", "examples")
 
 PATH_EXCLUDES = [f"/{exclude}/" for exclude in EXCLUDES]
@@ -45,7 +51,7 @@ def remove_tree(path: str | Path, ignore_errors: bool = False) -> None:
 def should_skip(location):
     """Check for skipping location in manage commands."""
     location = os.path.abspath(location)
-    return location.startswith(
+    return not location.startswith(WEBLATE_DIR) or location.startswith(
         (
             VENV_DIR,
             settings.DATA_DIR,
@@ -54,6 +60,7 @@ def should_skip(location):
             DEFAULT_TEST_DIR,
             DOCS_DIR,
             SCRIPTS_DIR,
+            CLIENT_DIR,
             EXAMPLES_DIR,
         )
     )

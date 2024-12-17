@@ -20,38 +20,44 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       matrix:
         python-version:
-        - '3.10'
         - '3.11'
-        - '3.12'
-        requirements: [latest]
-        database: [postgresql]
+        - '3.13'
+        requirements:
+        - latest
+        database:
+        - postgresql
         experimental: [false]
         include:
-          # Reduced testing for mysql
-        - python-version: 3.11
+        # Reduced testing for mysql
+        - python-version: '3.13'
           requirements: latest
           database: mysql
           experimental: false
-          # Reduced testing for mariadb
-        - python-version: 3.11
+        # Reduced testing for mariadb
+        - python-version: '3.13'
           requirements: latest
           database: mariadb
           experimental: false
-          # Reduced testing for minimal deps
-        - python-version: '3.10'
+        # Reduced testing for minimal deps
+        - python-version: '3.11'
           requirements: minimal
           database: postgresql
           experimental: false
-          # Reduced testing for edge deps
-        - python-version: 3.11
+        # Reduced testing for edge deps
+        - python-version: '3.13'
           requirements: edge
           database: postgresql
           experimental: true
+        # Test with Python 3.12.
+        - python-version: '3.12'
+          requirements: latest
+          database: postgresql
+          experimental: false
     name: py${{ matrix.python-version }}, ${{ matrix.database }}, ${{ matrix.requirements }} deps
     env:
       CI_DATABASE: ${{ matrix.database }}
@@ -66,6 +72,15 @@ jobs:
       PYTHONUNBUFFERED: 1
     steps:
     - uses: actions/checkout@v4
+    - uses: actions/cache@v4
+      with:
+        path: data-test/cache/tesseract
+        key: tesseract-data
+    - uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+        cache-dependency-glob: ''
+        cache-suffix: ${{ matrix.python-version }}
     - name: Start services
       run: ./ci/services-up ${{ matrix.database }}
     - name: Install apt dependencies
@@ -74,6 +89,7 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+        allow-prereleases: true
     - name: Used versions
       run: ./ci/print-versions
     - name: Install Python dependencies
@@ -81,30 +97,37 @@ jobs:
     - name: Prepare database
       run: ./ci/prepare-database
     - name: Compile MO files
-      run: coverage run ./manage.py compilemessages
+      run: uv run --no-sources coverage run ./manage.py compilemessages
     - name: Collect static files
-      run: coverage run ./manage.py collectstatic --noinput --verbosity 0
+      run: uv run --no-sources coverage run ./manage.py collectstatic --noinput --verbosity 0
     - name: Migrate database
-      run: coverage run ./manage.py migrate --noinput --traceback
+      run: uv run --no-sources coverage run ./manage.py migrate --noinput --traceback
     - name: Django checks
-      run: coverage run ./manage.py check
+      run: uv run --no-sources coverage run ./manage.py check
     - name: Demo import
-      run: coverage run ./manage.py import_demo
+      run: uv run --no-sources coverage run ./manage.py import_demo
     - name: Test with Django
-      run: coverage run ./manage.py test -v2
+      run: |
+        uv run --no-sources --all-extras pytest --junitxml=junit.xml --cov=weblate weblate
+        cp .coverage .coverage.pytest
     - name: Test wsgi startup
       env:
         PYTHONPATH: .
-      run: coverage run weblate/wsgi.py
+      run: uv run --no-sources coverage run weblate/wsgi.py
     - name: Coverage
       run: |
-        coverage combine
-        coverage xml
-    - uses: codecov/codecov-action@v4
+        uv run --no-sources coverage combine
+        uv run --no-sources coverage xml
+    - uses: codecov/codecov-action@v5
       with:
         token: ${{secrets.CODECOV_TOKEN}}
         flags: unittests
         name: Tests py${{ matrix.python-version }}, ${{ matrix.database }}, ${{ matrix.requirements }} deps
+    - name: Upload test results to Codecov
+      if: ${{ !cancelled() }}
+      uses: codecov/test-results-action@v1
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
     - name: DeepSource
       uses: deepsourcelabs/test-coverage-action@v1.1.2
       if: ${{ github.event_name == 'push' }}

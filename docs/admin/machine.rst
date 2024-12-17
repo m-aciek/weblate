@@ -22,6 +22,8 @@ the project settings:
 The services translate from the source language as configured at
 :ref:`component`, see :ref:`component-source_language`.
 
+Per-project automatic suggestion can also be configured via the :ref:`api`.
+
 .. seealso::
 
    :ref:`machine-translation`
@@ -48,23 +50,6 @@ and it supports up to 214 language pairs.
 .. seealso::
 
     `Alibaba Translate Documentation <https://www.alibabacloud.com/help/en/machine-translation>`_
-
-.. _mt-amagama:
-
-Amagama
--------
-
-:Service ID: ``amagama``
-:Configuration: `This service has no configuration.`
-
-Special installation of :ref:`mt-tmserver` run by the authors of Virtaal.
-
-.. seealso::
-
-    :ref:`amagama:installation`,
-    :doc:`virtaal:amagama`,
-    `amaGama Translation Memory <https://amagama.translatehouse.org/>`_
-
 
 .. _mt-apertium-apy:
 
@@ -104,10 +89,14 @@ Amazon Translate
 
 Amazon Translate is a neural machine translation service for translating text
 to and from English across a breadth of supported languages.
+The service requires the `TranslateFullAccess` Managed Policy.
+
+The service automatically uses :ref:`glossary`, see :ref:`glossary-mt`.
 
 .. seealso::
 
-    `Amazon Translate Documentation <https://docs.aws.amazon.com/translate/>`_
+    `Amazon Translate Documentation <https://docs.aws.amazon.com/translate/>`_,
+    `AWS TranslateFullAccess Policy <https://docs.aws.amazon.com/aws-managed-policy/latest/reference/TranslateFullAccess.html>`_
 
 .. _mt-baidu:
 
@@ -129,19 +118,39 @@ This service uses an API and you need to obtain an ID and API key from Baidu to 
 
     `Baidu Translate API <https://api.fanyi.baidu.com/api/trans/product/index>`_
 
+.. _mt-cyrtranslit:
+
+Cyrtranslit
+-----------
+
+.. versionadded:: 5.7
+
+:Service ID: ``cyrtranslit``
+:Configuration: `This service has no configuration.`
+
+Machine translation service using the Cyrtranslit library.
+
+This service converts text between Cyrillic and Latin scripts for languages that have both scripts.
+
+.. seealso::
+
+    `Cyrtranslit repository <https://github.com/opendatakosovo/cyrillic-transliteration>`_
+
 .. _mt-deepl:
 
 DeepL
 -----
 
 :Service ID: ``deepl``
-:Configuration: +---------------+-----------+-------------------------------------------------------------------------+
-                | ``url``       | API URL   |                                                                         |
-                +---------------+-----------+-------------------------------------------------------------------------+
-                | ``key``       | API key   |                                                                         |
-                +---------------+-----------+-------------------------------------------------------------------------+
-                | ``formality`` | Formality | Uses the specified formality if language is not specified as (in)formal |
-                +---------------+-----------+-------------------------------------------------------------------------+
+:Configuration: +---------------+---------------------+-------------------------------------------------------------------------------------+
+                | ``url``       | API URL             |                                                                                     |
+                +---------------+---------------------+-------------------------------------------------------------------------------------+
+                | ``key``       | API key             |                                                                                     |
+                +---------------+---------------------+-------------------------------------------------------------------------------------+
+                | ``formality`` | Formality           | Uses the specified formality if language is not specified as (in)formal             |
+                +---------------+---------------------+-------------------------------------------------------------------------------------+
+                | ``context``   | Translation context | Describe the context of the translation to improve the accuracy of the translation. |
+                +---------------+---------------------+-------------------------------------------------------------------------------------+
 
 DeepL is paid service providing good machine translation for a few languages.
 You need to purchase :guilabel:`DeepL API` subscription or you can use legacy
@@ -172,6 +181,9 @@ Replace the XXX with your auth_key. If you receive a JSON object which contains
 
 Weblate supports DeepL formality, it will choose matching one based on the
 language (for example, there is ``de@formal`` and ``de@informal``).
+
+The translation context can optionally be specified to improve translations quality. Read more on that in
+`DeepL translation context documentation <https://developers.deepl.com/docs/best-practices/working-with-context>`_.
 
 The service automatically uses :ref:`glossary`, see :ref:`glossary-mt`.
 
@@ -231,6 +243,8 @@ Google Cloud Translation Advanced
                 +-----------------+---------------------------------------+----------------------------------------------------------------------------------------------------------+
                 | ``location``    | Google Translate location             | Choose a Google Cloud Translation region that is used for the Google Cloud project or is closest to you. |
                 +-----------------+---------------------------------------+----------------------------------------------------------------------------------------------------------+
+                | ``bucket_name`` | Google Storage Bucket name            | Enter the name of the Google Cloud Storage bucket that is used to store the Glossary files.              |
+                +-----------------+---------------------------------------+----------------------------------------------------------------------------------------------------------+
 
 Machine translation service provided by the Google Cloud services.
 
@@ -245,8 +259,20 @@ In order to use this service, you first need to go through the following steps:
 
 .. _Select or create a Cloud Platform project.: https://console.cloud.google.com/project
 .. _Enable billing for your project.: https://cloud.google.com/billing/docs/how-to/modify-project#enable_billing_for_a_project
-.. _Enable the Cloud Translation.:  https://cloud.google.com/translate/docs/
+.. _Enable the Cloud Translation.: https://cloud.google.com/translate/docs/
 .. _Setup Authentication.: https://googleapis.dev/python/google-api-core/latest/auth.html
+
+
+Optionally, you can configure the service to use :ref:`glossary` by setting up a Bucket:
+
+1. `Create a Google Cloud bucket.`_
+2. `Set bucket location to "us-central1".`_
+3. `Grant 'Storage Admin' permission to the Service Account.`_
+
+.. _Create a Google Cloud bucket.: https://cloud.google.com/storage/docs/creating-buckets
+.. _Set bucket location to "us-central1".: https://cloud.google.com/translate/docs/migrate-to-v3#resources_projects_and_locations
+.. _Grant 'Storage Admin' permission to the Service Account.: https://cloud.google.com/translate/docs/access-control
+
 
 .. seealso::
 
@@ -350,7 +376,7 @@ Cognitive Services.
 
 Weblate implements Translator API V3.
 
-The service automatically uses :ref:`glossary`, see :ref:`glossary-mt`.
+The service automatically uses :ref:`glossary` via `dynamic dictionary <https://learn.microsoft.com/en-us/azure/ai-services/translator/dynamic-dictionary>`_, see :ref:`glossary-mt`.
 
 Translator Text API V2
 ``````````````````````
@@ -375,6 +401,32 @@ You can also specify a custom category to use `custom translator <https://learn.
    `"Authenticating with a Multi-service resource" <https://learn.microsoft.com/en-us/azure/ai-services/translator/reference/v3-0-reference#authenticating-with-a-multi-service-resource>`_
    `"Authenticating with an access token" section <https://learn.microsoft.com/en-us/azure/ai-services/translator/reference/v3-0-reference#authenticating-with-an-access-token>`_
 
+.. _mt-azure-openai:
+
+Azure OpenAI
+------------
+
+.. versionadded:: 5.8
+
+:Service ID: ``azure-openai``
+:Configuration: +--------------------+---------------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``key``            | API key                   |                                                                                                                           |
+                +--------------------+---------------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``persona``        | Translator persona        | Describe the persona of translator to improve the accuracy of the translation. For example: “You are a squirrel breeder.” |
+                +--------------------+---------------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``style``          | Translator style          | Describe the style of translation. For example: “Use informal language.”                                                  |
+                +--------------------+---------------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``azure_endpoint`` | Azure OpenAI endpoint URL | Endpoint URL of the instance, e.g: https://my-instance.openai.azure.com.                                                  |
+                +--------------------+---------------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``deployment``     | Azure OpenAI deployment   | The model's unique deployment name.                                                                                       |
+                +--------------------+---------------------------+---------------------------------------------------------------------------------------------------------------------------+
+
+Performs translation using `OpenAI`_ hosted on Azure.
+
+.. seealso::
+
+    :ref:`mt-openai`
+
 .. _mt-modernmt:
 
 ModernMT
@@ -383,11 +435,15 @@ ModernMT
 .. versionadded:: 4.2
 
 :Service ID: ``modernmt``
-:Configuration: +---------+---------+--+
-                | ``url`` | API URL |  |
-                +---------+---------+--+
-                | ``key`` | API key |  |
-                +---------+---------+--+
+:Configuration: +--------------------+----------------+-----------------------------------------------------------------------+
+                | ``url``            | API URL        |                                                                       |
+                +--------------------+----------------+-----------------------------------------------------------------------+
+                | ``key``            | API key        |                                                                       |
+                +--------------------+----------------+-----------------------------------------------------------------------+
+                | ``context_vector`` | Context vector | Comma-separated list of memory IDs:weight. e.g: 1234:0.123,4567:0.456 |
+                +--------------------+----------------+-----------------------------------------------------------------------+
+
+The service automatically uses :ref:`glossary`, see :ref:`glossary-mt`.
 
 .. seealso::
 
@@ -447,23 +503,33 @@ OpenAI
 .. versionadded:: 5.3
 
 :Service ID: ``openai``
-:Configuration: +-------------+--------------------+---------------------------------------------------------------------------------------------------------------------------+
-                | ``key``     | API key            |                                                                                                                           |
-                +-------------+--------------------+---------------------------------------------------------------------------------------------------------------------------+
-                | ``model``   | OpenAI model       | Available choices:                                                                                                        |
-                |             |                    |                                                                                                                           |
-                |             |                    | ``auto`` -- Automatic selection                                                                                           |
-                |             |                    |                                                                                                                           |
-                |             |                    | ``gpt-4-1106-preview`` -- GPT-4 Turbo                                                                                     |
-                |             |                    |                                                                                                                           |
-                |             |                    | ``gpt-4`` -- GPT-4                                                                                                        |
-                |             |                    |                                                                                                                           |
-                |             |                    | ``gpt-3.5-turbo`` -- GPT-3.5 Turbo                                                                                        |
-                +-------------+--------------------+---------------------------------------------------------------------------------------------------------------------------+
-                | ``persona`` | Translator persona | Describe the persona of translator to improve the accuracy of the translation. For example: “You are a squirrel breeder.” |
-                +-------------+--------------------+---------------------------------------------------------------------------------------------------------------------------+
-                | ``style``   | Translator style   | Describe the style of translation. For example: “Use informal language.”                                                  |
-                +-------------+--------------------+---------------------------------------------------------------------------------------------------------------------------+
+:Configuration: +------------------+---------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``key``          | API key             |                                                                                                                           |
+                +------------------+---------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``base_url``     | OpenAI API base URL | Base URL of the OpenAI API, if it differs from the OpenAI default URL                                                     |
+                +------------------+---------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``model``        | OpenAI model        | Available choices:                                                                                                        |
+                |                  |                     |                                                                                                                           |
+                |                  |                     | ``auto`` -- Automatic selection                                                                                           |
+                |                  |                     |                                                                                                                           |
+                |                  |                     | ``gpt-4o`` -- GPT-4o                                                                                                      |
+                |                  |                     |                                                                                                                           |
+                |                  |                     | ``gpt-4-1106-preview`` -- GPT-4 Turbo                                                                                     |
+                |                  |                     |                                                                                                                           |
+                |                  |                     | ``gpt-4`` -- GPT-4                                                                                                        |
+                |                  |                     |                                                                                                                           |
+                |                  |                     | ``gpt-3.5-turbo-1106`` -- Updated GPT 3.5 Turbo                                                                           |
+                |                  |                     |                                                                                                                           |
+                |                  |                     | ``gpt-3.5-turbo`` -- GPT-3.5 Turbo                                                                                        |
+                |                  |                     |                                                                                                                           |
+                |                  |                     | ``custom`` -- Custom model                                                                                                |
+                +------------------+---------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``custom_model`` | Custom model name   | Only needed when model is set to 'Custom model'                                                                           |
+                +------------------+---------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``persona``      | Translator persona  | Describe the persona of translator to improve the accuracy of the translation. For example: “You are a squirrel breeder.” |
+                +------------------+---------------------+---------------------------------------------------------------------------------------------------------------------------+
+                | ``style``        | Translator style    | Describe the style of translation. For example: “Use informal language.”                                                  |
+                +------------------+---------------------+---------------------------------------------------------------------------------------------------------------------------+
 
 Performs translation using `OpenAI`_.
 
@@ -476,6 +542,10 @@ used in a prompt for OpenAI and allow you to change the style of the
 translations.
 
 The service automatically uses :ref:`glossary`, see :ref:`glossary-mt`.
+
+.. versionchanged:: 5.7
+
+   Support for custom model and base URL was added.
 
 .. seealso::
 
@@ -521,8 +591,8 @@ addition to the term database.
 
 .. seealso::
 
-    `SAP Translation Hub API <https://api.sap.com/shell/discover/contentpackage/SAPTranslationHub/api/translationhub>`_,
-    `Building the Base URL of SAP Translation Hub <https://help.sap.com/docs/SAP_TRANSLATION_HUB/ed6ce7a29bdd42169f5f0d7868bce6eb/3a011fba82644259a2cc3c919863f4b4.html>`_
+    * `What is SAP Translation Hub <https://help.sap.com/docs/translation-hub/sap-translation-hub/what-is-sap-translation-hub>`_
+    * `SAP Translation Hub API <https://api.sap.com/api/translationhub/overview>`_
 
 .. _mt-systran:
 
@@ -586,9 +656,10 @@ Weblate
 :Configuration: `This service has no configuration.`
 
 
-Weblate machine translation service can provide translations for strings that
-are already translated inside Weblate. It looks for exact matches in the
-existing strings.
+Weblate machine translation service can provide translations based
+on the exact matches of a string in the currently existing strings
+in a :guilabel:`Translated`, :guilabel:`Approved`,
+or :guilabel:`Read-only` :ref:`states <states>` inside Weblate.
 
 .. _mt-weblate-translation-memory:
 
@@ -598,9 +669,14 @@ Weblate Translation Memory
 :Service ID: ``weblate-translation-memory``
 :Configuration: `This service has no configuration.`
 
-Use :ref:`translation-memory` as a machine translation service. Any string that
-has been translated in past (or uploaded to the translation memory) can be
-translated in this way.
+Use :ref:`translation-memory` as a machine translation service.
+Any string that has been translated before (or uploaded to the
+translation memory) can be translated in this way.
+This suggestion source works with fuzzy matching.
+
+.. note::
+
+   Recreating :ref:`translation-memory` reduces capabilities of this TM source.
 
 .. _mt-yandex:
 
