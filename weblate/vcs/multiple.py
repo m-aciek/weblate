@@ -17,6 +17,7 @@ class MultipleRepositories(Repository):
     def __init__(
         self,
         path: str,
+        *,
         branch: str | None = None,
         component=None,
         local: bool = False,
