@@ -67,3 +67,7 @@ class MultipleRepositories(Repository):
     def update_remote(self) -> None:
         for repository in self.repositories:
             repository.update_remote()
+
+    def configure_branch(self, branch) -> None:
+        for repository in self.repositories:
+            repository.configure_branch(branch)
