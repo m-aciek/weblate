@@ -48,7 +48,7 @@ class MultipleRepositories(Repository):
         branches = loads(branch)
         repositories = []
         for key, repo in pull_urls.items():
-            repository = VCS_REGISTRY[repo["vcs"]](self.path, branches.get(key))
+            repository = VCS_REGISTRY[repo["vcs"]](self.path, branch=branches.get(key))
             repository.configure_remote(
                 repo["repo"], push_urls and push_urls.get(key), branches.get(key), fast
             )
