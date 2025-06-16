@@ -86,6 +86,7 @@ class Repository:
         component: Component | None = None,
         local: bool = False,
         skip_init: bool = False,
+        repo: str = None,
     ) -> None:
         self.path = path
         if branch is None:

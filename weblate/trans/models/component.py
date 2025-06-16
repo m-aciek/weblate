@@ -1315,7 +1315,7 @@ class Component(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
         """Get VCS repository object."""
         if self.linked_component is not None:
             return self.linked_component.repository
-        return self.repository_class(self.full_path, branch=self.branch, component=self)
+        return self.repository_class(self.full_path, branch=self.branch, component=self, repo=self.repo)
 
     @perform_on_link
     def get_last_remote_commit(self):
