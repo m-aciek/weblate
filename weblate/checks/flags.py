@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext, gettext_lazy
@@ -29,6 +29,18 @@ from weblate.trans.defines import VARIANT_KEY_LENGTH
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+
+def discard_flag_validation(name: str) -> None:
+    """Raise ValueError when parameter is not a valid flag name."""
+    if (
+        name not in TYPED_FLAGS
+        and name not in PLAIN_FLAGS
+        and name not in IGNORE_CHECK_FLAGS
+    ):
+        msg = f"Does not match flag name: {name}"
+        raise ValueError(msg)
+
+
 PLAIN_FLAGS = {
     v.enable_string: v.name
     for k, v in CHECKS.items()
@@ -47,13 +59,15 @@ PLAIN_FLAGS["url"] = gettext_lazy("URL")
 PLAIN_FLAGS["auto-java-messageformat"] = gettext_lazy(
     "Automatically detect Java MessageFormat"
 )
-PLAIN_FLAGS["read-only"] = gettext_lazy("Read only")
+PLAIN_FLAGS["read-only"] = gettext_lazy("Read-only")
 PLAIN_FLAGS["strict-same"] = gettext_lazy("Strict unchanged check")
 PLAIN_FLAGS["strict-format"] = gettext_lazy("Strict format string checks")
 PLAIN_FLAGS["forbidden"] = gettext_lazy("Forbidden translation")
 PLAIN_FLAGS["terminology"] = gettext_lazy("Terminology")
 PLAIN_FLAGS["ignore-all-checks"] = gettext_lazy("Ignore all checks")
 PLAIN_FLAGS["case-insensitive"] = gettext_lazy("Use case insensitive placeholders")
+
+DISCARD_FLAG = "discard"
 
 TYPED_FLAGS["font-family"] = gettext_lazy("Font family")
 TYPED_FLAGS_ARGS["font-family"] = single_value_flag(str)
@@ -79,6 +93,9 @@ TYPED_FLAGS_ARGS["variant"] = single_value_flag(
 )
 TYPED_FLAGS["fluent-type"] = gettext_lazy("Fluent type")
 TYPED_FLAGS_ARGS["fluent-type"] = single_value_flag(str)
+TYPED_FLAGS[DISCARD_FLAG] = gettext_lazy("Discard flag")
+TYPED_FLAGS_ARGS[DISCARD_FLAG] = single_value_flag(str, discard_flag_validation)
+
 
 IGNORE_CHECK_FLAGS = {check.ignore_string for check in CHECKS.values()} | set(
     AUTOFIXES.get_ignore_strings()
@@ -184,6 +201,8 @@ def parse_flags_xml(flags: etree._Element) -> Iterator[str | tuple[Any, ...]]:
 
 
 class Flags:
+    _apply_discard: ClassVar[bool] = True
+
     def __init__(self, *args) -> None:
         self._items: dict[str, str | tuple[Any, ...]] = {}
         for flags in args:
@@ -206,7 +225,15 @@ class Flags:
         self, flags: str | etree._Element | Flags | tuple[str | tuple[Any, ...]] | None
     ) -> None:
         for flag in self.get_items(flags):
-            if isinstance(flag, tuple):
+            if (
+                self._apply_discard
+                and isinstance(flag, tuple)
+                and len(flag) == 2
+                and flag[0] == DISCARD_FLAG
+            ):
+                # Discard the current value if present
+                self._items.pop(flag[1], None)
+            elif isinstance(flag, tuple):
                 self._items[flag[0]] = flag
             elif flag and flag not in {"fuzzy", "#"}:
                 # Ignore some flags
@@ -253,7 +280,7 @@ class Flags:
     def __iter__(self):
         return self._items.__iter__()
 
-    def __contains__(self, key) -> bool:
+    def __contains__(self, key: str) -> bool:
         return key in self._items
 
     def __bool__(self) -> bool:
@@ -315,3 +342,10 @@ class Flags:
 
     def set_value(self, name: str, value: str) -> None:
         self._items[name] = (name, value)
+
+    def has_any(self, flags: set[str]) -> bool:
+        return bool(flags & set(self._items.keys()))
+
+
+class FlagsValidator(Flags):
+    _apply_discard: ClassVar[bool] = False

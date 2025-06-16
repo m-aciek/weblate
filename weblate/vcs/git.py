@@ -14,8 +14,10 @@ import re
 import urllib.parse
 from configparser import NoOptionError, NoSectionError, RawConfigParser
 from json import JSONDecodeError, dumps
+from pathlib import Path
 from time import sleep, time
 from typing import TYPE_CHECKING, Any, NoReturn, NotRequired, TypedDict, cast
+from urllib.parse import urlparse, urlunparse
 from zipfile import ZipFile
 
 import requests
@@ -27,7 +29,7 @@ from django.utils.translation import gettext, gettext_lazy
 from git.config import GitConfigParser
 from requests.exceptions import HTTPError
 
-from weblate.utils.data import data_dir
+from weblate.utils.data import data_dir, data_path
 from weblate.utils.errors import report_error
 from weblate.utils.files import is_excluded, remove_tree
 from weblate.utils.lock import WeblateLock, WeblateLockTimeoutError
@@ -121,7 +123,9 @@ class GitRepository(Repository):
         raise RepositoryError(0, "Could not figure out remote branch")
 
     @staticmethod
-    def git_config_update(filename: str, *updates: tuple[str, str, str | None]) -> None:
+    def git_config_update(
+        filename: Path, *updates: tuple[str, str, str | None]
+    ) -> None:
         # First, open file read-only to check current settings
         modify = False
         with GitConfigParser(file_or_files=filename, read_only=True) as config:
@@ -150,13 +154,16 @@ class GitRepository(Repository):
                         continue
                     if old == value:
                         continue
-                except (NoSectionError, NoOptionError):
+                except NoSectionError:
+                    if value is not None:
+                        config.add_section(section)
+                except NoOptionError:
                     pass
                 if value is not None:
-                    config.set_value(section, key, value)
+                    config.set(section, key, value)
 
     def config_update(self, *updates: tuple[str, str, str | None]) -> None:
-        filename = os.path.join(self.path, ".git", "config")
+        filename = Path(self.path) / ".git" / "config"
         self.git_config_update(filename, *updates)
 
     def check_config(self) -> None:
@@ -164,16 +171,39 @@ class GitRepository(Repository):
         self.config_update(("push", "default", "current"))
 
     @staticmethod
-    def get_depth():
+    def get_depth() -> Iterator[str]:
         if settings.VCS_CLONE_DEPTH:
-            return ["--depth", str(settings.VCS_CLONE_DEPTH)]
+            yield "--depth"
+            yield str(settings.VCS_CLONE_DEPTH)
+
+    @staticmethod
+    def _get_auth_args(repo: str) -> Iterator[str]:
+        if repo.startswith("https://"):
+            parsed = urlparse(repo)
+            if parsed.password:
+                # proactive HTTP authentication, needs Git 2.46
+                yield "-c"
+                yield "http.proactiveAuth=auto"
+
+    def get_auth_args(self) -> list[str]:
+        if self.component:
+            return list(self._get_auth_args(self.component.repo))
         return []
 
     @classmethod
     def _clone(cls, source: str, target: str, branch: str) -> None:
         """Clone repository."""
         cls._popen(
-            ["clone", *cls.get_depth(), "--branch", branch, "--", source, target]
+            [
+                *cls._get_auth_args(source),
+                "clone",
+                *cls.get_depth(),
+                "--branch",
+                branch,
+                "--",
+                source,
+                target,
+            ]
         )
 
     def get_config(self, path):
@@ -200,7 +230,7 @@ class GitRepository(Repository):
             cmd = ["rebase"]
             cmd.extend(self.get_gpg_sign_args())
             cmd.append(self.get_remote_branch_name())
-            self.execute(cmd)
+            self.execute(cmd, environment={"WEBLATE_MERGE_SKIP": "1"})
         self.clean_revision_cache()
 
     def has_git_file(self, name):
@@ -457,6 +487,7 @@ class GitRepository(Repository):
     @classmethod
     def global_setup(cls) -> None:
         """Perform global settings."""
+        home = data_path("home")
         merge_driver = cls.get_merge_driver("po")
         updates = [
             ("user", "email", settings.DEFAULT_COMMITER_EMAIL),
@@ -483,7 +514,7 @@ class GitRepository(Repository):
                 )
             )
 
-        filename = os.path.join(data_dir("home"), ".gitconfig")
+        filename = home / ".gitconfig"
         attempts = 0
         while attempts < 5:
             try:
@@ -492,6 +523,12 @@ class GitRepository(Repository):
             except OSError:
                 attempts += 1
                 sleep(attempts * 0.1)
+
+        # Use it for *.po by default
+        configfile = home / ".config" / "git" / "attributes"
+        if configfile.parent.is_dir():
+            configfile.parent.mkdir(parents=True, exist_ok=True)
+            configfile.write_text("*.po merge=weblate-merge-gettext-po\n")
 
     def get_file(self, path, revision) -> str:
         """Return content of file at given revision."""
@@ -521,18 +558,19 @@ class GitRepository(Repository):
 
     def update_remote(self) -> None:
         """Update remote repository."""
-        self.execute(["remote", "prune", "origin"])
+        auth_args = self.get_auth_args()
+        self.execute([*auth_args, "remote", "prune", "origin"])
         if self.list_remote_branches():
             # Updating existing fork
-            self.execute(["fetch", "origin"])
+            self.execute([*auth_args, "fetch", "origin"])
         else:
             # Doing initial fetch
             try:
-                self.execute(["fetch", "origin", *self.get_depth()])
+                self.execute([*auth_args, "fetch", "origin", *self.get_depth()])
             except RepositoryError as error:
                 if error.retcode == 1 and not error.args[0]:
                     # Fetch with --depth fails on blank repo
-                    self.execute(["fetch", "origin"])
+                    self.execute([*auth_args, "fetch", "origin"])
                 else:
                     raise
 
@@ -544,7 +582,7 @@ class GitRepository(Repository):
         self.execute([*self._cmd_push, "origin", refspec])
 
     def unshallow(self) -> None:
-        self.execute(["fetch", "--unshallow"])
+        self.execute([*self.get_auth_args(), "fetch", "--unshallow"])
 
     def parse_changed_files(self, lines: list[str]) -> Iterator[str]:
         """Parse output with changed files."""
@@ -559,6 +597,9 @@ class GitRepository(Repository):
             result.extend(("", gettext("Possible cleanups:"), "", cleanups))
 
         return "\n".join(result)
+
+    def compact(self) -> None:
+        self.execute(["gc"])
 
 
 class GitWithGerritRepository(GitRepository):
@@ -815,7 +856,7 @@ class GitMergeRequestBase(GitForcePushRepository):
     ) -> tuple[str | None, str | None, str | None, str, str, str]:
         if repo is None:
             repo = self.component.push or self.component.repo
-        parsed = urllib.parse.urlparse(repo)
+        parsed = urlparse(repo)
         host = parsed.hostname
         scheme: str | None = parsed.scheme
         username: str | None = parsed.username
@@ -1010,8 +1051,8 @@ class GitMergeRequestBase(GitForcePushRepository):
 
     def authenticate_url(self, url: str, credentials: GitCredentials) -> str:
         """Inject credentials into URL."""
-        parsed_url = urllib.parse.urlparse(url)
-        return urllib.parse.urlunparse(
+        parsed_url = urlparse(url)
+        return urlunparse(
             (
                 parsed_url[0],
                 "{}:{}@{}".format(
@@ -1146,10 +1187,10 @@ class GitMergeRequestBase(GitForcePushRepository):
         self.log(f"HTTP {method} {url}")
         cache_id = self.request_time_cache_key
         lock = WeblateLock(
-            data_dir("home"),
-            f"vcs:api:{vcs_id}",
-            0,
-            vcs_id,
+            lock_path=data_dir("home"),
+            scope=f"vcs:api:{vcs_id}",
+            key=0,
+            slug=vcs_id,
             timeout=3 * max(settings.VCS_API_DELAY, 10),
         )
         try:
@@ -1934,10 +1975,7 @@ class GitLabRepository(GitMergeRequestBase):
             "post", credentials, pr_url, data=request
         )
 
-        if (
-            "web_url" not in response_data
-            and "open merge request already exists" not in error
-        ):
+        if "web_url" not in response_data and response.status_code != 409:
             self.failed_pull_request(error, pr_url, response, response_data)
 
 
@@ -2073,7 +2111,7 @@ class BitbucketServerRepository(GitMergeRequestBase):
         if "This repository URL is already taken." in error_message:
             page = 0
             self.bb_fork = {}
-            forks_url = f'{credentials["url"]}/forks'
+            forks_url = f"{credentials['url']}/forks"
             while True:
                 forks, response, error_message = self.request(
                     "get", credentials, forks_url, params={"limit": 1000, "start": page}
@@ -2145,7 +2183,7 @@ class BitbucketServerRepository(GitMergeRequestBase):
         if not self.bb_fork:
             self.create_fork(credentials)
 
-        pr_url = f'{credentials["url"]}/pull-requests'
+        pr_url = f"{credentials['url']}/pull-requests"
         title, description = self.get_merge_message()
         request_body = {
             "title": title,
@@ -2182,8 +2220,7 @@ class BitbucketServerRepository(GitMergeRequestBase):
         """
         if "id" not in response_data:
             pr_exist_message = (
-                "Only one pull request may be open "
-                "for a given source and target branch"
+                "Only one pull request may be open for a given source and target branch"
             )
             if pr_exist_message in error_message:
                 return

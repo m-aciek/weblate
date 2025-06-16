@@ -50,6 +50,8 @@ if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest
     from weblate.trans.models.component import ComponentQuerySet
 
+SESSION_CREATE_KEY = "session_component"
+
 
 class BaseCreateView(CreateView):
     def __init__(self, **kwargs) -> None:
@@ -60,6 +62,15 @@ class BaseCreateView(CreateView):
         kwargs = super().get_form_kwargs()
         kwargs["request"] = self.request
         return kwargs
+
+    def form_invalid(self, form):
+        messages.error(
+            self.request,
+            gettext(
+                "The supplied configuration is incorrect. Please check the errors below.",
+            ),
+        )
+        return super().form_invalid(form)
 
 
 @method_decorator(login_required, name="dispatch")
@@ -121,14 +132,11 @@ class CreateProject(BaseCreateView):
         if self.has_billing:
             from weblate.billing.models import Billing
 
-            billings = Billing.objects.get_valid().for_user(request.user).prefetch()
-            pks = set()
-            for billing in billings:
-                limit = billing.plan.display_limit_projects
-                if limit == 0 or billing.count_projects < limit:
-                    pks.add(billing.pk)
-            self.billings = Billing.objects.filter(pk__in=pks).prefetch()
+            self.billings = Billing.objects.for_user_within_limits(request.user)
         return super().dispatch(request, *args, **kwargs)
+
+    def get_success_url(self) -> str:
+        return f"{super().get_success_url()}#components"
 
 
 class ImportProject(CreateProject):
@@ -234,7 +242,10 @@ class CreateComponent(BaseCreateView):
                 result.pop("data", None)
                 result.pop("files", None)
             if self.has_all_fields() and not self.empty_form:
-                result["data"] = self.request.GET
+                if SESSION_CREATE_KEY in self.request.session:
+                    result["data"] = self.request.session[SESSION_CREATE_KEY]
+                else:
+                    result["data"] = self.request.GET
         return result
 
     def get_success_url(self):
@@ -379,8 +390,13 @@ class CreateComponent(BaseCreateView):
         else:
             self.projects = request.user.managed_projects
         self.initial = {}
+        session_data = {}
+        if SESSION_CREATE_KEY in request.GET and SESSION_CREATE_KEY in request.session:
+            session_data = request.session[SESSION_CREATE_KEY]
         for field in self.basic_fields:
-            if field in request.GET:
+            if field in session_data:
+                self.initial[field] = session_data[field]
+            elif field in request.GET:
                 self.initial[field] = request.GET[field]
 
         try:
@@ -389,8 +405,15 @@ class CreateComponent(BaseCreateView):
             self.duplicate_existing_component = None
 
     def has_all_fields(self):
+        session_data = {}
+        if (
+            SESSION_CREATE_KEY in self.request.GET
+            and SESSION_CREATE_KEY in self.request.session
+        ):
+            session_data = self.request.session[SESSION_CREATE_KEY]
         return self.stage == "init" and all(
-            field in self.request.GET for field in self.basic_fields
+            field in session_data or field in self.request.GET
+            for field in self.basic_fields
         )
 
     def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):
@@ -419,7 +442,7 @@ class CreateFromZip(CreateComponent):
 
         try:
             create_component_from_zip(form.cleaned_data)
-        except BadZipfile:
+        except (BadZipfile, OSError):
             form.add_error("zipfile", gettext("Could not parse uploaded ZIP file."))
             return self.form_invalid(form)
 
@@ -555,8 +578,13 @@ class CreateComponentSelection(CreateComponent):
         return ComponentSelectForm
 
     def redirect_create(self, **kwargs):
+        # Store params in session
+        self.request.session[SESSION_CREATE_KEY] = kwargs
+
         return redirect(
-            "{}?{}".format(reverse("create-component-vcs"), urlencode(kwargs))
+            "{}?{}".format(
+                reverse("create-component-vcs"), urlencode({SESSION_CREATE_KEY: 1})
+            )
         )
 
     def form_valid(self, form):

@@ -5,14 +5,22 @@
 from __future__ import annotations
 
 import re
+from collections import Counter, defaultdict
+from functools import cache, lru_cache
+from itertools import chain
 from typing import TYPE_CHECKING
 
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 from django.utils.functional import cached_property
-from django.utils.translation import gettext_lazy
+from django.utils.html import format_html_join
+from django.utils.safestring import mark_safe
+from django.utils.translation import gettext, gettext_lazy
+from docutils import utils
+from docutils.core import Publisher
+from docutils.nodes import Element, system_message
 
-from weblate.checks.base import TargetCheck
+from weblate.checks.base import MissingExtraDict, TargetCheck
 from weblate.utils.html import (
     MD_BROKEN_LINK,
     MD_LINK,
@@ -24,9 +32,12 @@ from weblate.utils.html import (
 from weblate.utils.xml import parse_xml
 
 if TYPE_CHECKING:
+    from django_stubs_ext import StrOrPromise
     from lxml.etree import _Element
 
     from weblate.trans.models import Unit
+
+    from .models import Check
 
 BBCODE_MATCH = re.compile(
     r"(?P<start>\[(?P<tag>[^]]+)(@[^]]*)?\])(.*?)(?P<end>\[\/(?P=tag)\])", re.MULTILINE
@@ -57,6 +68,36 @@ XML_ENTITY_MATCH = re.compile(
     re.VERBOSE,
 )
 
+RST_REF_MATCH = re.compile(
+    r"(?:(?<=\W)|^)((:[a-z:]+:)(?:`((?=[^< ])[^<]*?[^ ])`|`[^< ][^<]*?<([^<]+?)>`))(?!`)(?=\W|$)"
+)
+RST_FOOTNOTE_MATCH = re.compile(r"(?:(?<=\W)|^)(\[#[^]]+\]_)(?=\W|$)")
+RST_INLINE_LINK_MATCH = re.compile(r"(?:(?<=\W)|^)(`[^`<]*[^` <] <[^`> ]*>`_)(?=\W|$)")
+RST_LINK_MATCH = re.compile(r"(?:(?<=\W)|^)(`[^`<]*[^` <]`_)(?=\W|$)")
+
+
+# These should be present in translation if present in source, but might be translated
+RST_TRANSLATABLE = {
+    ":guilabel:",
+    ":file:",
+    ":code:",
+    ":math:",
+    ":eq:",
+    ":abbr:",
+    ":dfn:",
+    ":menuselection:",
+    ":sub:",
+    ":sup:",
+    ":kbd:",
+    ":index:",
+    ":samp:",
+}
+
+RST_ROLE_RE = [
+    re.compile(r"""Unknown interpreted text role "([^"]*)"\."""),
+    re.compile(r"""Interpreted text role "([^"]*)" not implemented\."""),
+]
+
 
 def strip_entities(text):
     """Strip all HTML entities (we don't care about them)."""
@@ -68,14 +109,17 @@ class BBCodeCheck(TargetCheck):
 
     check_id = "bbcode"
     name = gettext_lazy("BBCode markup")
-    description = gettext_lazy("BBCode in translation does not match source")
+    description = gettext_lazy("BBCode in translation does not match source.")
+    default_disabled = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.enable_string = "bbcode-text"
 
     def check_single(self, source: str, target: str, unit: Unit):
         # Parse source
         src_match = BBCODE_MATCH.findall(source)
-        # Any BBCode in source?
-        if not src_match:
-            return False
+
         # Parse target
         tgt_match = BBCODE_MATCH.findall(target)
         if len(src_match) != len(tgt_match):
@@ -149,7 +193,7 @@ class XMLValidityCheck(BaseXMLCheck):
 
     check_id = "xml-invalid"
     name = gettext_lazy("XML syntax")
-    description = gettext_lazy("The translation is not valid XML")
+    description = gettext_lazy("The translation is not valid XML.")
 
     def check_single(self, source: str, target: str, unit: Unit) -> bool:
         # Check if source is XML
@@ -174,7 +218,7 @@ class XMLTagsCheck(BaseXMLCheck):
 
     check_id = "xml-tags"
     name = gettext_lazy("XML markup")
-    description = gettext_lazy("XML tags in translation do not match source")
+    description = gettext_lazy("XML tags in translation do not match source.")
 
     def check_single(self, source: str, target: str, unit: Unit):
         # Check if source is XML
@@ -233,7 +277,7 @@ class MarkdownBaseCheck(TargetCheck):
 class MarkdownRefLinkCheck(MarkdownBaseCheck):
     check_id = "md-reflink"
     name = gettext_lazy("Markdown references")
-    description = gettext_lazy("Markdown link references do not match source")
+    description = gettext_lazy("Markdown link references do not match source.")
 
     def check_single(self, source: str, target: str, unit: Unit):
         src_match = MD_REFLINK.findall(source)
@@ -250,7 +294,7 @@ class MarkdownRefLinkCheck(MarkdownBaseCheck):
 class MarkdownLinkCheck(MarkdownBaseCheck):
     check_id = "md-link"
     name = gettext_lazy("Markdown links")
-    description = gettext_lazy("Markdown links do not match source")
+    description = gettext_lazy("Markdown links do not match source.")
 
     def check_single(self, source: str, target: str, unit: Unit):
         src_match = MD_LINK.findall(source)
@@ -279,7 +323,7 @@ class MarkdownLinkCheck(MarkdownBaseCheck):
 class MarkdownSyntaxCheck(MarkdownBaseCheck):
     check_id = "md-syntax"
     name = gettext_lazy("Markdown syntax")
-    description = gettext_lazy("Markdown syntax does not match source")
+    description = gettext_lazy("Markdown syntax does not match source.")
 
     @staticmethod
     def extract_match(match):
@@ -312,7 +356,7 @@ class MarkdownSyntaxCheck(MarkdownBaseCheck):
 class URLCheck(TargetCheck):
     check_id = "url"
     name = gettext_lazy("URL")
-    description = gettext_lazy("The translation does not contain an URL")
+    description = gettext_lazy("The translation does not contain an URL.")
     default_disabled = True
 
     @cached_property
@@ -332,7 +376,7 @@ class URLCheck(TargetCheck):
 class SafeHTMLCheck(TargetCheck):
     check_id = "safe-html"
     name = gettext_lazy("Unsafe HTML")
-    description = gettext_lazy("The translation uses unsafe HTML markup")
+    description = gettext_lazy("The translation uses unsafe HTML markup.")
     default_disabled = True
 
     def check_single(self, source: str, target: str, unit: Unit):
@@ -344,3 +388,222 @@ class SafeHTMLCheck(TargetCheck):
         cleaned_target = sanitizer.clean(target, source, unit.all_flags)
 
         return cleaned_target != target
+
+
+class RSTBaseCheck(TargetCheck):
+    default_disabled = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.enable_string = "rst-text"
+
+
+class RSTReferencesCheck(RSTBaseCheck):
+    check_id = "rst-references"
+    name = gettext_lazy("Inconsistent reStructuredText references")
+    description = gettext_lazy(
+        "Inconsistent reStructuredText term references in the translated message."
+    )
+
+    def extract_references(self, text: str) -> tuple[dict[str, str], Counter]:
+        result: list[tuple[str, str]] = [
+            (
+                role if role in RST_TRANSLATABLE else f"{role}{target or named_target}",
+                text,
+            )
+            for text, role, target, named_target in RST_REF_MATCH.findall(text)
+        ]
+        result.extend(
+            (footnote, footnote) for footnote in RST_FOOTNOTE_MATCH.findall(text)
+        )
+        return dict(result), Counter(item[0] for item in result)
+
+    def check_single(
+        self, source: str, target: str, unit: Unit
+    ) -> bool | MissingExtraDict:
+        src_references, src_set = self.extract_references(source)
+        tgt_references, tgt_set = self.extract_references(target)
+
+        errors: list[str] = []
+
+        missing = src_set - tgt_set
+        extra = tgt_set - src_set
+
+        src_links = len(RST_INLINE_LINK_MATCH.findall(source))
+        tgt_links = len(RST_INLINE_LINK_MATCH.findall(target))
+        if src_links != tgt_links:
+            errors.append(
+                gettext("Inconsistent inline links in the translated message.")
+            )
+        src_links = len(RST_LINK_MATCH.findall(source))
+        tgt_links = len(RST_LINK_MATCH.findall(target))
+        if src_links != tgt_links:
+            errors.append(
+                gettext("Inconsistent external links in the translated message.")
+            )
+        if missing or extra or errors:
+            return {
+                "missing": list(
+                    chain.from_iterable(
+                        [src_references[item]] if src_set[item] == 1 else [item] * count
+                        for item, count in missing.items()
+                    )
+                ),
+                "extra": list(
+                    chain.from_iterable(
+                        [tgt_references[item]] if tgt_set[item] == 1 else [item] * count
+                        for item, count in extra.items()
+                    )
+                ),
+                "errors": errors,
+            }
+        return False
+
+    def get_description(self, check_obj: Check) -> StrOrPromise:
+        unit = check_obj.unit
+
+        errors: list[StrOrPromise] = []
+        results: MissingExtraDict = defaultdict(list)
+
+        # Merge plurals
+        for result in self.check_target_generator(
+            unit.get_source_plurals(), unit.get_target_plurals(), unit
+        ):
+            if isinstance(result, dict):
+                for key, value in result.items():
+                    results[key].extend(value)
+        if results:
+            errors.extend(self.format_result(results))
+        if errors:
+            return format_html_join(
+                mark_safe("<br />"),
+                "{}",
+                ((error,) for error in errors),
+            )
+        return super().get_description(check_obj)
+
+    def check_highlight(self, source: str, unit: Unit):
+        if self.should_skip(unit):
+            return
+        for match in chain(
+            RST_REF_MATCH.finditer(source), RST_FOOTNOTE_MATCH.finditer(source)
+        ):
+            yield match.start(0), match.end(0), match.group(0)
+
+
+@cache
+def get_rst_publisher() -> Publisher:
+    publisher = Publisher(settings=None)
+    publisher.set_components("standalone", "restructuredtext", "null")
+    publisher.get_settings(
+        # Never halt parsing with an exception
+        halt_level=5,
+        # Do not allow file insertion
+        file_insertion_enabled=False,
+        # Following are needed in case django.contrib.admindocs is imported
+        # and registers own rst tags
+        default_reference_context="",
+        link_base="",
+    )
+    return publisher
+
+
+@lru_cache(maxsize=512)
+def validate_rst_snippet(
+    snippet: str, source_tags: tuple[str] | None = None
+) -> tuple[list[str], list[str]]:
+    publisher = get_rst_publisher()
+    document = utils.new_document(None, publisher.settings)
+    document.reporter.stream = None
+
+    errors: list[str] = []
+    roles: list[str] = []
+
+    def error_collector(data: system_message) -> None:
+        """Save the error."""
+        message = Element.astext(data)
+        if message.startswith("Unknown target name:") and "`" not in message:
+            # Translating targets is okay, just catch obvious errors
+            return
+        if message.startswith(
+            (
+                # Duplicates Unknown interpreted in our case
+                "No role entry",
+                # Can not work on snippets
+                "Too many autonumbered footnote",
+                # Can not work on snippets
+                "Enumerated list start value not ordinal",
+            )
+        ):
+            return
+        for rst_role_re in RST_ROLE_RE:
+            if match := rst_role_re.match(message):
+                role = match.group(1)
+                roles.append(role)
+                if source_tags is not None and role in source_tags:
+                    # Skip if the role was found in the source
+                    return
+        errors.append(message)
+
+    document.reporter.attach_observer(error_collector)
+    publisher.reader.parser.parse(snippet, document)
+    transformer = document.transformer
+    transformer.populate_from_components(
+        (
+            publisher.source,
+            publisher.reader,
+            publisher.reader.parser,
+            publisher.writer,
+            publisher.destination,
+        )
+    )
+    while transformer.transforms:
+        if not transformer.sorted:
+            # Unsorted initially, and whenever a transform is added.
+            transformer.transforms.sort()
+            transformer.transforms.reverse()
+            transformer.sorted = 1
+        priority, transform_class, pending, kwargs = transformer.transforms.pop()
+        transform = transform_class(transformer.document, startnode=pending)
+        transform.apply(**kwargs)
+        transformer.applied.append((priority, transform_class, pending, kwargs))
+    return errors, roles
+
+
+class RSTSyntaxCheck(RSTBaseCheck):
+    check_id = "rst-syntax"
+    name = gettext_lazy("reStructuredText syntax error")
+    description = gettext_lazy("reStructuredText syntax error in the translation.")
+
+    def check_single(
+        self, source: str, target: str, unit: Unit
+    ) -> bool | MissingExtraDict:
+        _errors, source_roles = validate_rst_snippet(source)
+        errors, _target_roles = validate_rst_snippet(target, tuple(source_roles))
+
+        if errors:
+            return {"errors": errors}
+        return False
+
+    def get_description(self, check_obj: Check) -> StrOrPromise:
+        unit = check_obj.unit
+
+        errors: list[StrOrPromise] = []
+        results: MissingExtraDict = defaultdict(list)
+
+        # Merge plurals
+        for result in self.check_target_generator(
+            unit.get_source_plurals(), unit.get_target_plurals(), unit
+        ):
+            if isinstance(result, dict):
+                for key, value in result.items():
+                    results[key].extend(value)
+        if results:
+            errors.extend(self.format_result(results))
+        if errors:
+            return format_html_join(
+                mark_safe("<br />"),
+                "{}",
+                ((error,) for error in errors),
+            )
+        return super().get_description(check_obj)

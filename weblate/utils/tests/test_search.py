@@ -10,6 +10,7 @@ from django.db.models import F, Q
 from django.test import TestCase
 
 from weblate.auth.models import User
+from weblate.trans.actions import ActionEvents
 from weblate.trans.models import Change, Project, Unit
 from weblate.trans.tests.test_views import ViewTestCase
 from weblate.trans.util import PLURAL_SEPARATOR
@@ -150,7 +151,7 @@ class UnitQueryParserTest(SearchTestCase):
                 datetime(2018, 1, 1, 0, 0, tzinfo=UTC),
                 datetime(2018, 12, 31, 23, 59, 59, 999999, tzinfo=UTC),
             )
-        ) & Q(change__action=Change.ACTION_MARKED_EDIT)
+        ) & Q(change__action=ActionEvents.MARKED_EDIT)
         self.assert_query(
             "change_time:2018 AND change_action:marked-for-edit", expected
         )
@@ -228,6 +229,23 @@ class UnitQueryParserTest(SearchTestCase):
         self.assert_query("state:translated", Q(state=STATE_TRANSLATED))
         self.assert_query("state:needs-editing", Q(state=STATE_FUZZY))
 
+    def test_source_state(self) -> None:
+        self.assert_query(
+            "source_state:>=empty", Q(source_unit__state__gte=STATE_EMPTY)
+        )
+        self.assert_query(
+            "source_state:>=translated", Q(source_unit__state__gte=STATE_TRANSLATED)
+        )
+        self.assert_query(
+            "source_state:<translated", Q(source_unit__state__lt=STATE_TRANSLATED)
+        )
+        self.assert_query(
+            "source_state:translated", Q(source_unit__state=STATE_TRANSLATED)
+        )
+        self.assert_query(
+            "source_state:needs-editing", Q(source_unit__state=STATE_FUZZY)
+        )
+
     def test_position(self) -> None:
         self.assert_query("position:>=1", Q(position__gte=1))
         self.assert_query("position:<10", Q(position__lt=10))
@@ -249,6 +267,44 @@ class UnitQueryParserTest(SearchTestCase):
             & (Q(source__substring="hello") | Q(source__substring="bar")),
         )
 
+    def test_priorities(self) -> None:
+        self.assertEqual(
+            parse_query("source:a AND target:b OR context:c"),
+            parse_query("(source:a AND target:b) OR context:c"),
+        )
+        self.assertEqual(
+            parse_query("context:c OR source:a AND target:b"),
+            parse_query("context:c OR (source:a AND target:b)"),
+        )
+
+    def test_implicit_mixed(self) -> None:
+        self.assertEqual(
+            parse_query("context:c source:a AND target:b"),
+            parse_query("context:c AND source:a AND target:b"),
+        )
+        self.assertEqual(
+            parse_query("context:c source:a OR target:b"),
+            parse_query("context:c AND source:a OR target:b"),
+        )
+        self.assertEqual(
+            parse_query("context:c source:a target:b"),
+            parse_query("context:c AND source:a AND target:b"),
+        )
+        self.assertEqual(
+            parse_query("context:c OR source:a target:b"),
+            parse_query("context:c OR source:a AND target:b"),
+        )
+        self.assertEqual(
+            parse_query("c is:translated"),
+            parse_query("(source:c OR target:c OR context:c) AND is:translated"),
+        )
+        self.assertEqual(
+            parse_query("c is:translated OR has:dismissed-check"),
+            parse_query(
+                "((source:c OR target:c OR context:c) AND is:translated) OR has:dismissed-check"
+            ),
+        )
+
     def test_language(self) -> None:
         self.assert_query("language:cs", Q(translation__language__code__iexact="cs"))
         self.assert_query(
@@ -258,8 +314,15 @@ class UnitQueryParserTest(SearchTestCase):
     def test_component(self) -> None:
         self.assert_query(
             "component:hello",
-            Q(translation__component__slug__iexact="hello")
+            Q(translation__component__slug__icontains="hello")
             | Q(translation__component__name__icontains="hello"),
+        )
+
+    def test_component_exact(self) -> None:
+        self.assert_query(
+            "component:=hello",
+            Q(translation__component__slug__iexact="hello")
+            | Q(translation__component__name__iexact="hello"),
         )
 
     def test_path(self) -> None:
@@ -288,6 +351,7 @@ class UnitQueryParserTest(SearchTestCase):
         self.assert_query("has:check", Q(check__dismissed=False))
         self.assert_query("has:comment", Q(comment__resolved=False))
         self.assert_query("has:note", ~Q(note=""))
+        self.assert_query("has:location", ~Q(location=""))
         self.assert_query("has:resolved-comment", Q(comment__resolved=True))
         self.assert_query("has:dismissed-check", Q(check__dismissed=True))
         self.assert_query("has:translation", Q(state__gte=STATE_TRANSLATED))
@@ -501,6 +565,10 @@ class UserQueryParserTest(SearchTestCase):
     def test_translates(self) -> None:
         self.assert_query(
             "translates:cs",
+            Q(change__language__code__iexact="cs"),
+        )
+        self.assert_query(
+            "translates:cs change_time:>'90 days ago'",
             Q(change__language__code__iexact="cs")
             & Q(
                 change__timestamp__gte=datetime.now(tz=UTC).replace(
@@ -513,17 +581,15 @@ class UserQueryParserTest(SearchTestCase):
     def test_contributes(self) -> None:
         self.assert_query(
             "contributes:test",
-            Q(change__project__slug__iexact="test")
-            & Q(
-                change__timestamp__gte=datetime.now(tz=UTC).replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                )
-                - timedelta(days=90)
-            ),
+            Q(change__project__slug__iexact="test"),
         )
         self.assert_query(
             "contributes:test/test",
-            Q(change__component_id__in=[])
+            Q(change__component_id__in=[]),
+        )
+        self.assert_query(
+            "contributes:test change_time:>'90 days ago'",
+            Q(change__project__slug__iexact="test")
             & Q(
                 change__timestamp__gte=datetime.now(tz=UTC).replace(
                     hour=0, minute=0, second=0, microsecond=0
@@ -567,7 +633,7 @@ class SearchTest(ViewTestCase, SearchTestCase):
 
     def test_glossary_match(self) -> None:
         glossary = self.project.glossaries[0].translation_set.get(language_code="cs")
-        glossary.add_unit(None, "", "hello", "ahoj")
+        glossary.add_unit(None, "", "hello", "ahoj", author=self.user)
 
         if using_postgresql():
             expected = "[[:<:]](hello)[[:>:]]"

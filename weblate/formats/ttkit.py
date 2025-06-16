@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
+import csv
 import importlib
 import inspect
 import os
 import re
 import subprocess
+from io import StringIO
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from django.core.exceptions import ValidationError
@@ -25,7 +27,7 @@ from translate.misc.multistring import multistring
 from translate.misc.xml_helpers import setXMLspace
 from translate.storage.base import TranslationStore
 from translate.storage.base import TranslationUnit as TranslateToolkitUnit
-from translate.storage.csvl10n import csv, csvunit
+from translate.storage.csvl10n import csvunit
 from translate.storage.jsonl10n import BaseJsonUnit, JsonFile
 from translate.storage.lisa import LISAfile
 from translate.storage.po import pofile, pounit
@@ -39,6 +41,7 @@ import weblate.utils.version
 from weblate.checks.flags import Flags
 from weblate.formats.base import (
     BilingualUpdateMixin,
+    MissingTemplateError,
     TranslationFormat,
     TranslationUnit,
     UpdateError,
@@ -196,6 +199,8 @@ class KeyValueUnit(TTKitUnit):
         """Return source string from a Translate Toolkit unit."""
         if self.template is not None:
             return get_string(self.template.source)
+        if self.unit is None:
+            raise MissingTemplateError
         return get_string(self.unit.name)
 
     @cached_property
@@ -265,7 +270,7 @@ class TTKitFormat(TranslationFormat):
             store.setsourcelanguage(self.source_language)
 
     def load(
-        self, storefile: str | BinaryIO, template_store: TranslationStore | None
+        self, storefile: str | BinaryIO, template_store: TranslationFormat | None
     ) -> TranslationStore:
         """Load file using defined loader."""
         if isinstance(storefile, TranslationStore):
@@ -275,7 +280,7 @@ class TTKitFormat(TranslationFormat):
         return self.parse_store(storefile)
 
     @classmethod
-    def get_class(cls):
+    def get_class(cls) -> TranslationStore:
         """Return class for handling this module."""
         # Direct class
         if inspect.isclass(cls.loader):
@@ -1127,6 +1132,7 @@ class BasePoFormat(TTKitFormat):
         plural = language.plural
 
         self.store.updateheader(
+            add=True,
             last_translator="Automatically generated",
             plural_forms=plural.plural_form,
             language_team="none",
@@ -1145,7 +1151,7 @@ class BasePoFormat(TTKitFormat):
         ):
             kwargs["Content_Type"] = "text/plain; charset=UTF-8"
 
-        self.store.updateheader(**kwargs)
+        self.store.updateheader(add=True, **kwargs)
 
     def add_unit(self, unit: TranslationUnit) -> None:
         self.store.require_index()
@@ -1445,7 +1451,9 @@ class AndroidFormat(TTKitFormat):
     loader = ("aresource", "AndroidResourceFile")
     monolingual = True
     unit_class = AndroidUnit
-    new_translation = '<?xml version="1.0" encoding="utf-8"?>\n<resources></resources>'
+    new_translation = (
+        '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n</resources>'
+    )
     autoload: tuple[str, ...] = ("strings*.xml", "values*.xml")
     language_format = "android"
     check_flags = ("java-printf-format",)
@@ -1463,6 +1471,12 @@ class MOKOFormat(AndroidFormat):
     name = gettext_lazy("Mobile Kotlin Resource")
     format_id = "moko-resource"
     loader = ("aresource", "MOKOResourceFile")
+
+
+class CMPFormat(AndroidFormat):
+    name = gettext_lazy("Compose Multiplatform Resource")
+    format_id = "cmp-resource"
+    loader = ("aresource", "CMPResourceFile")
 
 
 class DictStoreFormat(TTKitFormat):
@@ -1644,7 +1658,7 @@ class CSVFormat(TTKitFormat):
         if store.fieldnames != ["location", "source", "target"]:
             return store
 
-        fileobj = csv.StringIO(
+        fileobj = StringIO(
             store.detect_encoding(content, default_encodings=["utf-8", "utf-16"])[0]
         )
 
@@ -1863,7 +1877,7 @@ class INIFormat(TTKitFormat):
         return "ini"
 
     def load(
-        self, storefile: str | BinaryIO, template_store: TranslationStore | None
+        self, storefile: str | BinaryIO, template_store: TranslationFormat | None
     ) -> TranslationStore:
         store = super().load(storefile, template_store)
         # Adjust store to have translations
@@ -2016,18 +2030,29 @@ class XWikiFullPageFormat(XWikiPagePropertiesFormat):
 
 
 class TBXUnit(TTKitUnit):
-    def _get_notes(self, *origins: str) -> str:
-        notes = []
-        for origin in origins:
-            note = self.unit.getnotes(origin)
-            if note:
-                notes.append(note)
-        return "\n".join(notes)
+    unit: tbxunit
+
+    def _is_usage_node(self, node: etree.Element) -> bool:
+        return (
+            self.unit.namespaced("descrip") == node.tag
+            and node.get("type") == "Usage note"
+        )
 
     @cached_property
     def notes(self):
         """Return notes or notes from units."""
-        return self._get_notes("pos", "developer")
+        notes = []
+        for origin in ["pos", "developer"]:
+            note = self.unit.getnotes(origin)
+            if note:
+                notes.append(note)
+
+        for node in self.unit._getnotenodes(origin="definition"):  # noqa: SLF001
+            if self._is_usage_node(node):
+                notes.append(self.unit._getnodetext(node))  # noqa: SLF001
+                break
+
+        return "\n".join(notes)
 
     @cached_property
     def context(self):
@@ -2040,7 +2065,7 @@ class TBXUnit(TTKitUnit):
 
     @cached_property
     def explanation(self) -> str:
-        return self._get_notes("translator")
+        return self.unit.getnotes("translator")
 
     def set_source_explanation(self, explanation: str) -> None:
         if explanation or self.source_explanation:
@@ -2049,7 +2074,35 @@ class TBXUnit(TTKitUnit):
 
     @cached_property
     def source_explanation(self) -> str:
-        return self._get_notes("definition")
+        seen_notes = set()
+        notes = []
+        for node in self.unit._getnotenodes(origin="definition"):  # noqa: SLF001
+            if self._is_usage_node(node) or self.unit._is_translation_needed_node(node):  # noqa: SLF001
+                continue
+            note = self.unit._getnodetext(node)  # noqa: SLF001
+            if note not in seen_notes:
+                notes.append(note)
+                seen_notes.add(note)
+
+        return "\n".join(notes)
+
+    @cached_property
+    def flags(self):
+        flags = Flags(super().flags)
+
+        for node in self.unit._getnotenodes(origin="pos"):  # noqa: SLF001
+            # each tig in the two langsets in the termEntry can have the
+            # <termNote type="administrativeStatus">, consider forbidden
+            # if either of the two is forbidden/obsolete
+            if self.unit._is_administrative_status_term_node(node):  # noqa: SLF001
+                if self.unit._getnodetext(node).strip().lower() in {  # noqa: SLF001
+                    "forbidden",
+                    "obsolete",
+                }:
+                    flags.merge("forbidden")
+                break
+
+        return flags.format()
 
 
 class TBXFormat(TTKitFormat):
@@ -2063,6 +2116,7 @@ class TBXFormat(TTKitFormat):
     use_settarget = True
     monolingual = False
     supports_explanation: bool = True
+    store: tbxfile
 
     def __init__(
         self,
@@ -2172,6 +2226,7 @@ class FluentFormat(TTKitFormat):
     unit_class = FluentUnit
     autoload: tuple[str, ...] = ("*.ftl",)
     new_translation = ""
+    language_format: str = "bcp"
     check_flags = (
         "fluent-source-syntax",
         "fluent-target-syntax",

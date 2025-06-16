@@ -7,15 +7,17 @@
 import os
 from datetime import timedelta
 
+from django.contrib.staticfiles.testing import StaticLiveServerTestCase
 from django.core.management.color import no_style
 from django.db import connection, transaction
-from django.test import LiveServerTestCase, TestCase
+from django.test import TestCase
 from django.test.utils import override_settings
 from django.utils import timezone
 
 from weblate.auth.models import Group, User
 from weblate.checks.models import Check
 from weblate.lang.models import Language, Plural
+from weblate.trans.actions import ActionEvents
 from weblate.trans.exceptions import SuggestionSimilarToTranslationError
 from weblate.trans.models import (
     Announcement,
@@ -70,7 +72,7 @@ class BaseTestCase(TestCase):
         immediate_on_commit_leave(cls)
 
 
-class BaseLiveServerTestCase(LiveServerTestCase):
+class BaseLiveServerTestCase(StaticLiveServerTestCase):
     @classmethod
     def setUpTestData(cls) -> None:
         fixup_languages_seq()
@@ -143,7 +145,7 @@ class ProjectTest(RepoTestCase):
             )
             user = create_test_user()
             translation = component.translation_set.get(language_code="cs")
-            unit = translation.unit_set.all()[0]
+            unit = translation.unit_set.get(source="Hello, world!\n")
             suggestion = Suggestion.objects.add(unit, ["Test"], None)
             Vote.objects.create(suggestion=suggestion, value=Vote.POSITIVE, user=user)
         component.project.delete()
@@ -156,7 +158,7 @@ class ProjectTest(RepoTestCase):
             user = create_test_user()
             another_user = create_another_user()
             translation = component.translation_set.get(language_code="cs")
-            unit: Unit = translation.unit_set.all()[0]
+            unit = translation.unit_set.get(source="Hello, world!\n")
 
             unit.translate(user, "Translation of unit ", STATE_TRANSLATED)
 
@@ -557,7 +559,7 @@ class ChangeTest(ModelTestCase):
     def test_day_filtering(self) -> None:
         Change.objects.all().delete()
         for days_since in range(3):
-            change = Change.objects.create(action=Change.ACTION_CREATE_PROJECT)
+            change = Change.objects.create(action=ActionEvents.CREATE_PROJECT)
             change.timestamp -= timedelta(days=days_since)
             change.save()
 

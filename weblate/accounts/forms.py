@@ -7,7 +7,7 @@ from __future__ import annotations
 import base64
 import json
 from binascii import unhexlify
-from datetime import timedelta
+from datetime import datetime, timedelta
 from time import time
 from typing import TYPE_CHECKING, cast
 
@@ -20,7 +20,6 @@ from django.contrib.auth import authenticate, password_validation
 from django.contrib.auth.forms import SetPasswordForm as DjangoSetPasswordForm
 from django.db import transaction
 from django.middleware.csrf import rotate_token
-from django.utils import timezone
 from django.utils.functional import cached_property
 from django.utils.html import escape, format_html
 from django.utils.translation import activate, gettext, gettext_lazy, ngettext, pgettext
@@ -101,7 +100,7 @@ class PasswordField(forms.CharField):
             },
             render_value=False,
         )
-        kwargs["max_length"] = 256
+        kwargs["max_length"] = settings.MAXIMAL_PASSWORD_LENGTH
         kwargs["strip"] = False
         super().__init__(**kwargs)
 
@@ -115,7 +114,9 @@ class UniqueUsernameField(UsernameField):
             existing = User.objects.filter(username=value)
             if existing.exists() and value != self.valid:
                 raise forms.ValidationError(
-                    gettext("This username is already taken. Please choose another.")
+                    gettext(
+                        "This username is already taken. Please pick something else."
+                    )
                 )
 
         return super().clean(value)
@@ -195,7 +196,7 @@ class CommitForm(ProfileBaseForm):
         label=gettext_lazy("Commit e-mail"),
         choices=[("", gettext_lazy("Use account e-mail address"))],
         help_text=gettext_lazy(
-            "Used in version control commits. The address will stay in the repository forever once changes are committed by Weblate."
+            "Used in version-control commits. The address stays in the repository forever once changes are committed by Weblate."
         ),
         required=False,
         widget=forms.RadioSelect,
@@ -228,7 +229,7 @@ class ProfileForm(ProfileBaseForm):
 
     public_email = forms.ChoiceField(
         label=gettext_lazy("Public e-mail"),
-        choices=[("", gettext_lazy("Do not publicly display e-mail address"))],
+        choices=[("", gettext_lazy("Hide e-mail address from public view"))],
         required=False,
     )
 
@@ -236,6 +237,7 @@ class ProfileForm(ProfileBaseForm):
         model = Profile
         fields = (
             "website",
+            "contact",
             "public_email",
             "liberapay",
             "codesite",
@@ -274,6 +276,12 @@ class SubscriptionForm(ProfileBaseForm):
         user = kwargs["instance"].user
         self.fields["watched"].required = False
         self.fields["watched"].queryset = user.allowed_projects
+        # Create a mapping of project IDs to slugs
+        project_slug_map = {str(p.id): p.slug for p in user.allowed_projects}
+        # Add the data attribute with the JSON mapping
+        self.fields["watched"].widget.attrs["data-project-slugs"] = json.dumps(
+            project_slug_map
+        )
         self.helper = FormHelper(self)
         self.helper.disable_csrf = True
         self.helper.form_tag = False
@@ -294,6 +302,7 @@ class UserSettingsForm(ProfileBaseForm):
             "hide_source_secondary",
             "editor_link",
             "special_chars",
+            "contribute_personal_tm",
         )
 
     def __init__(self, *args, **kwargs) -> None:
@@ -422,7 +431,7 @@ class CaptchaWidget(forms.TextInput):
                 {
                     "algorithm": self.challenge.algorithm,
                     "challenge": self.challenge.challenge,
-                    "maxnumber": self.challenge.maxnumber,
+                    "maxnumber": self.challenge.max_number,
                     "salt": self.challenge.salt,
                     "signature": self.challenge.signature,
                 }
@@ -480,10 +489,15 @@ class CaptchaForm(forms.Form):
                 self.store_challenge()
 
     def generate_challenge(self) -> Challenge:
+        # The expires timestamp needs to be in the local time and not
+        # timezone aware because it is converted using time.mktime(expires.timetuple())
+        # and then compared to time.time()
+        expires = datetime.now(tz=None) + timedelta(hours=1)  # noqa: DTZ005
+
         challenge_options = ChallengeOptions(
             hmac_key=settings.SECRET_KEY,
             max_number=settings.ALTCHA_MAX_NUMBER,
-            expires=timezone.now() + timedelta(hours=2),
+            expires=expires,
         )
         self.challenge = create_challenge(challenge_options)
         return self.challenge
@@ -506,7 +520,7 @@ class CaptchaForm(forms.Form):
         if self.is_bound:
             self["captcha"].label = cast("str", self.fields["captcha"].label)
 
-    def store_challenge(self):
+    def store_challenge(self) -> None:
         self.request.session["captcha_challenge"] = self.challenge.challenge
 
     def clean_captcha(self) -> None:
@@ -542,8 +556,9 @@ class CaptchaForm(forms.Form):
 
     def is_valid(self) -> bool:
         result = super().is_valid()
-        self.cleanup_session()
-        if not result and self.has_captcha:
+        if result:
+            self.cleanup_session()
+        elif self.has_captcha:
             self.store_challenge()
         return result
 
@@ -566,8 +581,8 @@ class ContactForm(CaptchaForm):
         label=gettext_lazy("Message"),
         required=True,
         help_text=gettext_lazy(
-            "Please contact us in English, otherwise we might "
-            "be unable to process your request."
+            "Please contact us in English. Otherwise, we might "
+            "not process your request."
         ),
         max_length=2000,
         widget=forms.Textarea,
@@ -584,7 +599,7 @@ class EmailForm(CaptchaForm, UniqueEmailMixin):
 
     email = EmailField(
         label=gettext_lazy("E-mail"),
-        help_text=gettext_lazy("E-mail with a confirmation link will be sent here."),
+        help_text=gettext_lazy("An e-mail with a confirmation link will be sent here."),
     )
 
     field_order = ["email", "captcha"]
@@ -602,11 +617,15 @@ class RegistrationForm(EmailForm):
 
     field_order = ["email", "username", "fullname", "captcha"]
 
-    def __init__(self, request=None, data=None, initial=None) -> None:
+    def __init__(
+        self, request=None, data=None, initial=None, hide_captcha: bool = False
+    ) -> None:
         # The 'request' parameter is set for custom auth use by subclasses.
         # The form data comes in via the standard 'data' kwarg.
         self.request = request
-        super().__init__(request=request, data=data, initial=initial)
+        super().__init__(
+            request=request, data=data, initial=initial, hide_captcha=hide_captcha
+        )
 
     def clean(self):
         if not check_rate_limit("registration", self.request):
@@ -678,7 +697,7 @@ class EmptyConfirmForm(forms.Form):
 class PasswordConfirmForm(EmptyConfirmForm):
     password = PasswordField(
         label=gettext_lazy("Current password"),
-        help_text=gettext_lazy("Leave empty if you have not yet set a password."),
+        help_text=gettext_lazy("Leave empty if you have not set a password yet."),
         required=False,
     )
 
@@ -1007,7 +1026,9 @@ class UserSearchForm(forms.Form):
         sort_by = self.cleaned_data.get("sort_by")
         if sort_by:
             if sort_by not in self.sort_values:
-                raise forms.ValidationError(gettext("Chosen sorting is not supported."))
+                raise forms.ValidationError(
+                    gettext("The chosen sorting is not supported.")
+                )
             return sort_by
         return None
 
@@ -1066,10 +1087,10 @@ class TOTPDeviceForm(forms.Form):
     )
 
     error_messages = {
-        "invalid_token": gettext_lazy("Entered token is not valid."),
+        "invalid_token": gettext_lazy("The entered token is not valid."),
     }
 
-    def __init__(self, key, user, metadata=None, **kwargs):
+    def __init__(self, key, user, metadata=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.key = key
         self.tolerance = 1
@@ -1118,7 +1139,7 @@ class TOTPDeviceForm(forms.Form):
 class WebAuthnTokenForm(forms.Form):
     show_submit = False
 
-    def __init__(self, user, request=None, *args, **kwargs):
+    def __init__(self, user, request=None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         self.user = user
@@ -1136,12 +1157,12 @@ class OTPTokenForm(DjangoOTPTokenForm):
     otp_token = forms.CharField(
         label=gettext("Recovery token"),
         help_text=gettext(
-            "Recovery token can be used just once, mark your token as used after using it."
+            "Recovery codes can only be used once. Remember to mark used ones as expired."
         ),
     )
     device_class: type[Device] = StaticDevice
 
-    def __init__(self, user, request=None, *args, **kwargs):
+    def __init__(self, user, request=None, *args, **kwargs) -> None:
         super().__init__(user, request, *args, **kwargs)
         self.request = request
         self.fields["otp_device"].widget = forms.HiddenInput()
@@ -1154,7 +1175,7 @@ class OTPTokenForm(DjangoOTPTokenForm):
         self.helper = FormHelper(self)
         self.helper.form_tag = False
 
-    def _chosen_device(self, user):
+    def _chosen_device(self, user) -> None:
         return None
 
     @staticmethod
@@ -1199,7 +1220,7 @@ class TOTPTokenForm(OTPTokenForm):
     )
     device_class: type[Device] = TOTPDevice
 
-    def __init__(self, user, request=None, *args, **kwargs):
+    def __init__(self, user, request=None, *args, **kwargs) -> None:
         super().__init__(user, request, *args, **kwargs)
         self.fields["otp_token"].widget.attrs.update(
             {

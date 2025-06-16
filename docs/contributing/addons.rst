@@ -32,6 +32,10 @@ Developing add-ons
 
    ORM object for an unit.
 
+.. class:: Change
+
+   ORM object for an change.
+
 .. class:: User
 
    ORM object for an user.
@@ -39,6 +43,10 @@ Developing add-ons
 .. class:: TranslationFormat
 
    Translation file wrapper.
+
+.. class:: BaseAddonForm
+
+   Base form for configuring add-ons.
 
 Here is an example add-on:
 

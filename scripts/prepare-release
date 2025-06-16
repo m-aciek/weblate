@@ -24,13 +24,14 @@ fi
 
 . scripts/test-database.sh
 version=$(python -c 'import weblate.utils.version; print(weblate.utils.version.VERSION_BASE)')
-today=$(./manage.py shell -c 'from django.utils.dateformat import format; import datetime; print(format('"$datespec"', "F jS Y"))')
+today=$(./manage.py shell --no-imports -c 'from django.utils.dateformat import format; import datetime; print(format('"$datespec"', "F jS Y"))')
 
 sed -i "s/^VERSION =.*/VERSION = \"$version$suffix\"/" weblate/utils/version.py
-sed -i "s/^Not yet released./Released on $today./" docs/changes.rst
+sed -E -i "s/^\*(Not yet released.|Expected ).*/*Released on $today.*/" docs/changes.rst
 
 if [ -z "$suffix" ]; then
     ./scripts/list-contributors --update
+    ./scripts/compact-changes.py
 fi
 
 if ! git diff --exit-code --quiet; then

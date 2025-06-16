@@ -272,6 +272,7 @@ class AdminTest(ViewTestCase):
                     "backup_repository": "",
                     "expiry": timezone.now(),
                     "in_limits": True,
+                    "has_subscription": False,
                     "limits": {},
                 },
                 cls=DjangoJSONEncoder,
@@ -301,6 +302,7 @@ class AdminTest(ViewTestCase):
                         "backup_repository": tempdir,
                         "expiry": timezone.now(),
                         "in_limits": True,
+                        "has_subscription": True,
                         "limits": {},
                     },
                     cls=DjangoJSONEncoder,
@@ -415,36 +417,36 @@ class AdminTest(ViewTestCase):
 class TestThemeColorField(TestCase):
     """Tests for ThemeColorField widget."""
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.field = ThemeColorField()
         self.widget = ThemeColorWidget()
 
-    def test_decompress_two_colors(self):
+    def test_decompress_two_colors(self) -> None:
         value = "#ffffff,#000000"
         expected = ["#ffffff", "#000000"]
         self.assertEqual(self.widget.decompress(value), expected)
 
-    def test_decompress_one_color(self):
+    def test_decompress_one_color(self) -> None:
         value = "#ffffff"
         expected = ["#ffffff", "#ffffff"]
         self.assertEqual(self.widget.decompress(value), expected)
 
-    def test_decompress_no_value(self):
+    def test_decompress_no_value(self) -> None:
         value = None
         expected = [None, None]
         self.assertEqual(self.widget.decompress(value), expected)
 
-    def test_compress_two_colors(self):
+    def test_compress_two_colors(self) -> None:
         data_list = ["#ffffff", "#000000"]
         expected = "#ffffff,#000000"
         self.assertEqual(self.field.compress(data_list), expected)
 
-    def test_compress_one_color(self):
+    def test_compress_one_color(self) -> None:
         data_list = ["#ffffff", "#ffffff"]
         expected = "#ffffff,#ffffff"
         self.assertEqual(self.field.compress(data_list), expected)
 
-    def test_compress_no_data(self):
+    def test_compress_no_data(self) -> None:
         data_list = []
         expected = None
         self.assertEqual(self.field.compress(data_list), expected)

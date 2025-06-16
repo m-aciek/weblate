@@ -7,7 +7,7 @@
 :root {
   color-scheme: only light;
   --altcha-color-text: #2a3744;
-  --altcha-border-radius: var(--border-radius);
+  --altcha-border-radius: var(--border-radius-sm);
   --altcha-color-border: #cccccc;
 }
 
@@ -232,6 +232,8 @@ ul.legend li {
 .translator .form-group,
 .zen-unit .form-group {
   margin-bottom: 5px;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .translator .list-group {
@@ -284,6 +286,10 @@ textarea#id_check_flags {
   white-space: pre-wrap;
 }
 
+.hlcheck.disabled {
+  cursor: not-allowed;
+}
+
 .hlmatch {
   background-color: #eb3;
 }
@@ -291,13 +297,19 @@ textarea#id_check_flags {
 .hlspace,
 .nbsp,
 .token.newline {
-  outline: 1px dotted red;
   color: #bfc3c7;
   white-space: pre-wrap;
 }
+
+.hlspace,
+.nbsp {
+  outline: 1px dotted red;
+}
+
 .nbsp {
   white-space: nowrap !important;
 }
+
 .space-tab,
 .space-nl,
 .space-space,
@@ -306,6 +318,7 @@ textarea#id_check_flags {
   /* inline-block needed for proper ::before placement in Chrome */
   display: inline-block;
 }
+
 .space-tab::before {
   content: "→";
   position: relative;
@@ -314,7 +327,8 @@ textarea#id_check_flags {
 .space-nl::before,
 .token.newline::before {
   content: "↵";
-  position: relative;
+  position: absolute;
+  outline: 1px dotted red;
 }
 
 .space-space::before {
@@ -610,7 +624,7 @@ form + .login-label {
   border-radius: 0 5px 5px 5px;
   background-color: #e5f0f2;
   padding: 8px 10px;
-  word-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 .comment-content blockquote {
   border-left: 5px solid #ddd;
@@ -651,6 +665,16 @@ form + .login-label {
   right: 15px;
   transform: translateY(-100%);
   z-index: 10;
+}
+
+#nearby,
+#keys,
+#others,
+#translations,
+#history,
+#machinery,
+#comments {
+  overflow-x: auto;
 }
 
 @media only screen and (max-width: 600px) {
@@ -1224,9 +1248,17 @@ th.number {
 thead th {
   font-weight: normal;
 }
+.table > thead > tr > th,
+.table > tbody > tr > th,
+.table > tfoot > tr > th,
+.table > thead > tr > td,
+.table > tbody > tr > td,
+.table > tfoot > tr > td {
+  border-top: var(--border);
+}
 
 .table > thead > tr > th {
-  border-bottom: 1px solid #bfc3c7;
+  border-bottom: none;
 }
 
 .table-listing,
@@ -1561,6 +1593,16 @@ a.format-item:hover {
     -webkit-transform: rotate(359deg);
     transform: rotate(359deg);
   }
+}
+
+.label {
+  padding: .2em .6em;
+}
+
+h2 .label {
+  font-size: 12px;
+  vertical-align: middle;
+  text-transform: uppercase;
 }
 
 .label-box:empty {
@@ -1941,7 +1983,7 @@ a.language:hover {
   padding: 20px 0;
   margin: 0;
   border: 2px solid #e9eaec;
-  border-radius: 15px;
+  border-radius: calc(var(--border-radius) - 2px);
 }
 .metric-number {
   font-size: 40px;
@@ -2283,7 +2325,7 @@ tbody.warning {
 .sticky-bottom {
   position: sticky;
   bottom: 0;
-  background-color: white;
+  background-color: var(--background-color);
   z-index: 1000;
 }
 
@@ -2305,10 +2347,9 @@ tbody.warning {
 }
 
 .panel-default > .panel-heading {
-  background-color: #e9eaec60;
   border: var(--border);
 }
-.panel-danger > .panel-heading {
+.panel-heading {
   border-top-left-radius: var(--border-radius);
   border-top-right-radius: var(--border-radius);
 }
@@ -2334,4 +2375,50 @@ tbody.warning {
 
 .panel-title .pull-right.text-muted {
   padding: 0 0.5em;
+}
+
+table.table-simple tbody#glossary-terms {
+  table-layout: fixed;
+  width: 100%;
+}
+
+table.table-simple tbody#glossary-terms td {
+  word-break: break-word;
+  white-space: normal;
+}
+
+/* Editor styles when it has changes */
+.has-changes {
+  border: 1px solid #8a6d3b !important;
+}
+
+.widget-card {
+  border: var(--border);
+  border-radius: var(--border-radius-sm);
+  box-shadow: 0 2px 4px var(--widget-card-box-shadow-color);
+  margin-bottom: 20px;
+  padding: 15px;
+  background-color: var(--background-color);
+}
+
+.widget-card h4 {
+  margin-bottom: 15px;
+  font-weight: bold;
+}
+
+.widget-card .form-label {
+  font-weight: normal;
+}
+
+.widget-card .form-control {
+  margin-bottom: 10px;
+}
+
+.widget-card {
+  margin-top: 10px;
+}
+
+#embed-code-label {
+  font-size: 1.25em;
+  font-weight: bold;
 }

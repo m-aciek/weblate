@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 from glob import glob
 from operator import itemgetter
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
-from celery import current_task
 from celery.schedules import crontab
 from django.conf import settings
 from django.contrib.staticfiles.storage import staticfiles_storage
@@ -19,15 +19,16 @@ from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.db.models import Count, F
 from django.http import Http404
+from django.http.request import HttpRequest
 from django.utils import timezone
 from django.utils.timezone import make_aware
-from django.utils.translation import gettext, ngettext, override
+from django.utils.translation import override
 
 from weblate.addons.models import Addon
 from weblate.auth.models import User, get_anonymous
 from weblate.lang.models import Language
 from weblate.logger import LOGGER
-from weblate.machinery.base import MachineTranslationError
+from weblate.trans.actions import ActionEvents
 from weblate.trans.autotranslate import AutoTranslate
 from weblate.trans.exceptions import FileParseError
 from weblate.trans.models import (
@@ -49,6 +50,9 @@ from weblate.utils.stats import prefetch_stats
 from weblate.utils.views import parse_path
 from weblate.vcs.base import RepositoryError
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 @app.task(
     trail=False,
@@ -56,7 +60,17 @@ from weblate.vcs.base import RepositoryError
     retry_backoff=600,
     retry_backoff_max=3600,
 )
-def perform_update(cls, pk, auto=False, obj=None) -> None:
+def perform_update(
+    cls: Literal["Project", "Component"],
+    pk: int,
+    auto: bool = False,
+    obj=None,
+    user_id: int = 0,
+) -> None:
+    request: HttpRequest | None = None
+    if user_id:
+        request = HttpRequest()
+        request.user = User.objects.get(pk=user_id)
     try:
         if obj is None:
             if cls == "Project":
@@ -64,7 +78,7 @@ def perform_update(cls, pk, auto=False, obj=None) -> None:
             else:
                 obj = Component.objects.get(pk=pk)
         if settings.AUTO_UPDATE in {"full", True} or not auto:
-            obj.do_update()
+            obj.do_update(request)
         else:
             obj.update_remote_branch()
     except (FileParseError, RepositoryError, FileNotFoundError):
@@ -80,15 +94,18 @@ def perform_update(cls, pk, auto=False, obj=None) -> None:
 )
 def perform_load(
     pk: int,
+    *,
     force: bool = False,
+    force_scan: bool = False,
     langs: list[str] | None = None,
     changed_template: bool = False,
     from_link: bool = False,
     change: int | None = None,
 ) -> None:
     component = Component.objects.get(pk=pk)
-    component.create_translations_task(
+    component.create_translations_immediate(
         force=force,
+        force_scan=force_scan,
         langs=langs,
         changed_template=changed_template,
         from_link=from_link,
@@ -119,11 +136,18 @@ def perform_push(pk, *args, **kwargs) -> None:
 
 
 @app.task(trail=False)
-def commit_pending(hours=None, pks=None, logger=None) -> None:
+def commit_pending(
+    hours: int | None = None,
+    pks: set[int] | None = None,
+    logger: Callable[[str], None] | None = None,
+) -> None:
     if pks is None:
         components = Component.objects.all()
     else:
-        components = Component.objects.filter(translation__pk__in=pks).distinct()
+        components = Component.objects.filter(translation__pk__in=pks)
+
+    # All components with pending units
+    components = components.filter(translation__unit__pending=True).distinct()
 
     for component in prefetch_stats(components.prefetch()):
         age = timezone.now() - timedelta(
@@ -200,7 +224,7 @@ def cleanup_suggestions() -> None:
                 and suggestion.unit.translated
             ):
                 suggestion.delete_log(
-                    anonymous_user, change=Change.ACTION_SUGGESTION_CLEANUP
+                    anonymous_user, change=ActionEvents.SUGGESTION_CLEANUP
                 )
                 continue
 
@@ -212,7 +236,7 @@ def cleanup_suggestions() -> None:
             for other in sugs:
                 if other.target == suggestion.target:
                     suggestion.delete_log(
-                        anonymous_user, change=Change.ACTION_SUGGESTION_CLEANUP
+                        anonymous_user, change=ActionEvents.SUGGESTION_CLEANUP
                     )
                     break
 
@@ -353,19 +377,33 @@ def component_after_save(
     changed_setup: bool,
     changed_template: bool,
     changed_variant: bool,
+    changed_enforced_checks: bool,
     skip_push: bool,
     create: bool,
-):
+) -> dict[Literal["component"], int]:
     component = Component.objects.get(pk=pk)
     component.after_save(
         changed_git=changed_git,
         changed_setup=changed_setup,
         changed_template=changed_template,
         changed_variant=changed_variant,
+        changed_enforced_checks=changed_enforced_checks,
         skip_push=skip_push,
         create=create,
     )
     return {"component": pk}
+
+
+@app.task(
+    trail=False,
+    autoretry_for=(Component.DoesNotExist, WeblateLockTimeoutError),
+    retry_backoff=60,
+)
+@transaction.atomic
+def update_enforced_checks(component: int | Component) -> None:
+    if isinstance(component, int):
+        component = Component.objects.get(pk=component)
+    component.update_enforced_checks()
 
 
 @app.task(trail=False)
@@ -378,7 +416,7 @@ def component_removal(pk: int, uid: int) -> None:
         return
     component.acting_user = user
     component.project.change_set.create(
-        action=Change.ACTION_REMOVE_COMPONENT,
+        action=ActionEvents.REMOVE_COMPONENT,
         target=component.slug,
         user=user,
         author=user,
@@ -405,7 +443,7 @@ def category_removal(pk: int, uid: int) -> None:
     for component_id in category.component_set.values_list("id", flat=True):
         component_removal(component_id, uid)
     category.project.change_set.create(
-        action=Change.ACTION_REMOVE_CATEGORY,
+        action=ActionEvents.REMOVE_CATEGORY,
         target=category.slug,
         user=user,
         author=user,
@@ -432,7 +470,7 @@ def actual_project_removal(pk: int, uid: int | None) -> None:
         except Project.DoesNotExist:
             return
         Change.objects.create(
-            action=Change.ACTION_REMOVE_PROJECT,
+            action=ActionEvents.REMOVE_PROJECT,
             target=project.slug,
             user=user,
             author=user,
@@ -455,58 +493,33 @@ def project_removal(pk: int, uid: int | None) -> None:
     retry_backoff_max=3600,
 )
 def auto_translate(
+    *,
     user_id: int | None,
     translation_id: int,
     mode: str,
     filter_type: str,
-    auto_source: str,
+    auto_source: Literal["mt", "others"],
     component: int | None,
     engines: list[str],
     threshold: int,
-    *,
-    translation: Translation | None = None,
     component_wide: bool = False,
 ):
-    if translation is None:
-        translation = Translation.objects.get(pk=translation_id)
+    translation = Translation.objects.get(pk=translation_id)
     user = User.objects.get(pk=user_id) if user_id else None
-    translation.log_info(
-        "starting automatic translation %s: %s: %s",
-        current_task.request.id,
-        auto_source,
-        ", ".join(engines) if engines else component,
-    )
-    with translation.component.lock, override(user.profile.language if user else "en"):
+    with override(user.profile.language if user else "en"):
         auto = AutoTranslate(
-            user, translation, filter_type, mode, component_wide=component_wide
+            user=user,
+            translation=translation,
+            filter_type=filter_type,
+            mode=mode,
+            component_wide=component_wide,
         )
-        try:
-            if auto_source == "mt":
-                auto.process_mt(engines, threshold)
-            else:
-                auto.process_others(component)
-        except (MachineTranslationError, Component.DoesNotExist) as error:
-            translation.log_error("failed automatic translation: %s", error)
-            return {
-                "translation": translation_id,
-                "message": gettext("Automatic translation failed: %s") % error,
-            }
-
-        translation.log_info("completed automatic translation")
-
-        if auto.updated == 0:
-            message = gettext(
-                "Automatic translation completed, no strings were updated."
-            )
-        else:
-            message = (
-                ngettext(
-                    "Automatic translation completed, %d string was updated.",
-                    "Automatic translation completed, %d strings were updated.",
-                    auto.updated,
-                )
-                % auto.updated
-            )
+        message = auto.perform(
+            auto_source=auto_source,
+            engines=engines,
+            threshold=threshold,
+            source=component,
+        )
         return {"translation": translation_id, "message": message}
 
 
@@ -520,32 +533,34 @@ def auto_translate_component(
     component_id: int,
     mode: str,
     filter_type: str,
-    auto_source: str,
+    auto_source: Literal["mt", "others"],
     engines: list[str],
     threshold: int,
-    component: int | None,
+    component: int | None = None,
 ):
     component_obj = Component.objects.get(pk=component_id)
 
-    for translation in component_obj.translation_set.iterator():
-        if translation.is_source:
-            continue
+    with component_obj.lock:
+        for translation in component_obj.translation_set.iterator():
+            if translation.is_source:
+                continue
 
-        auto_translate(
-            None,
-            translation.pk,
-            mode,
-            filter_type,
-            auto_source,
-            component,
-            engines,
-            threshold,
-            translation=translation,
-            component_wide=True,
-        )
-    component_obj.update_source_checks()
-    component_obj.run_batched_checks()
-    return {"component": component_obj.id}
+            auto = AutoTranslate(
+                user=None,
+                translation=translation,
+                filter_type=filter_type,
+                mode=mode,
+                component_wide=True,
+            )
+            auto.perform(
+                auto_source=auto_source,
+                engines=engines,
+                threshold=threshold,
+                source=component,
+            )
+        component_obj.update_source_checks()
+        component_obj.run_batched_checks()
+        return {"component": component_obj.id}
 
 
 @app.task(trail=False)
@@ -557,7 +572,7 @@ def create_component(copy_from=None, copy_addons=False, in_task=False, **kwargs)
     # tasks in discovery
     component.full_clean()
     component.save(force_insert=True)
-    component.change_set.create(action=Change.ACTION_CREATE_COMPONENT)
+    component.change_set.create(action=ActionEvents.CREATE_COMPONENT)
     if copy_from:
         # Copy non-automatic component lists
         for clist in ComponentList.objects.filter(
@@ -582,6 +597,7 @@ def create_component(copy_from=None, copy_addons=False, in_task=False, **kwargs)
 
 
 @app.task(trail=False)
+@transaction.atomic
 def update_checks(pk: int, update_token: str, update_state: bool = False) -> None:
     try:
         component = Component.objects.get(pk=pk)
@@ -602,7 +618,10 @@ def update_checks(pk: int, update_token: str, update_state: bool = False) -> Non
         component.source_translation,
     )
     for translation in translations:
-        for unit in translation.unit_set.prefetch().prefetch_all_checks():
+        units = translation.unit_set.prefetch()
+        if update_state:
+            units = units.select_for_update()
+        for unit in units.prefetch_all_checks():
             if update_state:
                 unit.update_state()
             unit.run_checks()

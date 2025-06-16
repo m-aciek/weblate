@@ -18,7 +18,9 @@ import os
 import sys
 from pathlib import Path
 
+import sphinx.builders.gettext
 from matplotlib import font_manager
+from sphinx.util.tags import Tags
 
 # -- Path setup --------------------------------------------------------------
 
@@ -35,7 +37,16 @@ sys.path.append(str(file_dir / "_ext"))
 sys.path.append(str(weblate_dir))
 
 
+class WeblateTags(Tags):
+    def eval_condition(self, condition):
+        # Exclude blocks marked as not gettext
+        return condition != "not gettext"
+
+
 def setup(app) -> None:
+    # Monkey path gettext build tags handling, this is workaround until
+    # https://github.com/sphinx-doc/sphinx/issues/13307 is addressed.
+    sphinx.builders.gettext.I18nTags = WeblateTags
     # Used in Sphinx docs, needed for intersphinx links to it
     app.add_object_type(
         "confval",
@@ -66,7 +77,7 @@ project_copyright = "Michal Čihař"
 author = "Michal Čihař"
 
 # The full version, including alpha/beta/rc tags
-release = "5.9.2"
+release = "5.12.2"
 
 # -- General configuration ---------------------------------------------------
 
@@ -82,6 +93,7 @@ extensions = [
     "sphinx-jsonschema",
     "sphinx_copybutton",
     "sphinxext.opengraph",
+    "sphinx_reredirects",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -101,7 +113,14 @@ ogp_social_cards = {
     "image": "../weblate/static/logo-1024.png",
     "line_color": "#144d3f",
     "site_url": "docs.weblate.org",
-    "font": ["Source Sans 3", "Kurinto Sans"],
+    "font": [
+        "Source Sans 3",
+        "Kurinto Sans JP",
+        "Kurinto Sans KR",
+        "Kurinto Sans SC",
+        "Kurinto Sans TC",
+        "Kurinto Sans",
+    ],
 }
 ogp_custom_meta_tags = [
     '<meta property="fb:app_id" content="741121112629028" />',
@@ -247,6 +266,9 @@ graphviz_output_format = "svg"
 
 # Use localized Python docs on Read the Docs build
 language = os.environ.get("READTHEDOCS_LANGUAGE", "en")
+# RTD uses no but the correct code is nb
+if language == "no":
+    language = "nb"
 if "-" in language:
     # RTD normalized their language codes to ll-cc (e.g. zh-cn),
     # but Sphinx did not and still uses ll_CC (e.g. zh_CN).
@@ -287,9 +309,10 @@ if language in {
     "pt_BR",
     "sr",
     "zh_CN",
-    "zh_TW",
 }:
     sphinx_doc_url = f"https://www.sphinx-doc.org/{language}/master/"
+elif language in {"zh_TW", "ta"}:
+    sphinx_doc_url = f"https://www.sphinx-doc.org/{language}/latest/"
 
 if language != "en":
     tags.add("i18n")  # noqa: F821
@@ -314,6 +337,10 @@ intersphinx_mapping = {
     "borg": ("https://borgbackup.readthedocs.io/en/stable/", None),
     "pip": ("https://pip.pypa.io/en/stable/", None),
     "compressor": ("https://django-compressor.readthedocs.io/en/stable/", None),
+    "drf-standardized-error": (
+        "https://drf-standardized-errors.readthedocs.io/en/latest/",
+        None,
+    ),
 }
 intersphinx_disabled_reftypes = ["*"]
 
@@ -336,6 +363,7 @@ linkcheck_timeout = 10
 linkcheck_ignore = [
     # Local URL to Weblate
     "http://127.0.0.1:8080/",
+    "http://127.0.0.1:1080/",
     # Requires a valid token
     "https://api.deepl.com/v2/translate",
     # Requires authentication
@@ -346,9 +374,6 @@ linkcheck_ignore = [
     "https://docwiki.embarcadero.com/",
     # Example URL
     "https://my-instance.openai.azure.com",
-    # 403 for linkcheck
-    "https://docs.github.com/",
-    "https://translate.yandex.com/",
     # These are PDF and fails with Unicode decode error
     "http://ftp.pwg.org/",
     # Access to our service has been temporarily blocked
@@ -361,6 +386,11 @@ linkcheck_ignore = [
     # Seems unstable
     "https://pagure.io/",
     "https://azure.microsoft.com/en-us/products/ai-services/ai-translator",
+    # These seems to block bots/GitHub
+    "https://docs.github.com/",
+    "https://translate.yandex.com/",
+    "https://www.gnu.org/",
+    "https://dev.mysql.com/",
 ]
 
 # HTTP docs
@@ -370,15 +400,23 @@ http_strict_mode = True
 # Autodocs
 autodoc_mock_imports = [
     "django",
+    "unidecode",
+    "nh3",
+    "html2text",
+    "weblate_language_data",
     "celery",
     "sentry_sdk",
     "crispy_forms",
+    "social_django",
+    "social_core",
     "weblate.utils.errors",
     "weblate.trans.discovery",
     "weblate.checks.models",
     "weblate.trans.forms",
     "weblate.addons.forms",
     "weblate.trans.tasks",
+    "weblate.formats",
+    "weblate.trans.templatetags.translations",
     "dateutil",
     "filelock",
     "redis_lock",
@@ -396,8 +434,16 @@ autodoc_mock_imports = [
     "weblate.vcs.git",
     "weblate.utils.files",
     "weblate.utils.validators",
+    "django_otp",
+    "django_otp_webauthn",
+    "rest_framework",
 ]
 
 # Create single gettext PO file for while documentation,
 # instead of having one file per chapter.
 gettext_compact = "docs"
+
+redirects = {
+    "devel/thirdparty": "third-party.html",  # codespell:ignore thirdparty
+    "contributing/security": "security/index.html",
+}

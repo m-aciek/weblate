@@ -22,6 +22,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 from django.urls import reverse
+from google.api_core import exceptions as google_api_exceptions
 from google.cloud.translate import (
     SupportedLanguages,
     TranslateTextResponse,
@@ -29,7 +30,7 @@ from google.cloud.translate import (
 )
 
 import weblate.machinery.models
-from weblate.checks.tests.test_checks import MockTranslation, MockUnit
+from weblate.checks.tests.test_checks import MockUnit
 from weblate.configuration.models import Setting, SettingCategory
 from weblate.glossary.models import render_glossary_units_tsv
 from weblate.lang.models import Language
@@ -64,11 +65,13 @@ from weblate.machinery.yandex import YandexTranslation
 from weblate.machinery.yandexv2 import YandexV2Translation
 from weblate.machinery.youdao import YoudaoTranslation
 from weblate.trans.models import Project, Unit
-from weblate.trans.tests.test_views import FixtureTestCase
+from weblate.trans.tests.test_views import FixtureTestCase, ViewTestCase
 from weblate.trans.tests.utils import get_test_file
 from weblate.utils.classloader import load_class
 from weblate.utils.db import TransactionsTestMixin
 from weblate.utils.state import STATE_TRANSLATED
+
+from .types import SourceLanguageChoices
 
 if TYPE_CHECKING:
     from requests import PreparedRequest
@@ -262,7 +265,7 @@ class BaseMachineTranslationTest(TestCase):
     SUPPORTED = "cs"
     SUPPORTED_VARIANT = "cs_CZ"
     NOTSUPPORTED: str | None = "tg"
-    NOTSUPPORTED_VARIANT = "de_CZ"
+    NOTSUPPORTED_VARIANT = "fr_CZ"
     SOURCE_BLANK = "Hello"
     SOURCE_TRANSLATED = "Hello, world!"
     EXPECTED_LEN = 2
@@ -450,7 +453,7 @@ class GlossaryTranslationTest(BaseMachineTranslationTest):
     MACHINE_CLS = DummyGlossaryTranslation
 
     @patch("weblate.glossary.models.get_glossary_tsv", new=lambda _: "foo\tbar")
-    def test_translate(self):
+    def test_translate(self) -> None:
         """Test glossary translation."""
         machine = self.get_machine()
         self.assertEqual(machine.list_glossaries(), {})
@@ -476,11 +479,12 @@ class GlossaryTranslationTest(BaseMachineTranslationTest):
         super().test_translate()
         list_glossaries_patcher.stop()
 
-    def test_glossary_cleanup(self):
+    def test_glossary_cleanup(self) -> None:
         """
         Test cleanup of glossary TSV content.
 
         Any problematic leading character is removed from term
+        Leading and trailing whitespaces are stripped
         """
         unit = MockUnit(code="cs", source="foo", target="bar")
         self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
@@ -499,17 +503,37 @@ class GlossaryTranslationTest(BaseMachineTranslationTest):
         unit = MockUnit(code="cs", source="%foo", target="%bar")
         self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
 
-        # # multiple prohibited characters are cleaned
+        # multiple prohibited characters are cleaned
         unit = MockUnit(code="cs", source="==foo", target="==bar")
         self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
 
-        # # no character cleaned
+        # whitespace correctly stripped
+        unit = MockUnit(code="cs", source=" foo  ", target=" bar  ")
+        self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
+
+        # whitespaces after prohibited characters correctly stripped
+        unit = MockUnit(code="cs", source="% foo  ", target="% bar  ")
+        self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
+        unit = MockUnit(code="cs", source="% foo  ", target="% % bar  ")
+        self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
+
+        # other Unicode whitespaces are correctly stripped
+        unit = MockUnit(code="cs", source="\r- foo", target="bar")
+        self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
+        unit = MockUnit(code="cs", source="|\u00a0foo", target="bar")
+        self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
+        unit = MockUnit(code="cs", source="\n\nfoo", target="bar")
+        self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
+        unit = MockUnit(code="cs", source="%\u2002foo  ", target="%bar")
+        self.assertEqual(render_glossary_units_tsv([unit]), "foo\tbar")
+
+        # no character cleaned
         unit = MockUnit(code="cs", source="foo=", target="bar=")
         self.assertEqual(render_glossary_units_tsv([unit]), "foo=\tbar=")
         unit = MockUnit(code="cs", source=":foo", target=":bar")
         self.assertEqual(render_glossary_units_tsv([unit]), ":foo\t:bar")
 
-    def test_glossary_changes_invalidates_result_cache(self):
+    def test_glossary_changes_invalidates_result_cache(self) -> None:
         machine = self.get_machine(cache=True)
         source_text = "Hello, world!"
         unit = MockUnit(code="cs", source=source_text, target="")
@@ -565,6 +589,7 @@ class GlosbeTranslationTest(BaseMachineTranslationTest):
             status=429,
         )
 
+    @responses.activate
     def test_ratelimit(self) -> None:
         """Test rate limit response handling."""
         # This raises an exception
@@ -643,7 +668,7 @@ class ApertiumAPYTranslationTest(BaseMachineTranslationTest):
         )
 
     @responses.activate
-    def test_validate_settings(self):
+    def test_validate_settings(self) -> None:
         self.mock_response()
         machine = self.get_machine()
         machine.validate_settings()
@@ -695,8 +720,7 @@ class MicrosoftCognitiveTranslationTest(BaseMachineTranslationTest):
         )
         responses.add(
             responses.GET,
-            "https://api.cognitive.microsofttranslator.com/"
-            "languages?api-version=3.0",
+            "https://api.cognitive.microsofttranslator.com/languages?api-version=3.0",
             json=MS_SUPPORTED_LANG_RESP,
         )
         responses.add(
@@ -718,6 +742,13 @@ class MicrosoftCognitiveTranslationTest(BaseMachineTranslationTest):
             json=MICROSOFT_RESPONSE,
         )
 
+    def test_map_codes(self) -> None:
+        machine = self.get_machine()
+        self.assertEqual(machine.map_language_code("zh_Hant"), "zh-Hant")
+        self.assertEqual(machine.map_language_code("zh_TW"), "zh-Hant")
+        self.assertEqual(machine.map_language_code("fr_CA"), "fr-ca")
+        self.assertEqual(machine.map_language_code("iu_Latn"), "iu-Latn")
+
 
 class MicrosoftCognitiveTranslationRegionTest(MicrosoftCognitiveTranslationTest):
     CONFIGURATION = {
@@ -736,8 +767,7 @@ class MicrosoftCognitiveTranslationRegionTest(MicrosoftCognitiveTranslationTest)
         )
         responses.add(
             responses.GET,
-            "https://api.cognitive.microsofttranslator.com/"
-            "languages?api-version=3.0",
+            "https://api.cognitive.microsofttranslator.com/languages?api-version=3.0",
             json=MS_SUPPORTED_LANG_RESP,
         )
         responses.add(
@@ -901,6 +931,41 @@ class GoogleV3TranslationTest(BaseMachineTranslationTest):
 
     @patch("weblate.glossary.models.get_glossary_tsv", new=lambda _: "foo\tbar")
     @patch("weblate.machinery.googlev3.GoogleV3Translation.glossary_count_limit", new=1)
+    def test_glossary_with_exception(self) -> None:
+        self.mock_languages()
+        self.mock_glossary_responses()
+        self.CONFIGURATION["bucket_name"] = "test-bucket"
+
+        mock_blob = self.mock_blob(fail_delete=True)
+        mock_bucket = self.mock_bucket(mock_blob)
+
+        with (
+            patch.object(
+                TranslationServiceClient,
+                "create_glossary",
+                Mock(
+                    side_effect=google_api_exceptions.AlreadyExists(
+                        "Glossary already exists"
+                    )
+                ),
+            ),
+            patch.object(
+                TranslationServiceClient,
+                "delete_glossary",
+                Mock(
+                    side_effect=google_api_exceptions.NotFound("Glossary was not found")
+                ),
+            ),
+            patch(
+                "google.cloud.storage.Client", new=self.mock_storage_client(mock_bucket)
+            ),
+        ):
+            self.assert_translate(
+                self.SUPPORTED, self.SOURCE_TRANSLATED, self.EXPECTED_LEN
+            )
+
+    @patch("weblate.glossary.models.get_glossary_tsv", new=lambda _: "foo\tbar")
+    @patch("weblate.machinery.googlev3.GoogleV3Translation.glossary_count_limit", new=1)
     def test_glossary_with_calls_check(self) -> None:
         self.mock_languages()
         self.mock_glossary_responses()
@@ -1011,26 +1076,42 @@ class GoogleV3TranslationTest(BaseMachineTranslationTest):
         get_credentials_patcher.start()
         self.addCleanup(get_credentials_patcher.stop)
 
-        class MockBlob(MagicMock):
-            def upload_from_string(self, *args, **kwargs):
-                """Mock google.cloud.storage.Blob.upload_from_string."""
+        mock_blob = self.mock_blob()
+        mock_bucket = self.mock_bucket(mock_blob)
+        patcher = patch(
+            "google.cloud.storage.Client", new=self.mock_storage_client(mock_bucket)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-            def delete(self, *args, **kwargs):
-                """Mock google.cloud.storage.Blob.delete."""
-
-        class MockBucket(MagicMock):
-            def blob(self, *args, **kwargs):
-                """Mock google.cloud.storage.Bucket.blob."""
-                return MockBlob()
-
+    def mock_storage_client(self, mock_bucket: type[MagicMock]) -> type[MagicMock]:
         class MockStorageClient(MagicMock):
             def get_bucket(self, *args, **kwargs):
                 """google.cloud.storage.Client.get_bucket."""
-                return MockBucket()
+                return mock_bucket()
 
-        patcher = patch("google.cloud.storage.Client", new=MockStorageClient)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        return MockStorageClient
+
+    def mock_bucket(self, mock_blob: type[MagicMock]) -> type[MagicMock]:
+        class MockBucket(MagicMock):
+            def blob(self, *args, **kwargs):
+                """Mock google.cloud.storage.Bucket.blob."""
+                return mock_blob()
+
+        return MockBucket
+
+    def mock_blob(self, *args, fail_delete: bool = False, **kwargs) -> type[MagicMock]:
+        class MockBlob(MagicMock):
+            def upload_from_string(self, *args, **kwargs) -> None:
+                """Mock google.cloud.storage.Blob.upload_from_string."""
+
+            def delete(self, *args, **kwargs) -> None:
+                """Mock google.cloud.storage.Blob.delete."""
+                if fail_delete:
+                    faile_message = "Blob file was not found"
+                    raise google_api_exceptions.NotFound(faile_message)
+
+        return MockBlob
 
 
 class TMServerTranslationTest(BaseMachineTranslationTest):
@@ -1401,7 +1482,7 @@ class ModernMTHubTest(BaseMachineTranslationTest):
 
         self.mock_list_glossaries()
 
-    def mock_list_glossaries(self, *id_name_date: tuple[int, str, str | None]):
+    def mock_list_glossaries(self, *id_name_date: tuple[int, str, str | None]) -> None:
         """Set up mock responses for list of glossaries in ModernMT."""
         data: list[dict] = [
             {
@@ -1461,7 +1542,7 @@ class ModernMTHubTest(BaseMachineTranslationTest):
         )
 
     @responses.activate
-    def test_glossary(self) -> None:
+    def test_glossary(self, fail_delete_glossary: bool = False) -> None:
         """Test that glossary is used in translation request when available."""
 
         def translate_request_callback(request: PreparedRequest):
@@ -1515,19 +1596,24 @@ class ModernMTHubTest(BaseMachineTranslationTest):
                 self.SUPPORTED, self.SOURCE_TRANSLATED, self.EXPECTED_LEN
             )
 
-        # stale glossary delete
-        responses.add_callback(
-            responses.DELETE,
-            re.compile(r"https://api.modernmt.com/memories/(\d+)"),
-            callback=partial(delete_glossary_callback, expected_id=37785),
-        )
+        if fail_delete_glossary:
+            responses.delete(
+                re.compile(r"https://api.modernmt.com/memories/(\d+)"), status=404
+            )
+        else:
+            # stale glossary delete
+            responses.add_callback(
+                responses.DELETE,
+                re.compile(r"https://api.modernmt.com/memories/(\d+)"),
+                callback=partial(delete_glossary_callback, expected_id=37785),
+            )
 
-        # oldest glossary delete
-        responses.add_callback(
-            responses.DELETE,
-            re.compile(r"https://api.modernmt.com/memories/(\d+)"),
-            callback=partial(delete_glossary_callback, expected_id=37782),
-        )
+            # oldest glossary delete
+            responses.add_callback(
+                responses.DELETE,
+                re.compile(r"https://api.modernmt.com/memories/(\d+)"),
+                callback=partial(delete_glossary_callback, expected_id=37782),
+            )
 
         # change count limit, check that the oldest glossary is deleted
         self.mock_list_glossaries(
@@ -1591,6 +1677,9 @@ class ModernMTHubTest(BaseMachineTranslationTest):
             self.assert_translate(
                 self.SUPPORTED, self.SOURCE_TRANSLATED, self.EXPECTED_LEN
             )
+
+    def test_glossary_with_delete_fail(self):
+        self.test_glossary(fail_delete_glossary=True)
 
     @responses.activate
     def test_context_vector(self) -> None:
@@ -1800,6 +1889,80 @@ class DeepLTranslationTest(BaseMachineTranslationTest):
         self.assert_translate(self.SUPPORTED, self.SOURCE_TRANSLATED, self.EXPECTED_LEN)
 
     @responses.activate
+    @patch("weblate.glossary.models.get_glossary_tsv", new=lambda _: "foo\tbar")
+    def test_glossary_with_failed_delete(self) -> None:
+        """Test handling of glossary deletion failure scenario."""
+        with patch(
+            "weblate.machinery.deepl.DeepLTranslation.glossary_count_limit",
+            new=1,
+        ):
+            self.mock_languages()
+            # list glossaries to find matching name
+            responses.get(
+                "https://api.deepl.com/v2/glossaries",
+                json={
+                    "glossaries": [
+                        {
+                            "glossary_id": "8f54a21b-475f-42c2-bf8d-1a0a9f6543e2",
+                            "name": "weblate:1:EN:DE:4a8f2d980d32c9a5",
+                            "ready": True,
+                            "source_lang": "EN",
+                            "target_lang": "DE",
+                            "creation_time": "2021-08-02T14:16:18.329Z",
+                            "entry_count": 1,
+                        }
+                    ]
+                },
+            )
+            # list glossaries before deleting
+            responses.get(
+                "https://api.deepl.com/v2/glossaries",
+                json={
+                    "glossaries": [
+                        {
+                            "glossary_id": "8f54a21b-475f-42c2-bf8d-1a0a9f6543e2",
+                            "name": "weblate:1:EN:DE:4a8f2d980d32c9a5",
+                            "ready": True,
+                            "source_lang": "EN",
+                            "target_lang": "DE",
+                            "creation_time": "2021-08-02T14:16:18.329Z",
+                            "entry_count": 1,
+                        }
+                    ]
+                },
+            )
+            # delete oldest glossary
+            responses.delete(
+                "https://api.deepl.com/v2/glossaries/8f54a21b-475f-42c2-bf8d-1a0a9f6543e2",
+                json={"message": "Invalid or missing glossary id"},
+                status=400,
+            )
+            # create new glossary
+            responses.post("https://api.deepl.com/v2/glossaries")
+            # list glossaries with new entry
+            responses.get(
+                "https://api.deepl.com/v2/glossaries",
+                json={
+                    "glossaries": [
+                        {
+                            "glossary_id": "def3a26b-3e84-45b3-84ae-0c0aaf3525f7",
+                            "name": "weblate:1:EN:DE:9e250d830c11d70f",
+                            "ready": True,
+                            "source_lang": "EN",
+                            "target_lang": "DE",
+                            "creation_time": "2021-08-03T14:16:18.329Z",
+                            "entry_count": 1,
+                        }
+                    ]
+                },
+            )
+
+            responses.post("https://api.deepl.com/v2/translate", json=DEEPL_RESPONSE)
+            self.assert_translate(
+                self.SUPPORTED, self.SOURCE_TRANSLATED, self.EXPECTED_LEN
+            )
+
+    @responses.activate
     def test_replacements(self) -> None:
         def request_callback(request: PreparedRequest):
             payload = json.loads(request.body)
@@ -1856,6 +2019,30 @@ class DeepLTranslationTest(BaseMachineTranslationTest):
             self.SUPPORTED, self.SOURCE_TRANSLATED, self.EXPECTED_LEN, machine=machine
         )
         self.assertEqual(len(responses.calls), 0)
+
+    def test_api_url(self) -> None:
+        self.assertEqual(
+            self.MACHINE_CLS(self.CONFIGURATION).api_base_url,
+            "https://api.deepl.com/v2",
+        )
+        self.assertEqual(
+            self.MACHINE_CLS(
+                {
+                    "key": "KEY:fx",
+                    "url": "https://api.deepl.com/v2",
+                }
+            ).api_base_url,
+            "https://api-free.deepl.com/v2",
+        )
+        self.assertEqual(
+            self.MACHINE_CLS(
+                {
+                    "key": "KEY:fx",
+                    "url": "https://example.com/v2",
+                }
+            ).api_base_url,
+            "https://example.com/v2",
+        )
 
 
 class LibreTranslateTranslationTest(BaseMachineTranslationTest):
@@ -2039,131 +2226,152 @@ class AWSTranslationTest(BaseMachineTranslationTest):
         # Stubbing here is tricky
         self.skipTest("Not tested")
 
-    @patch("weblate.glossary.models.get_glossary_tsv", new=lambda _: "foo\tbar")
-    def test_glossary(self) -> None:
-        """Test translation with glossary (terminology)."""
-        machine = self.get_machine()
+    def setup_stubber_with_glossaries(
+        self, machine: BatchMachineTranslation, fail_delete: bool = True
+    ) -> Stubber:
+        """Set up stubber for translation with glossary test."""
+        stubber = Stubber(machine.client)
 
-        with (
-            Stubber(machine.client) as stubber,
-            patch(
-                "weblate.machinery.aws.AWSTranslation.glossary_count_limit",
-                new=1,
-            ),
-        ):
-            stubber.add_response(
-                "list_languages",
-                AWS_LANGUAGES_RESPONSE,
-            )
-            # glossary list with stale glossary response
-            stubber.add_response(
-                "list_terminologies",
-                {
-                    "TerminologyPropertiesList": [
-                        {
-                            "Name": "weblate_-_1_-_en_-_de_-_a85e314d2f7614eb",
-                            "SourceLanguageCode": "en",
-                            "TargetLanguageCodes": ["de"],
-                            "CreatedAt": "2021-03-03T14:16:18.329Z",
-                            "Directionality": "UNI",
-                            "Format": "TSV",
-                        }
-                    ]
-                },
-            )
+        stubber.add_response(
+            "list_languages",
+            AWS_LANGUAGES_RESPONSE,
+        )
+        # glossary list with stale glossary response
+        stubber.add_response(
+            "list_terminologies",
+            {
+                "TerminologyPropertiesList": [
+                    {
+                        "Name": "weblate_-_1_-_en_-_de_-_a85e314d2f7614eb",
+                        "SourceLanguageCode": "en",
+                        "TargetLanguageCodes": ["de"],
+                        "CreatedAt": "2021-03-03T14:16:18.329Z",
+                        "Directionality": "UNI",
+                        "Format": "TSV",
+                    }
+                ]
+            },
+        )
 
-            # glossary list with stale glossary response
-            stubber.add_response(
-                "list_terminologies",
-                {
-                    "TerminologyPropertiesList": [
-                        {
-                            "Name": "weblate_-_1_-_en_-_de_-_a85e314d2f7614eb",
-                            "SourceLanguageCode": "en",
-                            "TargetLanguageCodes": ["de"],
-                            "CreatedAt": "2021-03-03T14:16:18.329Z",
-                            "Directionality": "UNI",
-                            "Format": "TSV",
-                        }
-                    ]
-                },
-            )
+        # glossary list with stale glossary response
+        stubber.add_response(
+            "list_terminologies",
+            {
+                "TerminologyPropertiesList": [
+                    {
+                        "Name": "weblate_-_1_-_en_-_de_-_a85e314d2f7614eb",
+                        "SourceLanguageCode": "en",
+                        "TargetLanguageCodes": ["de"],
+                        "CreatedAt": "2021-03-03T14:16:18.329Z",
+                        "Directionality": "UNI",
+                        "Format": "TSV",
+                    }
+                ]
+            },
+        )
 
-            # delete stale glossary response
+        # delete stale glossary response
+        if fail_delete:
+            stubber.add_client_error(
+                "delete_terminology", "ResourceNotFoundException", http_status_code=400
+            )
+        else:
             stubber.add_response(
                 "delete_terminology",
                 {},
                 {"Name": "weblate_-_1_-_en_-_de_-_a85e314d2f7614eb"},
             )
 
-            # create glossary response
-            stubber.add_response(
-                "import_terminology",
-                {
-                    "AuxiliaryDataLocation": {
-                        "Location": "location",
-                        "RepositoryType": "type",
-                    },
-                    "TerminologyProperties": {},
+        # create glossary response
+        stubber.add_response(
+            "import_terminology",
+            {
+                "AuxiliaryDataLocation": {
+                    "Location": "location",
+                    "RepositoryType": "type",
                 },
-                {
-                    "Name": "weblate_-_1_-_en_-_cs_-_9e250d830c11d70f",
-                    "MergeStrategy": "OVERWRITE",
-                    "TerminologyData": {
-                        "File": b"en\tcs\nfoo\tbar",
-                        "Format": "TSV",
+                "TerminologyProperties": {},
+            },
+            {
+                "Name": "weblate_-_1_-_en_-_cs_-_9e250d830c11d70f",
+                "MergeStrategy": "OVERWRITE",
+                "TerminologyData": {
+                    "File": b"en\tcs\nfoo\tbar",
+                    "Format": "TSV",
+                    "Directionality": "UNI",
+                },
+            },
+        )
+
+        # return glossary list with newly created glossary
+        stubber.add_response(
+            "list_terminologies",
+            {
+                "TerminologyPropertiesList": [
+                    {
+                        "Name": "weblate_-_1_-_en_-_cs_-_9e250d830c11d70f",
+                        "SourceLanguageCode": "en",
+                        "TargetLanguageCodes": ["cs"],
+                        "CreatedAt": "2021-08-03T14:16:18.329Z",
                         "Directionality": "UNI",
+                        "Format": "TSV",
                     },
-                },
-            )
+                ]
+            },
+        )
 
-            # return glossary list with newly created glossary
-            stubber.add_response(
-                "list_terminologies",
-                {
-                    "TerminologyPropertiesList": [
-                        {
-                            "Name": "weblate_-_1_-_en_-_cs_-_9e250d830c11d70f",
-                            "SourceLanguageCode": "en",
-                            "TargetLanguageCodes": ["cs"],
-                            "CreatedAt": "2021-08-03T14:16:18.329Z",
-                            "Directionality": "UNI",
-                            "Format": "TSV",
-                        },
-                    ]
-                },
-            )
+        # translate with glossary
+        stubber.add_response(
+            "translate_text",
+            {
+                "TranslatedText": "Ahoj",
+                "SourceLanguageCode": "en",
+                "TargetLanguageCode": "cs",
+                "AppliedTerminologies": [
+                    {
+                        "Name": "weblate_-_1_-_en_-_cs_-_9e250d830c11d70f",
+                        "Terms": [
+                            {"SourceText": "foo", "TargetText": "bar"},
+                        ],
+                    },
+                ],
+            },
+            {
+                "SourceLanguageCode": ANY,
+                "TargetLanguageCode": ANY,
+                "Text": ANY,
+                "TerminologyNames": ["weblate_-_1_-_en_-_cs_-_9e250d830c11d70f"],
+            },
+        )
 
-            # translate with glossary
-            stubber.add_response(
-                "translate_text",
-                {
-                    "TranslatedText": "Ahoj",
-                    "SourceLanguageCode": "en",
-                    "TargetLanguageCode": "cs",
-                    "AppliedTerminologies": [
-                        {
-                            "Name": "weblate_-_1_-_en_-_cs_-_9e250d830c11d70f",
-                            "Terms": [
-                                {"SourceText": "foo", "TargetText": "bar"},
-                            ],
-                        },
-                    ],
-                },
-                {
-                    "SourceLanguageCode": ANY,
-                    "TargetLanguageCode": ANY,
-                    "Text": ANY,
-                    "TerminologyNames": ["weblate_-_1_-_en_-_cs_-_9e250d830c11d70f"],
-                },
-            )
+        return stubber
 
+    def test_glossary(self, fail_delete: bool = False) -> None:
+        """Test translation with glossary (terminology)."""
+        machine = self.get_machine()
+
+        with (
+            patch("weblate.glossary.models.get_glossary_tsv", new=lambda _: "foo\tbar"),
+            patch(
+                "weblate.machinery.aws.AWSTranslation.glossary_count_limit",
+                new=1,
+            ),
+        ):
+            stubber = self.setup_stubber_with_glossaries(
+                machine, fail_delete=fail_delete
+            )
+            stubber.activate()
             self.assert_translate(
                 self.SUPPORTED,
                 self.SOURCE_TRANSLATED,
                 self.EXPECTED_LEN,
                 machine=machine,
             )
+            stubber.deactivate()
+
+    def test_glossary_delete_fail(self) -> None:
+        """Test translation with glossary with terminology delete fail."""
+        self.test_glossary(fail_delete=True)
 
 
 class AlibabaTranslationTest(BaseMachineTranslationTest):
@@ -2449,49 +2657,174 @@ class WeblateTranslationTest(TransactionsTestMixin, FixtureTestCase):
         self.assertNotEqual(results, [])
 
 
-class CyrTranslitTranslationTest(TransactionsTestMixin, FixtureTestCase):
+class CyrTranslitTranslationTest(ViewTestCase):
+    def create_component(self):
+        return self.create_po_new_base()
+
     def get_machine(self):
         return CyrTranslitTranslation({})
 
-    def test_transliterate(self):
+    def test_notsupported(self) -> None:
         machine = self.get_machine()
 
         # check empty result when source or translation language isn't supported
-        unit = MockUnit(code="cs", source="Ahoj světe!")
-        unit.translation = MockTranslation(code="cs", source_language="en")
+        unit = self.get_unit("Hello, world!\n")
         results = machine.translate(unit, self.user)
         self.assertEqual(results, [])
+
+    def test_notsource(self) -> None:
+        machine = self.get_machine()
 
         # check empty result when source and translation aren't from same language
-        unit = MockUnit(code="cnr_Cyrl", source="something else")
-        unit.translation = MockTranslation(code="cnr_Cyrl", source_language="sr_Latn")
+        self.component.add_new_language(Language.objects.get(code="cnr_Cyrl"), None)
+        unit = self.get_unit("Hello, world!\n", language="cnr_Cyrl")
         results = machine.translate(unit, self.user)
         self.assertEqual(results, [])
 
+    def test_fallback_language(self):
+        machine = self.get_machine()
+
+        # Add translations and prepare units
+        self.component.add_new_language(Language.objects.get(code="sr_Latn"), None)
+        self.component.add_new_language(Language.objects.get(code="sr_Cyrl"), None)
+        self.edit_unit("Hello, world!\n", "Moj hoverkraft je pun jegulja", "sr_Latn")
+        latn_unit = self.get_unit("Hello, world!\n", language="sr_Latn")
+        self.assertNotEqual(latn_unit.target, "")
+        cyrl_unit = self.get_unit("Hello, world!\n", language="sr_Cyrl")
+        self.assertEqual(cyrl_unit.target, "")
+
         # check latin to cyrillic
-        unit = MockUnit(code="sr_Cyrl", source="Moj hoverkraft je pun jegulja")
-        unit.translation = MockTranslation(code="sr_Cyrl", source_language="sr_Latn")
+        results = machine.translate(cyrl_unit, self.user)
+        self.assertEqual(
+            results,
+            [
+                [
+                    {
+                        "text": "Мој ховеркрафт је пун јегуља\n",
+                        "quality": 100,
+                        "service": "CyrTranslit",
+                        "source": "Moj hoverkraft je pun jegulja\n",
+                        "original_source": "Moj hoverkraft je pun jegulja\n",
+                    }
+                ]
+            ],
+        )
+
+        # Test not matching translation
+        results = machine.translate(latn_unit, self.user)
+        self.assertEqual(
+            results,
+            [],
+        )
+
+        # check cyrillic to latin
+        self.edit_unit("Hello, world!\n", "Мој ховеркрафт је пун јегуља\n", "sr_Cyrl")
+        results = machine.translate(latn_unit, self.user)
+        self.assertEqual(results[0][0]["text"], "Moj hoverkraft je pun jegulja\n")
+
+        # Force using source language only
+        machine = CyrTranslitTranslation(
+            {"source_language": SourceLanguageChoices.SOURCE}
+        )
+        results = machine.translate(latn_unit, self.user)
+        self.assertEqual(results, [])
+
+        # Secondary language source
+        machine = CyrTranslitTranslation(
+            {"source_language": SourceLanguageChoices.SECONDARY}
+        )
+
+        # None secondary language falls back to auto
+        results = machine.translate(latn_unit, self.user)
+        self.assertEqual(results[0][0]["text"], "Moj hoverkraft je pun jegulja\n")
+
+        cyrillic_lang = Language.objects.get(code="sr_Cyrl")
+        latin_lang = Language.objects.get(code="sr_Latn")
+
+        # Not matching source language
+        self.project.secondary_language = latin_lang
+        self.project.save(update_fields=["secondary_language"])
+        results = machine.translate(latn_unit, self.user)
+        self.assertEqual(results, [])
+
+        # Matching source language
+        self.project.secondary_language = cyrillic_lang
+        self.project.save(update_fields=["secondary_language"])
+        results = machine.translate(latn_unit, self.user)
+        self.assertEqual(results[0][0]["text"], "Moj hoverkraft je pun jegulja\n")
+
+        # Component secondary overrides project
+        self.component.secondary_language = latin_lang
+        self.component.save(update_fields=["secondary_language"])
+        results = machine.translate(latn_unit, self.user)
+        self.assertEqual(results, [])
+
+        self.component.secondary_language = cyrillic_lang
+        self.component.save(update_fields=["secondary_language"])
+        results = machine.translate(latn_unit, self.user)
+        self.assertEqual(results[0][0]["text"], "Moj hoverkraft je pun jegulja\n")
+
+    def test_multiple_languages(self):
+        machine = self.get_machine()
+
+        # Add translations and prepare units
+        self.component.add_new_language(Language.objects.get(code="sr_Cyrl"), None)
+        self.component.add_new_language(Language.objects.get(code="sr@ijekavian"), None)
+        self.component.add_new_language(
+            Language.objects.get(code="sr@ijekavian_Latn"), None
+        )
+        self.edit_unit(
+            "Hello, world!\n", "Мој ховеркрафт је пун јегуља\n", "sr@ijekavian"
+        )
+        self.edit_unit("Hello, world!\n", "Мој ховеркрафт је пун\n", "sr_Cyrl")
+
+        unit = self.get_unit("Hello, world!\n", language="sr@ijekavian_Latn")
         results = machine.translate(unit, self.user)
         self.assertEqual(
             results,
             [
                 [
                     {
-                        "text": "Мој ховеркрафт је пун јегуља",
+                        "text": "Moj hoverkraft je pun jegulja\n",
                         "quality": 100,
                         "service": "CyrTranslit",
-                        "source": "Moj hoverkraft je pun jegulja",
-                        "original_source": "Moj hoverkraft je pun jegulja",
+                        "source": "Мој ховеркрафт је пун јегуља\n",
+                        "original_source": "Мој ховеркрафт је пун јегуља\n",
                     }
                 ]
             ],
         )
 
+    def test_placeholders(self):
+        machine = self.get_machine()
+
+        # Add translations and prepare units
+        self.component.add_new_language(Language.objects.get(code="sr_Latn"), None)
+        self.component.add_new_language(Language.objects.get(code="sr_Cyrl"), None)
+        self.edit_unit(
+            "Orangutan has %d banana.\n", "Орангутан има %d банану.\n", "sr_Cyrl"
+        )
+
+        unit = self.get_unit("Orangutan has %d banana.\n", language="sr_Latn")
+
         # check cyrillic to latin
-        unit = MockUnit(code="sr_Latn", source="Мој ховеркрафт је пун јегуља")
-        unit.translation = MockTranslation(code="sr_Latn", source_language="sr_Cyrl")
         results = machine.translate(unit, self.user)
-        self.assertEqual(results[0][0]["text"], "Moj hoverkraft je pun jegulja")
+        self.assertEqual(
+            [
+                [
+                    {
+                        "original_source": "Орангутан има %d банану.\n",
+                        "quality": 100,
+                        "service": "CyrTranslit",
+                        "source": "Орангутан има %d банану.\n",
+                        "text": "Orangutan ima %d bananu.\n",
+                    }
+                ],
+                [],
+                [],
+            ],
+            results,
+        )
 
 
 class ViewsTest(FixtureTestCase):
@@ -2738,4 +3071,51 @@ class CommandTest(FixtureTestCase):
         setting = Setting.objects.get(category=SettingCategory.MT, name="deepl")
         self.assertEqual(
             setting.value, {"key": "x2", "url": "https://api.deepl.com/v2/"}
+        )
+
+
+class SourceLanguageTranslateTestCase(FixtureTestCase):
+    LANGUAGE = "de"
+    SOURCE = "Hello, world!\n"
+    TRANSLATION = "Hallo, Welt!\n"
+
+    def prepare(self) -> Unit:
+        # Set German translation
+        self.edit_unit(self.SOURCE, self.TRANSLATION, language=self.LANGUAGE)
+        return self.get_unit(self.SOURCE)
+
+    def test_translate(self):
+        czech_unit = self.prepare()
+        machine = DummyTranslation({})
+        translation = machine.translate(
+            czech_unit, source_language=Language.objects.get(code=self.LANGUAGE)
+        )
+        self.assertEqual(
+            translation,
+            [
+                [
+                    {
+                        "text": "Ahoj německý světe!",
+                        "quality": 100,
+                        "service": "Dummy",
+                        "source": "Hallo, Welt!\n",
+                        "original_source": "Hallo, Welt!\n",
+                    }
+                ]
+            ],
+        )
+
+    def test_batch_translate(self):
+        czech_unit = self.prepare()
+        machine = DummyTranslation({})
+        machine.batch_translate(
+            [czech_unit], source_language=Language.objects.get(code=self.LANGUAGE)
+        )
+        self.assertEqual(
+            czech_unit.machinery,
+            {
+                "translation": ["Ahoj německý světe!"],
+                "origin": [machine],
+                "quality": [100],
+            },
         )

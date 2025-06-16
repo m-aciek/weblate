@@ -13,9 +13,14 @@ from django.utils.functional import cached_property
 from django.utils.translation import gettext, gettext_lazy
 
 from weblate.lang.models import Language
+from weblate.trans.actions import ActionEvents
 from weblate.trans.defines import CATEGORY_DEPTH, COMPONENT_NAME_LENGTH
-from weblate.trans.mixins import CacheKeyMixin, ComponentCategoryMixin, PathMixin
-from weblate.trans.models.change import Change
+from weblate.trans.mixins import (
+    CacheKeyMixin,
+    ComponentCategoryMixin,
+    LockMixin,
+    PathMixin,
+)
 from weblate.utils.stats import CategoryStats
 from weblate.utils.validators import validate_slug
 
@@ -43,7 +48,9 @@ class CategoryQuerySet(models.QuerySet):
         return self.order_by("name")
 
 
-class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
+class Category(
+    models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin, LockMixin
+):
     name = models.CharField(
         verbose_name=gettext_lazy("Category name"),
         max_length=COMPONENT_NAME_LENGTH,
@@ -69,7 +76,6 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
         related_name="category_set",
     )
 
-    is_lockable = False
     remove_permission = "project.edit"
     settings_permission = "project.edit"
 
@@ -95,6 +101,10 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
     def __str__(self) -> str:
         return f"{self.category or self.project}/{self.name}"
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.stats = CategoryStats(self)
+
     def save(self, *args, **kwargs) -> None:
         old = None
         if self.id:
@@ -115,10 +125,6 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
             # Move to a different project
             if old.project != self.project:
                 self.move_to_project(self.project)
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.stats = CategoryStats(self)
 
     def move_to_project(self, project) -> None:
         """Trigger save with changed project on categories and components."""
@@ -237,9 +243,9 @@ class Category(models.Model, PathMixin, CacheKeyMixin, ComponentCategoryMixin):
             return getattr(result, "slug", result)
 
         tracked = (
-            ("slug", Change.ACTION_RENAME_CATEGORY),
-            ("category", Change.ACTION_MOVE_CATEGORY),
-            ("project", Change.ACTION_MOVE_CATEGORY),
+            ("slug", ActionEvents.RENAME_CATEGORY),
+            ("category", ActionEvents.MOVE_CATEGORY),
+            ("project", ActionEvents.MOVE_CATEGORY),
         )
         for attribute, action in tracked:
             old_value = getvalue(old, attribute)

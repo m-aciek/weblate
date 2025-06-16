@@ -6,9 +6,12 @@ from __future__ import annotations
 import re
 import uuid
 from collections import defaultdict
+from collections.abc import (
+    Iterable,
+)
 from functools import cache as functools_cache
 from itertools import chain
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import sentry_sdk
 from appconf import AppConf
@@ -57,12 +60,13 @@ from weblate.utils.search import parse_query
 from weblate.utils.validators import CRUD_RE, validate_fullname, validate_username
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from social_core.backends.base import BaseAuth
     from social_django.models import DjangoStorage
     from social_django.strategy import DjangoStrategy
 
+    from weblate.accounts.models import Subscription
     from weblate.auth.permissions import PermissionResult
     from weblate.wladmin.models import SupportStatusDict
 
@@ -291,6 +295,10 @@ class UserQuerySet(models.QuerySet["User"]):
         """All admins in a project."""
         return self.having_perm("project.edit", project)
 
+    def all_reviewers(self, project: Project) -> UserQuerySet:
+        """All reviewers in a project."""
+        return self.having_perm("unit.review", project)
+
     def order(self):
         return self.order_by("username")
 
@@ -315,7 +323,7 @@ class UserQuerySet(models.QuerySet["User"]):
         author_email: str | None,
         fallback: User | None,
         request: AuthenticatedHttpRequest,
-    ) -> User:
+    ) -> User | None:
         from weblate.accounts.models import AuditLog
 
         if author_email and (fallback is None or not fallback.has_email(author_email)):
@@ -333,6 +341,34 @@ class UserQuerySet(models.QuerySet["User"]):
             if author.is_active and not author.is_bot and not author.is_anonymous:
                 return author
         return fallback
+
+    def get_or_create(
+        self,
+        defaults: Mapping[str, Any] | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> tuple[User, bool]:
+        filtered: dict[str, Any] | None
+        extra: dict[str, Any]
+        if defaults is None:
+            filtered = None
+            extra = {}
+        else:
+            filtered = {
+                name: value
+                for name, value in defaults.items()
+                if name not in User.DUMMY_FIELDS
+            }
+            extra = {
+                name: value
+                for name, value in defaults.items()
+                if name in User.DUMMY_FIELDS
+            }
+
+        user, created = super().get_or_create(defaults=filtered, **kwargs)
+        if created:
+            user.extra_data = extra
+            user.save()
+        return user, created
 
 
 @functools_cache
@@ -375,8 +411,10 @@ def wrap_group_list(func):
 class GroupManyToManyField(models.ManyToManyField):
     """Customized field to accept Django Groups objects as well."""
 
-    def contribute_to_class(self, cls, name, **kwargs) -> None:
-        super().contribute_to_class(cls, name, **kwargs)
+    def contribute_to_class(
+        self, cls: type[models.Model], name: str, private_only: bool = False, **kwargs
+    ) -> None:
+        super().contribute_to_class(cls, name, private_only=private_only, **kwargs)
 
         # Get related descriptor
         descriptor = getattr(cls, self.name)
@@ -448,8 +486,7 @@ class User(AbstractBaseUser):
         verbose_name=gettext_lazy("Teams"),
         blank=True,
         help_text=gettext_lazy(
-            "The user is granted all permissions included in "
-            "membership of these teams."
+            "The user is granted all permissions included in membership of these teams."
         ),
     )
 
@@ -514,7 +551,7 @@ class User(AbstractBaseUser):
         self.extra_data: dict[str, str] = {}
         self.cla_cache: dict[tuple[int, int], bool] = {}
         self._permissions: PermissionsDictType = {}
-        self.current_subscription = None
+        self.current_subscription: Subscription | None = None
         for name in self.DUMMY_FIELDS:
             if name in kwargs:
                 self.extra_data[name] = kwargs.pop(name)
@@ -1127,8 +1164,7 @@ class Invitation(models.Model):
         Group,
         verbose_name=gettext_lazy("Team"),
         help_text=gettext_lazy(
-            "The user is granted all permissions included in "
-            "membership of these teams."
+            "The user is granted all permissions included in membership of these teams."
         ),
         on_delete=models.deletion.CASCADE,
     )

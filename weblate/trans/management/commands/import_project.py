@@ -59,8 +59,7 @@ class Command(BaseCommand):
             "--language-regex",
             default="^[^.]+$",
             help=(
-                "Language filter regular expression to be used for created"
-                " components"
+                "Language filter regular expression to be used for created components"
             ),
         )
         parser.add_argument(
@@ -330,6 +329,8 @@ class Command(BaseCommand):
             component = discovery.create_component(
                 None,
                 match,
+                existing_slugs=set(),
+                existing_names=set(),
                 project=project,
                 source_language=self.source_language,
                 repo=repo,

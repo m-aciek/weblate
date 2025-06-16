@@ -5,7 +5,7 @@ Version control integration
 
 Weblate currently supports :ref:`vcs-git` (with extended support for
 :ref:`vcs-github`, :ref:`vcs-gitlab`, :ref:`vcs-gitea`, :ref:`vcs-gerrit`,
-:ref:`vcs-git-svn`, :ref:`vcs-bitbucket-cloud`, :ref:`vcs-bitbucket-server`, and :ref:`vcs-azure-devops`) and
+:ref:`vcs-git-svn`, :ref:`vcs-bitbucket-cloud`, :ref:`vcs-bitbucket-data-center`, and :ref:`vcs-azure-devops`) and
 :ref:`vcs-mercurial` as version control back-ends.
 
 .. _vcs-repos:
@@ -225,6 +225,14 @@ to users (if even allowed to see the repository URL at all).
 For example the GitHub URL with authentication added might look like:
 ``https://user:your_access_token@github.com/WeblateOrg/weblate.git``.
 
+.. versionchanged:: 5.10.2
+
+   Weblate uses proactive authentication with Git 2.46.0 and newer when HTTP
+   credentials are supplied.
+
+   This makes it possible to access Azure DevOps repositories and makes access
+   to authenticated repositories faster.
+
 .. note::
 
     If your username or password contains special characters, those have to be
@@ -318,7 +326,7 @@ For the ``hello`` repository from selenic.com using Mercurial:
 
 .. code-block:: text
 
-    hg::http://selenic.com/repo/hello
+    hg::https://selenic.com/repo/hello
 
 .. _remote helpers: https://git-scm.com/docs/gitremote-helpers
 .. _git-remote-hg: https://github.com/felipec/git-remote-hg
@@ -377,7 +385,7 @@ Weblate settings to make this work. Once configured, you will see a
    :ref:`push-changes`,
    :setting:`GITLAB_CREDENTIALS`
 
-.. _GitLab API: https://docs.gitlab.com/ee/api/
+.. _GitLab API: https://docs.gitlab.com/api/
 
 .. _vcs-gitea:
 .. _gitea-push:
@@ -408,6 +416,7 @@ Weblate settings to make this work. Once configured, you will see a
 .. _Gitea API: https://docs.gitea.io/en-us/api-usage/
 
 .. _vcs-bitbucket-server:
+.. _vcs-bitbucket-data-center:
 .. _bitbucket-server-push:
 
 Bitbucket Data Center pull requests
@@ -427,7 +436,7 @@ instead of pushing directly to the repository.
 There is no need to use this to access Git repositories, ordinary :ref:`vcs-git`
 works the same, the only difference is how pushing to a repository is
 handled. With :ref:`vcs-git` changes are pushed directly to the repository,
-while :ref:`vcs-bitbucket-server` creates pull request.
+while :ref:`vcs-bitbucket-data-center` creates pull request.
 
 You need to configure API credentials (:setting:`BITBUCKETSERVER_CREDENTIALS`) in the
 Weblate settings to make this work. Once configured, you will see a

@@ -9,7 +9,9 @@ from django.core.validators import FileExtensionValidator
 from django.utils.translation import gettext_lazy
 
 from weblate.lang.models import Language
+from weblate.memory.models import SUPPORTED_FORMATS
 from weblate.utils.forms import SortedSelect
+from weblate.utils.html import format_html_join_comma, list_to_tuples
 
 
 class UploadForm(forms.Form):
@@ -17,20 +19,9 @@ class UploadForm(forms.Form):
 
     file = forms.FileField(
         label=gettext_lazy("File"),
-        validators=[
-            FileExtensionValidator(
-                allowed_extensions=[
-                    "json",
-                    "tmx",
-                    "xliff",
-                    "po",
-                    "csv",
-                ]
-            )
-        ],
-        help_text=gettext_lazy(
-            "You can upload a file of following formats: TMX, JSON, XLIFF, PO, CSV."
-        ),
+        validators=[FileExtensionValidator(allowed_extensions=SUPPORTED_FORMATS)],
+        help_text=gettext_lazy("You can upload a file of following formats: %s.")
+        % format_html_join_comma("{}", list_to_tuples(SUPPORTED_FORMATS)),
     )
     source_language = forms.ModelChoiceField(
         widget=SortedSelect,
@@ -53,16 +44,17 @@ class UploadForm(forms.Form):
 
     def clean(self):
         data = self.cleaned_data
-        extension = PurePath(data["file"].name).suffix[1:].lower()
-        if extension in {"xliff", "po", "csv"} and not all(
-            [data["source_language"], data["target_language"]]
-        ):
-            raise forms.ValidationError(
-                gettext_lazy(
-                    "Source language and target language must be specified for this file format."
-                ),
-                code="missing_languages",
-            )
+        if "file" not in self.errors:
+            extension = PurePath(data["file"].name).suffix[1:].lower()
+            if extension in {"xliff", "po", "csv"} and not all(
+                [data["source_language"], data["target_language"]]
+            ):
+                raise forms.ValidationError(
+                    gettext_lazy(
+                        "Source language and target language must be specified for this file format."
+                    ),
+                    code="missing_languages",
+                )
         return data
 
 

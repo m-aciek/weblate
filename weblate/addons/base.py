@@ -8,7 +8,7 @@ import os
 import subprocess
 from contextlib import suppress
 from itertools import chain
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -18,6 +18,7 @@ from django.utils.translation import gettext
 from weblate.addons.events import POST_CONFIGURE_EVENTS, AddonEvent
 from weblate.trans.exceptions import FileParseError
 from weblate.trans.models import Component
+from weblate.trans.templatetags.translations import format_json
 from weblate.trans.util import get_clean_env
 from weblate.utils import messages
 from weblate.utils.errors import report_error
@@ -25,13 +26,15 @@ from weblate.utils.render import render_template
 from weblate.utils.validators import validate_filename
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from django_stubs_ext import StrOrPromise
 
     from weblate.addons.forms import BaseAddonForm
-    from weblate.addons.models import Addon
+    from weblate.addons.models import Addon, AddonActivityLog
     from weblate.auth.models import AuthenticatedHttpRequest, User
     from weblate.formats.base import TranslationFormat
-    from weblate.trans.models import Project, Translation, Unit
+    from weblate.trans.models import Change, Project, Translation, Unit
 
 
 class CompatDict(TypedDict, total=False):
@@ -67,19 +70,19 @@ class BaseAddon:
         self.extra_files: list[str] = []
 
     @cached_property
-    def doc_anchor(self):
+    def doc_anchor(self) -> str:
         return self.get_doc_anchor()
 
     @classmethod
-    def get_doc_anchor(cls):
+    def get_doc_anchor(cls) -> str:
         return "addon-{}".format(cls.name.replace(".", "-").replace("_", "-"))
 
     @classmethod
-    def has_settings(cls):
+    def has_settings(cls) -> bool:
         return cls.settings_form is not None
 
     @classmethod
-    def get_identifier(cls):
+    def get_identifier(cls) -> str:
         return cls.name
 
     @classmethod
@@ -90,7 +93,7 @@ class BaseAddon:
         project: Project | None = None,
         acting_user: User | None = None,
         **kwargs,
-    ):
+    ) -> Addon:
         from weblate.addons.models import Addon
 
         result = Addon(
@@ -113,7 +116,7 @@ class BaseAddon:
         run: bool = True,
         acting_user: User | None = None,
         **kwargs,
-    ):
+    ) -> BaseAddon:
         storage = cls.create_object(
             component=component, project=project, acting_user=acting_user, **kwargs
         )
@@ -130,7 +133,7 @@ class BaseAddon:
         component: Component | None = None,
         project: Project | None = None,
         **kwargs,
-    ):
+    ) -> BaseAddonForm | None:
         """Return configuration form for adding new add-on."""
         if cls.settings_form is None:
             return None
@@ -140,7 +143,7 @@ class BaseAddon:
         instance = cls(storage)
         return cls.settings_form(user, instance, **kwargs)
 
-    def get_settings_form(self, user: User | None, **kwargs):
+    def get_settings_form(self, user: User | None, **kwargs) -> BaseAddonForm | None:
         """Return configuration form for this add-on."""
         if self.settings_form is None:
             return None
@@ -148,10 +151,10 @@ class BaseAddon:
             kwargs["data"] = self.instance.configuration
         return self.settings_form(user, self, **kwargs)
 
-    def get_ui_form(self):
+    def get_ui_form(self) -> BaseAddonForm | None:
         return self.get_settings_form(None)
 
-    def configure(self, configuration) -> None:
+    def configure(self, configuration: dict[str, Any]) -> None:
         """Save configuration."""
         self.instance.configuration = configuration
         self.instance.save()
@@ -169,7 +172,7 @@ class BaseAddon:
             if settings.CELERY_TASK_ALWAYS_EAGER:
                 postconfigure_addon(self.instance.pk, self.instance)
             else:
-                postconfigure_addon.delay(self.instance.pk)
+                postconfigure_addon.delay_on_commit(self.instance.pk)
 
     def post_configure_run(self) -> None:
         # Trigger post events to ensure direct processing
@@ -180,9 +183,10 @@ class BaseAddon:
 
         if project := self.instance.project:
             for component in project.component_set.iterator():
-                self.post_configure_run_component(component)
+                if self.can_install(component, None):
+                    self.post_configure_run_component(component)
 
-    def post_configure_run_component(self, component) -> None:
+    def post_configure_run_component(self, component: Component) -> None:
         # Trigger post configure event for a VCS component
         previous = component.repository.last_revision
         if not (POST_CONFIGURE_EVENTS & self.events):
@@ -220,7 +224,7 @@ class BaseAddon:
         self.instance.save(update_fields=["state"])
 
     @classmethod
-    def can_install(cls, component: Component, user: User | None):  # noqa: ARG003
+    def can_install(cls, component: Component, user: User | None) -> bool:  # noqa: ARG003
         """Check whether add-on is compatible with given component."""
         return all(
             getattr(component, key) in cast("set", values)
@@ -293,6 +297,10 @@ class BaseAddon:
         """Event handler for component update."""
         # To be implemented in a subclass
 
+    def change_event(self, change: Change) -> None:
+        """Event handler for change event."""
+        # To be implemented in a subclass
+
     def execute_process(
         self, component: Component, cmd: list[str], env: dict[str, str] | None = None
     ) -> None:
@@ -354,7 +362,9 @@ class BaseAddon:
             )
         return True
 
-    def render_repo_filename(self, template: str, translation: Translation):
+    def render_repo_filename(
+        self, template: str, translation: Translation
+    ) -> str | None:
         component = translation.component
 
         # Render the template
@@ -403,7 +413,7 @@ class BaseAddon:
                 )
 
     @cached_property
-    def user(self):
+    def user(self) -> User:
         """Weblate user used to track changes by this add-on."""
         from weblate.auth.models import User
 
@@ -414,6 +424,16 @@ class BaseAddon:
         return User.objects.get_or_create_bot(
             "addon", self.user_name, self.user_verbose
         )
+
+    def render_activity_log(self, activity: AddonActivityLog) -> str:
+        result = activity.details["result"]
+        if result is None:
+            return ""
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            return format_json(result)
+        return str(result)
 
 
 class UpdateBaseAddon(BaseAddon):
@@ -428,7 +448,7 @@ class UpdateBaseAddon(BaseAddon):
     }
 
     @staticmethod
-    def iterate_translations(component: Component):
+    def iterate_translations(component: Component) -> Generator[Translation]:
         for translation in component.translation_set.iterator():
             if not translation.is_source or component.intermediate:
                 yield translation
@@ -453,3 +473,13 @@ class StoreBaseAddon(BaseAddon):
         AddonEvent.EVENT_STORE_POST_LOAD,
     }
     icon = "wrench.svg"
+
+
+class ChangeBaseAddon(BaseAddon):
+    """Base class for add-ons that listen for Change notifications."""
+
+    events: set[AddonEvent] = {
+        AddonEvent.EVENT_CHANGE,
+    }
+
+    multiple = False

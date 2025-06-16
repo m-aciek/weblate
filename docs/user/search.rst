@@ -1,5 +1,3 @@
-.. _Searching :
-
 Searching
 =========
 
@@ -50,10 +48,12 @@ Fields
    Search for string states (``approved``, ``translated``, ``needs-editing``, ``empty``, ``read-only``).
 
    This field also supports :ref:`search-operators`, so searching for completed strings can be performed as ``state:>=translated``, searching for strings needing translation as ``state:<translated``.
+``source_state:TEXT``
+   Search for source string states, see above for more info.
 ``pending:BOOLEAN``
    String pending for flushing to VCS.
 ``has:TEXT``
-   Search for string having attributes - ``plural``, ``context``, ``suggestion``, ``comment``, ``check``, ``dismissed-check``, ``translation``, ``variant``, ``screenshot``, ``flags``, ``explanation``, ``glossary``, ``note``, ``label``.
+   Search for string having attributes - ``plural``, ``context``, ``suggestion``, ``comment``, ``check``, ``dismissed-check``, ``translation``, ``variant``, ``screenshot``, ``flags``, ``explanation``, ``glossary``, ``note``, ``label``, ``location``.
 ``is:TEXT``
    Filters string on a condition:
 
@@ -65,7 +65,7 @@ Fields
       Needing editing strings, same as ``state:needs-editing``.
    ``translated``
       Translated strings, same as ``state:>translated``.
-   ``untranslated``:
+   ``untranslated``
       Untranslated strings, same as ``state:<translated``.
    ``pending``
       Pending strings not yet committed to the file (see :ref:`lazy-commit`).
@@ -113,11 +113,29 @@ Fields
 ``screenshot:TEXT``
    Search in screenshots.
 
+.. _search-boolean:
+
 Boolean operators
 -----------------
 
 You can combine lookups using ``AND``, ``OR``, ``NOT`` and parentheses to
-form complex queries. For example: ``state:translated AND (source:hello OR source:bar)``
+form complex queries.
+
+The ``NOT`` operator has higher precedence than the ``AND`` operator; the
+``AND`` operator has higher precedence than the ``OR`` operator. You can add
+parenthesis to define a precedence of your own.
+
+Omitting the operator will make the query behave like the ``AND`` operator was
+used.
+
+.. list-table:: Equivalent expressions
+
+   * - ``(state:translated AND source:hello) OR source:bar``
+     - Parenthesized expression to clearly show the precedence.
+   * - ``state:translated AND source:hello OR source:bar``
+     - The ``AND`` operator has higher precedence than the ``OR`` operator.
+   * - ``state:translated source:hello OR source:bar``
+     - Query using an implicit ``AND`` operator.
 
 .. _search-operators:
 
@@ -174,7 +192,7 @@ and 5, use ``source:r"[2-5]"``.
 
    * `PostgreSQL Regular Expressions Details <https://www.postgresql.org/docs/current/functions-matching.html#POSIX-SYNTAX-DETAILS>`_ (this is the default database engine for Weblate)
    * `MariaDB Regular Expressions Overview <https://mariadb.com/kb/en/regular-expressions-overview/>`_
-   * `MySQL Regular Expressions <https://dev.mysql.com/doc/refman/8.4/en/regexp.html>`_
+   * `MySQL Regular Expressions <https://dev.mysql.com/doc/refman/9.2/en/regexp.html>`_
 
 Predefined queries
 ------------------
@@ -208,9 +226,13 @@ The user browsing has similar search abilities:
 ``joined:DATETIME``
    String content was changed on date, supports :ref:`search-operators`.
 ``translates:TEXT``
-   User has contributed to a given language in the past 90 days.
+   User has contributed to a given language.
+
+   You might want to limit contribution time by ``change_time``, for example ``change_time:>"90 days ago"``.
 ``contributes:TEXT``
-   User has contributed to a given project or component in the past 90 days.
+   User has contributed to a given project or component.
+
+   You might want to limit contribution time by ``change_time``, for example ``change_time:>"90 days ago"``.
 ``change_time:DATETIME``
    Same as in :ref:`search-strings`.
 ``change_action:TEXT``
@@ -230,9 +252,10 @@ Additional lookups are available in the :ref:`management-interface`:
 Fuzzy values for DATETIME fields
 ++++++++++++++++++++++++++++++++
 
-Instead of using DATETIME values like MM-DD-YYYY, a string containing adverb
-of time like ``yesterday``, ``last month``, and ``2 days ago`` can be used as
-values in the DATETIME fields.
+Instead of using DATETIME values like MM-DD-YYYY, a string containing an adverb
+of time like :samp:`yesterday`, :samp:`last month`, and :samp:`2 days ago` can
+be used as values in the DATETIME fields. Only English phrases are supported
+here.
 
 Examples:
 

@@ -20,6 +20,7 @@ from django.utils.translation import gettext_lazy
 from packaging.version import Version
 
 from weblate.trans.util import get_clean_env, path_separator
+from weblate.utils.data import data_path
 from weblate.utils.errors import add_breadcrumb
 from weblate.utils.lock import WeblateLock
 from weblate.vcs.ssh import SSH_WRAPPER
@@ -75,7 +76,7 @@ class Repository:
     _version = None
 
     @classmethod
-    def get_identifier(cls):
+    def get_identifier(cls) -> str:
         return cls.identifier or cls.name.lower()
 
     def __init__(
@@ -103,6 +104,7 @@ class Repository:
             slug=os.path.basename(base_path),
             file_template="{slug}.lock",
             timeout=120,
+            origin=component.full_slug if component else base_path,
         )
         self._config_updated = False
         self.local = local
@@ -170,16 +172,20 @@ class Repository:
         return real_path[len(repository_path) :].lstrip("/")
 
     @staticmethod
-    def _getenv() -> dict[str, str]:
+    def _getenv(environment: dict[str, str] | None = None) -> dict[str, str]:
         """Generate environment for process execution."""
-        return get_clean_env(
-            {
-                "GIT_SSH": SSH_WRAPPER.filename,
-                "GIT_TERMINAL_PROMPT": "0",
-                "SVN_SSH": SSH_WRAPPER.filename,
-            },
-            extra_path=SSH_WRAPPER.path,
-        )
+        base: dict[str, str] = {
+            # Avoid prompts from Git
+            "GIT_TERMINAL_PROMPT": "0",
+            # Avoid Git traversing outside the data dir
+            "GIT_CEILING_DIRECTORIES": data_path("vcs").as_posix(),
+            # Use ssh wrapper
+            "GIT_SSH": SSH_WRAPPER.filename.as_posix(),
+            "SVN_SSH": SSH_WRAPPER.filename.as_posix(),
+        }
+        if environment:
+            base.update(environment)
+        return get_clean_env(base, extra_path=SSH_WRAPPER.path.as_posix())
 
     @classmethod
     def _popen(
@@ -192,6 +198,7 @@ class Repository:
         raw: bool = False,
         local: bool = False,
         stdin: str | None = None,
+        environment: dict[str, str] | None = None,
     ):
         """Execute the command using popen."""
         if args is None:
@@ -200,19 +207,20 @@ class Repository:
             args = [cls._cmd, *list(args)]
         text_cmd = " ".join(args)
         try:
+            # These are mutually exclusive, gevent actually checks
+            # for their presence, not a avalue
+            kwargs = {"stdin": subprocess.PIPE} if stdin is None else {"input": stdin}
             process = subprocess.run(
                 args,
                 cwd=cwd,
-                env={} if local else cls._getenv(),
+                env=environment or {} if local else cls._getenv(environment),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT if merge_err else subprocess.PIPE,
                 text=not raw,
                 check=False,
-                # These are mutually exclusive
-                input=stdin,
-                stdin=subprocess.PIPE if stdin is None else None,
                 # Excessively long timeout to catch misbehaving processes
                 timeout=3600,
+                **kwargs,
             )
         except subprocess.TimeoutExpired as error:
             raise RepositoryError(
@@ -240,6 +248,7 @@ class Repository:
         fullcmd: bool = False,
         merge_err: bool = True,
         stdin: str | None = None,
+        environment: dict[str, str] | None = None,
     ):
         """Execute command and caches its output."""
         if needs_lock:
@@ -257,6 +266,7 @@ class Repository:
                 local=self.local,
                 merge_err=merge_err,
                 stdin=stdin,
+                environment=environment,
             )
         except RepositoryError as error:
             if not is_status and not self.local:
@@ -562,3 +572,6 @@ class Repository:
 
     def list_remote_branches(self):
         return []
+
+    def compact(self) -> None:
+        return

@@ -5,7 +5,7 @@
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase
 
-from weblate.checks.flags import TYPED_FLAGS, TYPED_FLAGS_ARGS, Flags
+from weblate.checks.flags import TYPED_FLAGS, TYPED_FLAGS_ARGS, Flags, FlagsValidator
 from weblate.trans.defines import VARIANT_KEY_LENGTH
 
 
@@ -23,6 +23,13 @@ class FlagTest(SimpleTestCase):
 
     def test_iter(self) -> None:
         self.assertEqual(sorted(Flags("foo, bar")), ["bar", "foo"])
+
+    def test_has_any(self) -> None:
+        flags = Flags("foo, bar")
+        self.assertFalse(flags.has_any(set()))
+        self.assertFalse(flags.has_any({"baz"}))
+        self.assertTrue(flags.has_any({"bar", "foo"}))
+        self.assertTrue(flags.has_any({"bar", "baz"}))
 
     def test_parse_empty(self) -> None:
         self.assertEqual(Flags("").items(), set())
@@ -181,3 +188,23 @@ class FlagTest(SimpleTestCase):
         self.assertEqual(
             flags.format(), r'"Scripts\Tscripts\pages\dist\grplus.js":1046'
         )
+
+    def test_discard(self) -> None:
+        flags = Flags("foo", "discard:foo")
+        self.assertEqual(flags.format(), "")
+        flags = Flags("foo", "discard:bar")
+        self.assertEqual(flags.format(), "foo")
+
+    def test_discard_validator(self) -> None:
+        flags = FlagsValidator("foo", "discard:foo")
+        self.assertEqual(flags.format(), "discard:foo, foo")
+        flags = FlagsValidator("foo", "discard:bar")
+        self.assertEqual(flags.format(), "discard:bar, foo")
+        flags = FlagsValidator("discard:bar")
+        with self.assertRaises(ValidationError):
+            flags.validate()
+        flags = FlagsValidator("discard")
+        with self.assertRaises(ValidationError):
+            flags.validate()
+        flags = FlagsValidator("discard:ignore-same")
+        flags.validate()

@@ -56,16 +56,8 @@ test)
         --env CI_DB_USER=weblate \
         --env CI_DB_PASSWORD=weblate \
         --env DJANGO_SETTINGS_MODULE=weblate.settings_test \
-        weblate weblate collectstatic --noinput
-    docker compose exec -T \
-        --env CI_BASE_DIR=/tmp \
-        --env CI_DATABASE=postgresql \
-        --env CI_DB_HOST=database \
-        --env CI_DB_NAME=weblate \
-        --env CI_DB_USER=weblate \
-        --env CI_DB_PASSWORD=weblate \
-        --env DJANGO_SETTINGS_MODULE=weblate.settings_test \
-        weblate weblate test --noinput "$@"
+        --workdir /app/src \
+        weblate pytest -n auto "$@"
     ;;
 check)
     shift
@@ -76,12 +68,12 @@ build)
     ;;
 wait)
     TIMEOUT=0
-    while ! docker compose ps | grep healthy; do
+    while ! docker compose ps | grep "weblate-dev:.*healthy"; do
         echo "Waiting for the container startup..."
         sleep 5
         docker compose ps
         TIMEOUT=$((TIMEOUT + 1))
-        if [ $TIMEOUT -gt 120 ]; then
+        if [ $TIMEOUT -gt 60 ]; then
             docker compose logs
             exit 1
         fi
@@ -93,6 +85,7 @@ start | restart | "")
     # Start it up
     docker compose up -d --force-recreate
     echo -e "\n${GREEN}Running development version of Weblate on http://${WEBLATE_HOST}/${NC}\n"
+    echo "maildev is runinng on http://localhost:1080/"
     ;;
 *)
     docker compose "$@"

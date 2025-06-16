@@ -31,7 +31,7 @@ Before proceeding with an installation, make sure you have the following prerequ
 - ``Nodejs`` version 14 or higher.
 - The ``yarn`` package manager is installed on your system.
 - Run ``cd client``.
-- Run ``yarn install``
+- Run ``yarn install``.
 
 Installation
 ++++++++++++
@@ -120,12 +120,11 @@ function, but there are more complex features available:
 Icons
 -----
 
-Weblate currently uses material design icons. In case you are looking for new
-symbol, check `Material Design Icons`_ or `Material Design Resources`_.
+Weblate currently uses `Material Design Icons`_, in case you are looking for new
+symbol, check that.
 
 Additionally, there is :file:`scripts/optimize-svg` to reduce size of the SVG
 as most of the icons are embedded inside the HTML to allow styling of the
 paths.
 
 .. _Material Design Icons: https://pictogrammers.com/library/mdi/
-.. _Material Design Resources: https://fonts.google.com/icons

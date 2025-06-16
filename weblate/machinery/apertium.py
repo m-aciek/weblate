@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from functools import reduce
+from itertools import chain
 
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext
@@ -84,7 +84,7 @@ class ApertiumAPYTranslation(ResponseStatusMachineTranslation):
     @property
     def all_langs(self):
         """Return all language codes known to service."""
-        return reduce(lambda acc, x: acc.union(x), self.supported_languages, set())
+        return set(chain.from_iterable(self.supported_languages))
 
     def map_language_code(self, code):
         """Convert language to service specific code."""
@@ -102,14 +102,14 @@ class ApertiumAPYTranslation(ResponseStatusMachineTranslation):
                 gettext("Could not fetch supported languages: %s") % error
             ) from error
         try:
-            source, language = languages[0]
+            source_language, target_language = languages[0]
         except IndexError as error:
             raise ValidationError(
                 gettext("No supported languages found: %s") % error
             ) from error
         try:
             self.download_multiple_translations(
-                source, language, [("test", None)], None, 75
+                source_language, target_language, [("test", None)], None, 75
             )
         except Exception as error:
             raise ValidationError(
@@ -124,14 +124,14 @@ class ApertiumAPYTranslation(ResponseStatusMachineTranslation):
             for item in data["responseData"]
         ]
 
-    def is_supported(self, source, language):
+    def is_supported(self, source_language, target_language):
         """Check whether given language combination is supported."""
-        return (source, language) in self.supported_languages
+        return (source_language, target_language) in self.supported_languages
 
     def download_translations(
         self,
-        source,
-        language,
+        source_language,
+        target_language,
         text: str,
         unit,
         user,
@@ -139,7 +139,7 @@ class ApertiumAPYTranslation(ResponseStatusMachineTranslation):
     ) -> DownloadTranslations:
         """Download list of possible translations from Apertium."""
         args = {
-            "langpair": f"{source}|{language}",
+            "langpair": f"{source_language}|{target_language}",
             "q": text,
             "markUnknown": "no",
         }

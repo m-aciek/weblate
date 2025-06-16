@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache, reduce
 from itertools import chain
 from operator import and_, or_
@@ -339,7 +339,8 @@ class BaseTermExpr:
 
         # Field specific code
         field_method: Callable[[str, dict], Q] = cast(
-            "Callable[[str, dict], Q]", getattr(self, f"{field}_field", None)
+            "Callable[[str, dict], Q] | None",
+            getattr(self, f"{field}_field", None),
         )
         if field_method is not None:
             return field_method(match, context)
@@ -401,6 +402,7 @@ class UnitTermExpr(BaseTermExpr):
         "priority": "priority",
         "id": "id",
         "state": "state",
+        "source_state": "source_unit__state",
         "position": "position",
         "pending": "pending",
         "changed": "change__timestamp",
@@ -420,7 +422,6 @@ class UnitTermExpr(BaseTermExpr):
         "check": "check__name",
         "dismissed_check": "check__name",
         "language": "translation__language__code",
-        "component": "translation__component__slug",
         "project": "translation__component__project__slug",
         "changed_by": "change__author__username",
         "suggestion_author": "suggestion__user__username",
@@ -452,6 +453,8 @@ class UnitTermExpr(BaseTermExpr):
             return Q(suggestion__isnull=False)
         if text == "explanation":
             return ~Q(source_unit__explanation="")
+        if text == "location":
+            return ~Q(location="")
         if text == "note":
             return ~Q(note="")
         if text == "comment":
@@ -506,6 +509,18 @@ class UnitTermExpr(BaseTermExpr):
             )
 
         return super().has_field(text, context)
+
+    def convert_source_state(self, text: str) -> int | None:
+        return self.convert_state(text)
+
+    def component_field(self, text: str, context: dict) -> Q:
+        if self.operator == ":=":
+            return Q(translation__component__slug__iexact=text) | Q(
+                translation__component__name__iexact=text
+            )
+        return Q(translation__component__slug__icontains=text) | Q(
+            translation__component__name__icontains=text
+        )
 
     def path_field(self, text: str, context: dict) -> Q:
         try:
@@ -574,8 +589,6 @@ class UnitTermExpr(BaseTermExpr):
             return query & Q(check__dismissed=False)
         if field == "dismissed_check":
             return query & Q(check__dismissed=True)
-        if field == "component":
-            return query | Q(translation__component__name__icontains=match)
         if field == "label":
             return query | Q(labels__name__iexact=match)
         if field == "screenshot":
@@ -614,33 +627,15 @@ class UserTermExpr(BaseTermExpr):
     def convert_non_field(self) -> Q:
         return Q(username__icontains=self.match) | Q(full_name__icontains=self.match)
 
-    def field_extra(self, field: str, query: Q, match: Any) -> Q:  # noqa: ANN401
-        if field == "translates":
-            return query & Q(
-                change__timestamp__gte=timezone.now().replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                )
-                - timedelta(days=90)
-            )
-
-        return super().field_extra(field, query, match)
-
     def contributes_field(self, text: str, context: dict) -> Q:
         from weblate.trans.models import Component
 
-        if "/" in text:
-            query = Q(
-                change__component_id__in=list(
-                    Component.objects.filter_by_path(text).values_list("id", flat=True)
-                )
+        if "/" not in text:
+            return Q(change__project__slug__iexact=text)
+        return Q(
+            change__component_id__in=list(
+                Component.objects.filter_by_path(text).values_list("id", flat=True)
             )
-        else:
-            query = Q(change__project__slug__iexact=text)
-        return query & Q(
-            change__timestamp__gte=timezone.now().replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            - timedelta(days=90)
         )
 
 
@@ -681,13 +676,23 @@ def parser_to_query(obj, context: dict) -> Q:
         return obj.as_query(context)
 
     # Operators
-    operator = "AND"
+    operator = ""
     expressions = []
+    was_operator = False
     for item in obj:
-        if isinstance(item, str) and item.upper() in {"OR", "AND", "NOT"}:
-            operator = item.upper()
+        if isinstance(item, str) and (current := item.upper()) in {"OR", "AND", "NOT"}:
+            if operator and current != operator:
+                msg = "Mixed operators!"
+                raise ValueError(msg)
+            operator = current
+            was_operator = True
             continue
-        expressions.append(parser_to_query(item, context))
+        if not was_operator and expressions:
+            # Implicit AND
+            expressions[-1] &= parser_to_query(item, context)
+        else:
+            expressions.append(parser_to_query(item, context))
+        was_operator = False
 
     if not expressions:
         return Q()

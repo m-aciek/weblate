@@ -5,15 +5,19 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nh3
 from django.utils.html import format_html, format_html_join
+from django.utils.translation import pgettext
 from html2text import HTML2Text as _HTML2Text
 from lxml.etree import HTMLParser
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from django.utils.safestring import SafeString
     from lxml.etree import ParserTarget
 
@@ -72,6 +76,7 @@ CLEAN_CONTENT_TAGS = {"script", "style"}
 # Allow some chars:
 # - non breakable space
 SANE_CHARS = re.compile(r"[\xa0]")
+NH3_LOCK = threading.Lock()
 
 
 class MarkupExtractor(ParserTarget):
@@ -114,13 +119,14 @@ class HTMLSanitizer:
 
         tags, attributes = extract_html_tags(source)
 
-        text = nh3.clean(
-            text,
-            link_rel=None,
-            tags=tags,
-            attributes=attributes,
-            clean_content_tags=CLEAN_CONTENT_TAGS - tags,
-        )
+        with NH3_LOCK:
+            text = nh3.clean(
+                text,
+                link_rel=None,
+                tags=tags,
+                attributes=attributes,
+                clean_content_tags=CLEAN_CONTENT_TAGS - tags,
+            )
 
         return self.add_back_special(text)
 
@@ -188,3 +194,16 @@ def mail_quote_value(text: str) -> str | SafeString:
         "{}",
         ((mail_quote_char(part),) for part in re.split(r"([.:])", text)),
     )
+
+
+def format_html_join_comma(
+    format_string: str, args_generator: Iterable[Iterable[Any]]
+) -> SafeString:
+    return format_html_join(
+        pgettext("Joins a list of values", ", "), format_string, args_generator
+    )
+
+
+def list_to_tuples(strings: Iterable[str]) -> list[tuple[str]]:
+    """Convert a list of strings into a list of single-element tuples."""
+    return [(s,) for s in strings]

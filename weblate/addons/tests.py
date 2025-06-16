@@ -4,21 +4,37 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from datetime import timedelta
 from io import StringIO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
+from unittest.mock import patch
 
+import jsonschema.exceptions
+import requests
+import responses
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 from django.test.utils import override_settings
 from django.urls import reverse
 from django.utils import timezone
+from standardwebhooks.webhooks import Webhook, WebhookVerificationError
 
 from weblate.lang.models import Language
-from weblate.trans.models import Comment, Component, Suggestion, Translation, Unit, Vote
+from weblate.trans.actions import ActionEvents
+from weblate.trans.models import (
+    Announcement,
+    Category,
+    Comment,
+    Component,
+    Suggestion,
+    Translation,
+    Unit,
+    Vote,
+)
 from weblate.trans.tests.test_views import ViewTestCase
 from weblate.utils.state import STATE_EMPTY, STATE_FUZZY, STATE_READONLY
 from weblate.utils.unittest import tempdir_setting
@@ -31,12 +47,7 @@ from .consistency import LanguageConsistencyAddon
 from .discovery import DiscoveryAddon
 from .example import ExampleAddon
 from .example_pre import ExamplePreAddon
-from .flags import (
-    BulkEditAddon,
-    SameEditAddon,
-    SourceEditAddon,
-    TargetEditAddon,
-)
+from .flags import BulkEditAddon, SameEditAddon, SourceEditAddon, TargetEditAddon
 from .forms import BaseAddonForm
 from .generate import (
     FillReadOnlyAddon,
@@ -59,6 +70,7 @@ from .properties import PropertiesSortAddon
 from .removal import RemoveComments, RemoveSuggestions
 from .resx import ResxUpdateAddon
 from .tasks import cleanup_addon_activity_log, daily_addons
+from .webhooks import JSONWebhookBaseAddon, SlackWebhookAddon, WebhookAddon
 from .xml import XMLCustomizeAddon
 from .yaml import YAMLCustomizeAddon
 
@@ -226,9 +238,13 @@ class IntegrationTest(TestAddonMixin, ViewTestCase):
         )
 
     def test_crash(self) -> None:
+        self.assertEqual([], self.component.addons_cache["__names__"])
+
         addon = CrashAddon.create(component=self.component)
+        self.assertEqual(
+            ["weblate.base.crash"], self.component.addons_cache["__names__"]
+        )
         self.assertTrue(Addon.objects.filter(name=CrashAddon.name).exists())
-        ADDONS[CrashAddon.get_identifier()] = CrashAddon
 
         with self.assertRaises(CrashAddonError):
             addon.post_update(self.component, "head", False)
@@ -238,6 +254,7 @@ class IntegrationTest(TestAddonMixin, ViewTestCase):
             self.component.repository.last_revision, False
         )
 
+        self.assertEqual([], self.component.addons_cache["__names__"])
         self.assertFalse(Addon.objects.filter(name=CrashAddon.name).exists())
 
     def test_process_error(self) -> None:
@@ -617,7 +634,7 @@ class JsonAddonTest(ViewTestCase):
         SameEditAddon.create(component=self.component)
 
         Unit.objects.filter(translation__language__code="cs").delete()
-        self.component.create_translations(force=True)
+        self.component.create_translations_immediate(force=True)
         self.assertFalse(
             Unit.objects.filter(translation__language__code="cs")
             .exclude(state__in=(STATE_FUZZY, STATE_EMPTY))
@@ -625,31 +642,56 @@ class JsonAddonTest(ViewTestCase):
         )
 
         Unit.objects.all().delete()
-        self.component.create_translations(force=True)
+        self.component.create_translations_immediate(force=True)
         self.assertFalse(
             Unit.objects.exclude(
                 state__in=(STATE_FUZZY, STATE_EMPTY, STATE_READONLY)
             ).exists()
         )
 
-    def asset_customize(self, expected: str) -> None:
+    def asset_customize(self, expected: str, *, is_compact: bool = False) -> str:
         rev = self.component.repository.last_revision
         self.edit_unit("Hello, world!\n", "Nazdar svete!\n")
         self.get_translation().commit_pending("test", None)
         self.assertNotEqual(rev, self.component.repository.last_revision)
         commit = self.component.repository.show(self.component.repository.last_revision)
         self.assertIn(f'{expected}"try"', commit)
+        if is_compact:
+            self.assertIn('":"', commit)
+        else:
+            self.assertIn(': "', commit)
+        return commit
 
     def test_customize(self) -> None:
         JSONCustomizeAddon.create(
             component=self.component,
-            configuration={"indent": 8, "sort": 1, "style": "spaces"},
+            configuration={"indent": 8, "sort_keys": 1, "style": "spaces"},
         )
-        self.asset_customize("        ")
+        commit = self.asset_customize("        ")
+        self.assertIn(
+            '''"orangutan": "",
++        "thanks": "",
++        "try": ""''',
+            commit,
+        )
+
+    def test_customize_no_sort(self) -> None:
+        self.edit_unit("Hello, world!\n", "Nazdar svete!\n")
+        JSONCustomizeAddon.create(
+            component=self.component,
+            configuration={"indent": 8, "sort_keys": 0, "style": "spaces"},
+        )
+        commit = self.asset_customize("        ")
+        self.assertIn(
+            '''"orangutan": "",
++        "try": "",
++        "thanks": ""''',
+            commit,
+        )
 
     def test_customize_sitewide(self) -> None:
         JSONCustomizeAddon.create(
-            configuration={"indent": 8, "sort": 1, "style": "spaces"},
+            configuration={"indent": 8, "sort_keys": 1, "style": "spaces"},
         )
         # This is not needed in real life as installation will happen
         # in a different request so local caching does not apply
@@ -660,9 +702,33 @@ class JsonAddonTest(ViewTestCase):
     def test_customize_tabs(self) -> None:
         JSONCustomizeAddon.create(
             component=self.component,
-            configuration={"indent": 8, "sort": 1, "style": "tabs"},
+            configuration={"indent": 8, "sort_keys": 1, "style": "tabs"},
         )
         self.asset_customize("\t\t\t\t\t\t\t\t")
+
+    def test_customize_compact_mode_on(self) -> None:
+        JSONCustomizeAddon.create(
+            component=self.component,
+            configuration={
+                "indent": 4,
+                "sort_keys": 1,
+                "style": "spaces",
+                "use_compact_separators": 1,
+            },
+        )
+        self.asset_customize("    ", is_compact=True)
+
+    def test_customize_compact_mode_off(self) -> None:
+        JSONCustomizeAddon.create(
+            component=self.component,
+            configuration={
+                "indent": 4,
+                "sort_keys": 1,
+                "style": "spaces",
+                "use_compact_separators": 0,
+            },
+        )
+        self.asset_customize("    ", is_compact=False)
 
 
 class XMLAddonTest(ViewTestCase):
@@ -1221,9 +1287,9 @@ class GitSquashAddonTest(ViewTestCase):
             component=component, configuration={"squash": mode}
         )
 
-    def edit(self) -> None:
+    def edit(self, *, repeated: bool = False) -> None:
         for lang in ("cs", "de"):
-            self.change_unit("Nazdar svete!\n", "Hello, world!\n", lang)
+            self.change_unit("Nazdar svete!\n", "Hello, world!\n", language=lang)
             self.component.commit_pending("test", None)
             self.change_unit(
                 "Diky za pouziti Weblate.",
@@ -1233,8 +1299,22 @@ class GitSquashAddonTest(ViewTestCase):
             )
             self.component.commit_pending("test", None)
 
+        # Add commit on the same unit, that is touched by anotheruser
+        if repeated:
+            self.change_unit(
+                "Danke für die Benutzung von Weblate.",
+                "Thank you for using Weblate.",
+                language="de",
+            )
+            self.component.commit_pending("test", None)
+
     def test_squash(
-        self, mode: str = "all", expected: int = 1, sitewide: bool = False
+        self,
+        mode: str = "all",
+        expected: int = 1,
+        *,
+        sitewide: bool = False,
+        repeated: bool = False,
     ) -> None:
         addon = self.create(mode=mode, sitewide=sitewide)
         repo = self.component.repository
@@ -1242,7 +1322,7 @@ class GitSquashAddonTest(ViewTestCase):
         # Test no-op behavior
         addon.post_commit(self.component, True)
         # Make some changes
-        self.edit()
+        self.edit(repeated=repeated)
         self.assertEqual(repo.count_outgoing(), expected)
 
     def test_squash_sitewide(self) -> None:
@@ -1264,6 +1344,9 @@ class GitSquashAddonTest(ViewTestCase):
         self.change_unit("Diky za pouzivani Weblate.", "Thank you for using Weblate.")
         self.component.commit_pending("test", None)
         self.assertEqual(self.component.repository.count_outgoing(), 3)
+
+    def test_multiple_authors_on_same_file(self) -> None:
+        self.test_squash("author", 3, repeated=True)
 
     def test_commit_message(self) -> None:
         commit_message = "Squashed commit message"
@@ -1544,7 +1627,7 @@ class SiteWideAddonsTest(ViewTestCase):
 
     def test_json(self) -> None:
         JSONCustomizeAddon.create(
-            configuration={"indent": 8, "sort": 1, "style": "spaces"},
+            configuration={"indent": 8, "sort_keys": 1, "style": "spaces"},
         )
         # This is not needed in real life as installation will happen
         # in a different request so local caching does not apply
@@ -1560,3 +1643,401 @@ class SiteWideAddonsTest(ViewTestCase):
 class TasksTest(TestCase):
     def test_cleanup_addon_activity_log(self) -> None:
         cleanup_addon_activity_log()
+
+
+class BaseWebhookTests:
+    addon_configuration: ClassVar[dict]
+    WEBHOOK_CLS: type[JSONWebhookBaseAddon]
+    WEBHOOK_URL: str
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.reset_addon_configuration()
+
+    def reset_addon_configuration(self):
+        self.addon_configuration["events"] = [str(ActionEvents.NEW)]
+
+    def do_translation_added_test(
+        self, response_code=None, expected_calls: int = 1, **responses_kwargs
+    ):
+        """Install addon, edit unit and assert outgoing calls."""
+        self.WEBHOOK_CLS.create(configuration=self.addon_configuration)
+        if response_code:
+            responses_kwargs |= {"status": response_code}
+        responses.add(responses.POST, self.WEBHOOK_URL, **responses_kwargs)
+
+        self.edit_unit(
+            "Hello, world!\n", "Nazdar svete!\n"
+        )  # triggers ACTION_NEW event
+        unit_to_delete = self.get_unit("Orangutan has %d banana")
+        self.translation.delete_unit(
+            None, unit_to_delete
+        )  # triggers ACTION_STRING_REMOVE event
+        self.assertEqual(len(responses.calls), expected_calls)
+
+    @responses.activate
+    def test_bulk_changes(self):
+        """Test bulk change create via the propagate() method."""
+        # create another component in project with same units as self.component
+        self.create_po(
+            new_base="po/project.pot", project=self.project, name="Component B1"
+        )
+        # listen to propagate change event
+        self.addon_configuration["events"].append(ActionEvents.PROPAGATED_EDIT)
+
+        self.WEBHOOK_CLS.create(
+            configuration=self.addon_configuration, project=self.project
+        )
+        self.component.drop_addons_cache()
+        responses.add(responses.POST, self.WEBHOOK_URL, status=200)
+
+        # create translation for unit and similar units across project
+        self.change_unit("Nazdar svete!\n", "Hello, world!\n", "cs")
+        self.assertEqual(len(responses.calls), 2)
+
+    @responses.activate
+    def test_translation_added(self) -> None:
+        """Test translation added and translation edited action change."""
+        self.addon_configuration["events"].append(ActionEvents.CHANGE)
+        self.do_translation_added_test(response_code=200)
+        responses.calls.reset()
+        self.edit_unit("Hello, world!\n", "Nazdar svete edit!\n")
+        self.assertEqual(len(responses.calls), 1)
+
+    @responses.activate
+    def test_announcement(self) -> None:
+        """Test project and site wide events."""
+        self.addon_configuration["events"].append(ActionEvents.ANNOUNCEMENT)
+        self.WEBHOOK_CLS.create(configuration=self.addon_configuration)
+        self.WEBHOOK_CLS.create(
+            configuration=self.addon_configuration, project=self.project
+        )
+
+        responses.calls.reset()
+        Announcement.objects.create(user=self.user, message="Site-wide")
+        # Only site-wide add-on should receive this
+        self.assertEqual(len(responses.calls), 1)
+
+        responses.calls.reset()
+        Announcement.objects.create(
+            user=self.user, message="Project-wide", project=self.project
+        )
+        # Both site-wide and project-wide add-ons should receive this
+        self.assertEqual(len(responses.calls), 2)
+
+    @responses.activate
+    def test_component_scopes(self) -> None:
+        """Test webhook addon installed at component level."""
+        secondary_url = self.WEBHOOK_URL + "-2"
+        component1 = self.component
+        component2 = self.create_po(
+            new_base="po/project.pot", project=self.project, name="Secondary component"
+        )
+        config1 = self.addon_configuration.copy()
+        config2 = self.addon_configuration.copy() | {"webhook_url": secondary_url}
+
+        self.WEBHOOK_CLS.create(configuration=config1, component=component1)
+        self.WEBHOOK_CLS.create(configuration=config2, component=component2)
+
+        resp1 = responses.post(self.WEBHOOK_URL, status=200)
+        resp2 = responses.post(secondary_url, status=200)
+        translation1 = self.get_translation()
+        translation2 = component2.translation_set.get(language__code="cs")
+
+        # delete similar units to avoid propagation of changes
+        translation1.unit_set.filter(source="Thank you for using Weblate.").delete()
+        translation2.unit_set.filter(source="Hello, world!\n").delete()
+
+        self.edit_unit("Hello, world!\n", "Nazdar svete!\n", translation=translation1)
+        self.edit_unit(
+            "Thank you for using Weblate.",
+            "Díky za používání Weblate.",
+            translation=translation2,
+        )
+
+        self.assertEqual(len(resp1.calls), 1)
+        self.assertEqual(len(resp2.calls), 1)
+
+    @responses.activate
+    def test_project_scopes(self) -> None:
+        """Test webhook addon installed at project level."""
+        secondary_url = self.WEBHOOK_URL + "-2"
+        project_a = self.project
+        component_a1 = self.component
+        component_a2 = self.create_po(
+            new_base="po/project.pot", project=project_a, name="Component A2"
+        )
+
+        project_b = self.create_project(name="Test 2", slug="project2")
+        component_b1 = self.create_po(
+            new_base="po/project.pot", project=project_b, name="Component B1"
+        )
+
+        config_a = self.addon_configuration.copy()
+        config_b = self.addon_configuration.copy() | {"webhook_url": secondary_url}
+
+        self.WEBHOOK_CLS.create(configuration=config_a, project=project_a)
+        self.WEBHOOK_CLS.create(configuration=config_b, project=project_b)
+
+        resp_a = responses.post(self.WEBHOOK_URL, status=200)
+        resp_b = responses.post(secondary_url, status=200)
+
+        translation_a1 = component_a1.translation_set.get(language__code="cs")
+        translation_a2 = component_a2.translation_set.get(language__code="cs")
+        translation_b1 = component_b1.translation_set.get(language__code="cs")
+
+        # delete similar units between components to avoir propagation
+        translation_a1.unit_set.filter(source="Thank you for using Weblate.").delete()
+        translation_a2.unit_set.filter(source="Hello, world!\n").delete()
+
+        self.edit_unit("Hello, world!\n", "Nazdar svete!\n", translation=translation_a1)
+        self.edit_unit(
+            "Thank you for using Weblate.",
+            "Díky za používání Weblate.",
+            translation=translation_a2,
+        )
+        self.edit_unit("Hello, world!\n", "Nazdar svete!\n", translation=translation_b1)
+
+        self.assertEqual(len(resp_a.calls), 2)
+        self.assertEqual(len(resp_b.calls), 1)
+
+    @responses.activate
+    def test_site_wide_scope(self) -> None:
+        """Test webhook addon installed site-wide."""
+        project_b = self.create_project(name="Test 2", slug="project2")
+        component_b1 = self.create_po(
+            new_base="po/project.pot", project=project_b, name="Component B1"
+        )
+
+        self.WEBHOOK_CLS.create(configuration=self.addon_configuration)
+        responses.add(responses.POST, self.WEBHOOK_URL, status=200)
+
+        translation_a1 = self.get_translation()
+        translation_b1 = component_b1.translation_set.get(language__code="cs")
+        self.edit_unit("Hello, world!\n", "Nazdar svete!\n", translation=translation_a1)
+        self.edit_unit("Hello, world!\n", "Nazdar svete!\n", translation=translation_b1)
+
+        self.assertEqual(len(responses.calls), 2)
+
+    @responses.activate
+    def test_connection_error(self):
+        """Test connection error when during message delivery."""
+        self.do_translation_added_test(body=requests.ConnectionError())
+
+
+class WebhooksAddonTest(BaseWebhookTests, ViewTestCase):
+    """Test for Webhook Addon."""
+
+    WEBHOOK_CLS = WebhookAddon
+    WEBHOOK_URL = "https://example.com/webhooks"
+
+    addon_configuration: ClassVar[dict] = {
+        "webhook_url": WEBHOOK_URL,
+        "events": [],
+    }
+
+    @responses.activate
+    def test_invalid_response(self):
+        """Test invalid response from client."""
+        self.do_translation_added_test(response_code=301)
+
+    @responses.activate
+    def test_webhook_signature(self):
+        """Test webhook signature features."""
+        self.addon_configuration["secret"] = "secret-string"
+        self.do_translation_added_test(response_code=200)
+
+        wh_request = responses.calls[0].request
+        wh_utils = Webhook("secret-string")
+
+        # valid request
+        wh_utils.verify(wh_request.body, wh_request.headers)
+
+        # valid request with bytes
+        Webhook(base64.b64decode("secret-string")).verify(
+            wh_request.body, wh_request.headers
+        )
+
+        wh_headers = dict(wh_request.headers)
+
+        # valid request with multiple signatures (space separated)
+        new_headers = wh_headers.copy()
+        new_headers["webhook-signature"] = (
+            "v1,Ceo5qEr07ixe2NLpvHk3FH9bwy/WavXrAFQ/9tdO6mc= "
+            "v2,Gur4pLd03kjn8RYtBm5eJ1aZx/CbVfSdTq/2gNhA8= "
+            + new_headers["webhook-signature"]
+        )
+        wh_utils.verify(wh_request.body, new_headers)
+
+        #  "Invalid Signature Headers"
+        with self.assertRaises(WebhookVerificationError):
+            new_headers = wh_headers.copy()
+            new_headers["webhook-signature"] = (
+                new_headers["webhook-signature"][:-5] + "xxxxx"
+            )
+            wh_utils.verify(wh_request.body, new_headers)
+
+        #  "Missing required headers"
+        with self.assertRaises(WebhookVerificationError):
+            new_headers = wh_headers.copy()
+            del new_headers["webhook-signature"]
+            wh_utils.verify(wh_request.body, new_headers)
+
+        #  "Invalid secret"
+        with self.assertRaises(WebhookVerificationError):
+            Webhook("xxxx-xxxx-xxxx").verify(wh_request.body, wh_headers)
+
+        #  "Invalid format of timestamp"
+        with self.assertRaises(WebhookVerificationError):
+            new_headers = wh_headers.copy()
+            new_headers["webhook-timestamp"] = "NaN"
+            wh_utils.verify(wh_request.body, new_headers)
+
+        #  "Outdated headers timestamp"
+        with self.assertRaises(WebhookVerificationError):
+            new_headers = wh_headers.copy()
+            new_headers["webhook-timestamp"] = str(
+                (timezone.now() - timedelta(minutes=6)).timestamp()
+            )
+            wh_utils.verify(wh_request.body, new_headers)
+
+        #  "Invalid future timestamp"
+        with self.assertRaises(WebhookVerificationError):
+            new_headers = wh_headers.copy()
+            new_headers["webhook-timestamp"] = str(
+                (timezone.now() + timedelta(minutes=6)).timestamp()
+            )
+            wh_utils.verify(wh_request.body, new_headers)
+
+    def test_form(self):
+        """Test WebhooksAddonForm."""
+        self.user.is_superuser = True
+        self.user.save()
+        # Missing url param
+        response = self.client.post(
+            reverse("addons", kwargs=self.kw_component),
+            {
+                "name": "weblate.webhook.webhook",
+                "form": "1",
+            },
+            follow=True,
+        )
+        self.assertNotContains(response, "Installed 1 add-on")
+
+        # empty secret
+        response = self.client.post(
+            reverse("addons", kwargs=self.kw_component),
+            {
+                "name": "weblate.webhook.webhook",
+                "form": "1",
+                "webhook_url": "https://example.com/webhooks",
+                "secret": "",
+            },
+            follow=True,
+        )
+        self.assertContains(response, "Installed 1 add-on")
+
+        # delete addon
+        addon_id = Addon.objects.get(component=self.component).id
+        response = self.client.post(
+            reverse("addon-detail", kwargs={"pk": addon_id}),
+            {"delete": "weblate.webhook.webhook"},
+            follow=True,
+        )
+        self.assertContains(response, "No add-ons currently installed")
+
+        # invalid secret
+        response = self.client.post(
+            reverse("addons", kwargs=self.kw_component),
+            {
+                "name": "weblate.webhook.webhook",
+                "form": "1",
+                "webhook_url": "https://example.com/webhooks",
+                "events": [ActionEvents.NEW],
+                "secret": "xxxx-xx",
+            },
+            follow=True,
+        )
+        self.assertContains(response, "Invalid base64 encoded string")
+
+        # valid secret
+        response = self.client.post(
+            reverse("addons", kwargs=self.kw_component),
+            {
+                "name": "weblate.webhook.webhook",
+                "form": "1",
+                "webhook_url": "https://example.com/webhooks",
+                "secret": "xxxx-xxxx-xxxx",
+                "events": [ActionEvents.NEW],
+            },
+            follow=True,
+        )
+        self.assertContains(response, "Installed 1 add-on")
+
+    @responses.activate
+    def test_jsonschema_error(self):
+        """Test payload schema validation error."""
+        with patch(
+            "weblate.addons.webhooks.validate_schema",
+            side_effect=jsonschema.exceptions.ValidationError("message"),
+        ):
+            self.do_translation_added_test(expected_calls=0)
+
+    @responses.activate
+    def test_category_in_payload(self) -> None:
+        """Test webhook payload includes category field when available."""
+        self.project.add_user(self.user, "Administration")
+        self.addon_configuration["events"] = [ActionEvents.RENAME_COMPONENT]
+        self.WEBHOOK_CLS.create(
+            configuration=self.addon_configuration, component=self.component
+        )
+        parent_category = Category.objects.create(
+            name="Parent Category", slug="parent-category", project=self.project
+        )
+        child_category = Category.objects.create(
+            name="Child Category",
+            slug="child-category",
+            category=parent_category,
+            project=self.project,
+        )
+        sub_category = Category.objects.create(
+            name="Sub Category",
+            slug="sub-category",
+            category=child_category,
+            project=self.project,
+        )
+        self.component.category = sub_category
+        self.component.save()
+
+        responses.add(responses.POST, "https://example.com/webhooks", status=200)
+        self.client.post(
+            reverse("rename", kwargs={"path": self.component.get_url_path()}),
+            {
+                "name": "New name",
+                "slug": "new-name",
+                "project": self.project.pk,
+                "category": sub_category.pk,
+            },
+        )
+
+        request_body = json.loads(responses.calls[0].request.body)
+        self.assertIn("child-category", request_body["category"])
+        self.assertIn("parent-category", request_body["category"])
+        self.assertIn("sub-category", request_body["category"])
+
+
+class SlackWebhooksAddonsTest(BaseWebhookTests, ViewTestCase):
+    WEBHOOK_CLS = SlackWebhookAddon
+    WEBHOOK_URL = (
+        "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+    )
+
+    addon_configuration: ClassVar[dict] = {
+        "webhook_url": WEBHOOK_URL,
+        "events": [str(ActionEvents.NEW)],
+    }
+
+    @responses.activate
+    def test_invalid_response(self):
+        """Test invalid response from client."""
+        self.do_translation_added_test(response_code=410, body=b"channel_is_archived")

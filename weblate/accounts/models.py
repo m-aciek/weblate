@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 from datetime import timedelta
+from ipaddress import IPv6Network, ip_network
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
@@ -44,21 +46,29 @@ from weblate.accounts.tasks import notify_auditlog
 from weblate.auth.models import AuthenticatedHttpRequest, User
 from weblate.lang.models import Language
 from weblate.trans.defines import EMAIL_LENGTH
-from weblate.trans.models import Change, ComponentList
+from weblate.trans.models import Change, ComponentList, Translation, Unit
+from weblate.trans.models.translation import GhostTranslation
 from weblate.utils import messages
 from weblate.utils.decorators import disable_for_loaddata
 from weblate.utils.fields import EmailField
 from weblate.utils.html import mail_quote_value
 from weblate.utils.render import validate_editor
 from weblate.utils.request import get_ip_address, get_user_agent
+from weblate.utils.stats import (
+    CategoryLanguageStats,
+    GhostProjectLanguageStats,
+    ProjectLanguageStats,
+)
 from weblate.utils.token import get_token
 from weblate.utils.validators import EMAIL_BLACKLIST, WeblateURLValidator
 from weblate.wladmin.models import get_support_status
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from django_otp.models import Device
+
+LOGGER = logging.getLogger("weblate.audit")
 
 
 class WeblateAccountsConf(AppConf):
@@ -113,6 +123,8 @@ class WeblateAccountsConf(AppConf):
     SOCIAL_AUTH_SAML_IMAGE = "saml.svg"
     SOCIAL_AUTH_SAML_TITLE = "SAML"
 
+    MAXIMAL_PASSWORD_LENGTH = 72
+
     # Login required URLs
     LOGIN_REQUIRED_URLS = []
     LOGIN_REQUIRED_URLS_EXCEPTIONS = (
@@ -128,6 +140,7 @@ class WeblateAccountsConf(AppConf):
         r"{URL_PREFIX}/contact/$",  # Optional for contact form
         r"{URL_PREFIX}/legal/(.*)$",  # Optional for legal app
         r"{URL_PREFIX}/avatar/(.*)$",  # Optional for avatars
+        r"{URL_PREFIX}/site.webmanifest$",  # The request for the manifest is made without credentials
     )
 
     class Meta:
@@ -202,75 +215,121 @@ class Subscription(models.Model):
 
 
 ACCOUNT_ACTIVITY = {
+    # Translators: Audit log entry
     "password": gettext_lazy("Password changed."),
+    # Translators: Audit log entry
     "username": gettext_lazy("Username changed from {old} to {new}."),
+    # Translators: Audit log entry
     "email": gettext_lazy("E-mail changed from {old} to {new}."),
+    # Translators: Audit log entry
     "full_name": gettext_lazy("Full name changed from {old} to {new}."),
+    # Translators: Audit log entry
     "reset-request": gettext_lazy("Password reset requested."),
+    # Translators: Audit log entry
     "reset": gettext_lazy("Password reset confirmed, password turned off."),
+    # Translators: Audit log entry
     "auth-connect": gettext_lazy("Configured sign in using {method} ({name})."),
+    # Translators: Audit log entry
     "auth-disconnect": gettext_lazy("Removed sign in using {method} ({name})."),
+    # Translators: Audit log entry
     "login": gettext_lazy("Signed in using {method} ({name})."),
+    # Translators: Audit log entry
     "login-new": gettext_lazy("Signed in using {method} ({name}) from a new device."),
+    # Translators: Audit log entry
     "register": gettext_lazy("Somebody attempted to register with your e-mail."),
+    # Translators: Audit log entry
     "connect": gettext_lazy(
         "Somebody attempted to register using your e-mail address."
     ),
+    # Translators: Audit log entry
     "failed-auth": gettext_lazy("Could not sign in using {method} ({name})."),
+    # Translators: Audit log entry
     "locked": gettext_lazy("Account locked due to many failed sign in attempts."),
+    # Translators: Audit log entry
+    "admin-locked": gettext_lazy("Account locked by the site administrator."),
+    # Translators: Audit log entry
     "removed": gettext_lazy("Account and all private data removed."),
+    # Translators: Audit log entry
     "removal-request": gettext_lazy("Account removal confirmation sent to {email}."),
+    # Translators: Audit log entry
     "tos": gettext_lazy("Agreement with General Terms and Conditions {date}."),
+    # Translators: Audit log entry
     "invited": gettext_lazy("Invited to {site_title} by {username}."),
+    # Translators: Audit log entry
     "accepted": gettext_lazy("Accepted invitation from {username}."),
+    # Translators: Audit log entry
     "trial": gettext_lazy("Started trial period."),
+    # Translators: Audit log entry
     "sent-email": gettext_lazy("Sent confirmation mail to {email}."),
+    # Translators: Audit log entry
     "autocreated": gettext_lazy(
         "The system created a user to track authorship of "
         "translations uploaded by other user."
     ),
+    # Translators: Audit log entry
     "blocked": gettext_lazy("Access to project {project} was blocked."),
+    # Translators: Audit log entry
     "enabled": gettext_lazy("User was enabled by administrator."),
+    # Translators: Audit log entry
     "disabled": gettext_lazy("User was disabled by administrator."),
+    # Translators: Audit log entry
     "donate": gettext_lazy("Semiannual support status review was displayed."),
+    # Translators: Audit log entry
     "team-add": gettext_lazy("User was added to the {team} team by {username}."),
+    # Translators: Audit log entry
     "team-remove": gettext_lazy("User was removed from the {team} team by {username}."),
+    # Translators: Audit log entry
     "recovery-generate": gettext_lazy(
         "Two-factor authentication recovery codes were generated"
     ),
+    # Translators: Audit log entry
     "recovery-show": gettext_lazy(
         "Two-factor authentication recovery codes were viewed"
     ),
+    # Translators: Audit log entry
     "twofactor-add": gettext_lazy("Two-factor authentication added: {device}"),
+    # Translators: Audit log entry
     "twofactor-remove": gettext_lazy("Two-factor authentication removed: {device}"),
+    # Translators: Audit log entry
     "twofactor-login": gettext_lazy("Two-factor authentication sign in using {device}"),
 }
+AUDIT_WARNING = {"locked", "removed", "failed-auth", "admin-locked"}
 # Override activity messages based on method
 ACCOUNT_ACTIVITY_METHOD = {
     "password": {
+        # Translators: Audit log entry
         "auth-connect": gettext_lazy("Configured password to sign in."),
+        # Translators: Audit log entry
         "login": gettext_lazy("Signed in using password."),
+        # Translators: Audit log entry
         "login-new": gettext_lazy("Signed in using password from a new device."),
+        # Translators: Audit log entry
         "failed-auth": gettext_lazy("Could not sign in using password."),
     },
     "project": {
+        # Translators: Audit log entry
         "invited": gettext_lazy("Invited to {project} by {username}."),
     },
     "configured": {
+        # Translators: Audit log entry
         "password": gettext_lazy("Password configured."),
     },
 }
 
 EXTRA_MESSAGES = {
+    # Translators: Audit log hint
     "locked": gettext_lazy(
         "To restore access to your account, please reset your password."
     ),
+    # Translators: Audit log hint
     "blocked": gettext_lazy(
         "Please contact project maintainers if you feel this is inappropriate."
     ),
+    # Translators: Audit log hint
     "register": gettext_lazy(
         "If it was you, please use a password reset to regain access to your account."
     ),
+    # Translators: Audit log hint
     "connect": gettext_lazy(
         "If it was you, please use a password reset to regain access to your account."
     ),
@@ -379,9 +438,20 @@ class AuditLog(models.Model):
 
     def save(self, *args, **kwargs) -> None:
         super().save(*args, **kwargs)
+
+        # User notification
         if self.should_notify():
             email = self.user.email
             notify_auditlog.delay_on_commit(self.pk, email)
+
+        # Log event
+        LOGGER.log(
+            logging.WARNING if self.activity in AUDIT_WARNING else logging.INFO,
+            "audit[%s]: %s from %s",
+            self.activity,
+            self.user.username if self.user else None,
+            self.address,
+        )
 
     def get_params(self):
         from weblate.accounts.templatetags.authnames import get_auth_name
@@ -430,12 +500,12 @@ class AuditLog(models.Model):
 
     def check_rate_limit(self, request: AuthenticatedHttpRequest) -> bool:
         """Check whether the activity should be rate limited."""
+        from weblate.accounts.utils import lock_user
+
         if self.activity == "failed-auth" and self.user.has_usable_password():
             failures = AuditLog.objects.get_after(self.user, "login", "failed-auth")
             if failures.count() >= settings.AUTH_LOCK_ATTEMPTS:
-                self.user.set_unusable_password()
-                self.user.save(update_fields=["password"])
-                AuditLog.objects.create(self.user, request, "locked")
+                lock_user(self.user, "locked", request)
                 return True
 
         elif self.activity == "reset-request":
@@ -448,6 +518,15 @@ class AuditLog(models.Model):
                 return True
 
         return False
+
+    @property
+    def shortened_address(self) -> str:
+        if not self.address:
+            return ""
+        network = ip_network(self.address)
+        prefix_len = 48 if isinstance(network, IPv6Network) else 16
+        supernet = network.supernet(new_prefix=prefix_len)
+        return str(supernet.network_address)
 
 
 class VerifiedEmail(models.Model):
@@ -590,6 +669,13 @@ class Profile(models.Model):
             "Whenever you translate a string in a project, you will start watching it."
         ),
     )
+    contribute_personal_tm = models.BooleanField(
+        verbose_name=gettext_lazy("Contribute to personal translation memory"),
+        default=True,
+        help_text=gettext_lazy(
+            "Allow your translations to be added to your personal translation memory."
+        ),
+    )
 
     DASHBOARD_WATCHED = 1
     DASHBOARD_COMPONENT_LIST = 4
@@ -642,6 +728,14 @@ class Profile(models.Model):
         verbose_name=gettext_lazy("Website URL"),
         blank=True,
         validators=[WeblateURLValidator()],
+    )
+    contact = models.URLField(
+        verbose_name=gettext_lazy("Contact URL"),
+        blank=True,
+        validators=[WeblateURLValidator()],
+        help_text=gettext_lazy(
+            "Link to contact you online using services like Signal, SimpleX or Telegram."
+        ),
     )
     liberapay = models.SlugField(
         verbose_name=gettext_lazy("Liberapay username"),
@@ -853,25 +947,70 @@ class Profile(models.Model):
     def secondary_language_ids(self) -> set[int]:
         return set(self.secondary_languages.values_list("pk", flat=True))
 
-    def get_translation_orderer(self, request: AuthenticatedHttpRequest):
+    def get_translation_orderer(
+        self, request: AuthenticatedHttpRequest | None
+    ) -> Callable[
+        [
+            Iterable[
+                Unit
+                | Translation
+                | Language
+                | ProjectLanguageStats
+                | CategoryLanguageStats
+                | GhostProjectLanguageStats
+                | GhostTranslation
+            ]
+        ],
+        str,
+    ]:
         """Create a function suitable for ordering languages based on user preferences."""
 
-        def get_translation_order(translation) -> str:
+        def get_translation_order(
+            obj: Unit
+            | Translation
+            | Language
+            | ProjectLanguageStats
+            | CategoryLanguageStats
+            | GhostProjectLanguageStats
+            | GhostTranslation,
+        ) -> str:
             from weblate.trans.models import Unit
 
-            if isinstance(translation, Unit):
-                translation = translation.translation
-            language = translation.language
+            language: Language
+            is_source = False
+            if isinstance(obj, Language):
+                language = obj
+            elif isinstance(obj, Unit):
+                translation = obj.translation
+                language = translation.language
+                is_source = translation.is_source
+            elif isinstance(
+                obj,
+                (
+                    Translation,
+                    ProjectLanguageStats,
+                    CategoryLanguageStats,
+                    GhostProjectLanguageStats,
+                    GhostTranslation,
+                ),
+            ):
+                language = obj.language
+                is_source = obj.is_source
+            else:
+                message = f"{obj.__class__.__name__} is not supported"
+                raise TypeError(message)
 
             if language.pk in self.primary_language_ids:
                 priority = 0
             elif language.pk in self.secondary_language_ids:
                 priority = 1
             elif (
-                not self.primary_language_ids and language == request.accepted_language
+                not self.primary_language_ids
+                and request is not None
+                and language == request.accepted_language
             ):
                 priority = 2
-            elif translation.is_source:
+            elif is_source:
                 priority = 3
             else:
                 priority = 4
@@ -964,7 +1103,7 @@ class Profile(models.Model):
             for device in self.second_factors
         )
 
-    def log_2fa(self, request: AuthenticatedHttpRequest, device: Device):
+    def log_2fa(self, request: AuthenticatedHttpRequest, device: Device) -> None:
         from weblate.accounts.utils import get_key_name, get_key_type
 
         # Audit log entry

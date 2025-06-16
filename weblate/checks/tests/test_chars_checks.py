@@ -20,6 +20,7 @@ from weblate.checks.chars import (
     EndSpaceCheck,
     EndStopCheck,
     EscapedNewlineCountingCheck,
+    KabyleCharactersCheck,
     KashidaCheck,
     MaxLengthCheck,
     NewLineCountCheck,
@@ -456,4 +457,47 @@ class PunctuationSpacingCheckTest(CheckTestCase):
                 "md-text",
             ),
             "fr",
+        )
+
+    def test_restructured_text(self) -> None:
+        self.do_test(
+            True,
+            (
+                ":ref:`document` here",
+                ":ref:`document` tam",
+                "",
+            ),
+            "fr",
+        )
+        self.do_test(
+            False,
+            (
+                ":ref:`document` here",
+                ":ref:`document` tam",
+                "rst-text",
+            ),
+            "fr",
+        )
+
+
+class KabyleCharactersCheckTest(CheckTestCase):
+    check = KabyleCharactersCheck()
+    default_lang = "kab"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.test_good_matching = ("string", "string", "")
+        self.test_failure_1 = ("string", "γ", "")
+        self.test_failure_2 = ("string", "Γ", "")
+        self.test_failure_3 = ("string", "ε", "")
+
+    def test_skip(self) -> None:
+        self.do_test(
+            False,
+            (
+                "string",
+                "γΓε",
+                "",
+            ),
+            "el",
         )

@@ -34,7 +34,7 @@ class PlanAdmin(WeblateModelAdmin):
         "public",
         "change_access_control",
     )
-    ordering = ["price"]
+    ordering = ["name"]
     prepopulated_fields = {"slug": ("name",)}
     list_filter = ["public", "change_access_control"]
 
@@ -110,3 +110,4 @@ class InvoiceAdmin(WeblateModelAdmin):
     search_fields = ("billing__projects__name", "ref", "note")
     date_hierarchy = "end"
     ordering = ["billing", "-start"]
+    autocomplete_fields = ("billing",)

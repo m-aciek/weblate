@@ -36,7 +36,7 @@ Having navigated to a component, a set of links lead to its actual translation.
 The translation is further divided into individual checks, like
 :guilabel:`Untranslated strings` or :guilabel:`Unfinished strings`.
 If the whole project is already translated without any errors, :guilabel:`All strings`
-is still available. Alternatively you can use the :ref:`Search <Searching>` feature
+is still available. Alternatively you can use the :doc:`Search </user/search>` feature
 to find a specific string or term.
 
 
@@ -73,7 +73,7 @@ the original string, for example that it should be rephrased, or to ask
 questions about it.
 
 Markdown syntax can be used in all comments, as well as mentioning other
-users by using``@username``.
+users by using ``@username``.
 
 .. seealso::
 
@@ -235,7 +235,7 @@ The following keyboard shortcuts can be utilized during translation:
 |                                           |                                                                       |
 | :kbd:`Cmd+1` to :kbd:`Cmd+9`              |                                                                       |
 +-------------------------------------------+-----------------------------------------------------------------------+
-| :kbd:`Ctrl+M` followed by                 | Copy the machine translation of given number to current translation.  |
+| :kbd:`Ctrl+M` followed by                 | Copy the machine translation of a given number to current translation.|
 | :kbd:`1` to :kbd:`9` or                   |                                                                       |
 |                                           |                                                                       |
 | :kbd:`Cmd+M` followed by                  |                                                                       |
@@ -309,7 +309,7 @@ Translation memory
     Look at similar strings translated in past, see :ref:`memory`.
 Glossary
     Displays terms from the project glossary used in the current message.
-Recent changes
+History
     List of people whom have changed this message recently using Weblate.
 Project
     Project info like instructions for translators, or a directory or link
@@ -444,7 +444,7 @@ Supported operations:
 Matrix View
 -----------
 
-You can compare different languages efficiently using this view
+You can compare different languages efficiently using this view.
 It is available on every component page, from the :guilabel:`Tools` menu.
 First select all languages you want to compare, confirm your selection,
 then click on any translation to open and edit it.

@@ -1,12 +1,13 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Prachi Joshi <josprachi@yahoo.com>, 2025.
 msgid ""
 msgstr ""
-"Project-Id-Version: Weblate 5.9\n"
+"Project-Id-Version: Weblate 5.12\n"
 "Report-Msgid-Bugs-To: https://github.com/WeblateOrg/weblate/issues\n"
-"POT-Creation-Date: 2024-12-13 14:50+0000\n"
-"PO-Revision-Date: 2020-10-23 07:43+0000\n"
+"POT-Creation-Date: 2025-06-12 08:17+0000\n"
+"PO-Revision-Date: 2025-02-05 19:31+0000\n"
 "Last-Translator: Prachi Joshi <josprachi@yahoo.com>\n"
 "Language-Team: Marathi <https://hosted.weblate.org/projects/weblate/"
 "javascript/mr/>\n"
@@ -15,24 +16,28 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=n > 1;\n"
-"X-Generator: Weblate 4.3.1\n"
+"X-Generator: Weblate 5.10-dev\n"
 
-#: weblate/static/editor/base.js:91
-msgid "Please select target plural by clicking."
+#: weblate/static/editor/base.js:43
+msgid "Unsaved changes!"
 msgstr ""
 
-#: weblate/static/editor/base.js:145
+#: weblate/static/editor/base.js:121
+msgid "Please select target plural by clicking."
+msgstr "कृपया क्लिक करून लक्ष्य बहुवचन निवडा."
+
+#: weblate/static/editor/base.js:202
 #, fuzzy
 #| msgid "There are some unsaved changes, are you sure you want to leave?"
 msgid "You have unsaved changes. Are you sure you want to skip?"
 msgstr "तेथे काही जतन न केलेले बदल आहेत, आपली खात्री आहे की आपण निघू इच्छिता?"
 
-#: weblate/static/editor/base.js:180
+#: weblate/static/editor/base.js:246
 #, javascript-format
 msgid "Cmd+%s"
 msgstr "Cmd+%s"
 
-#: weblate/static/editor/base.js:182
+#: weblate/static/editor/base.js:248
 #, javascript-format
 msgid "Ctrl+%s"
 msgstr "Ctrl + %s"
@@ -70,23 +75,23 @@ msgstr "हे डिसमिस करण्यासाठी Cmd + I नं�
 msgid "Press Ctrl+I then %s to dismiss this."
 msgstr "हे डिसमिस करण्यासाठी Ctrl + I नंतर %s दाबा."
 
-#: weblate/static/editor/full.js:592
+#: weblate/static/editor/full.js:590
 msgid "Clone to translation"
 msgstr ""
 
-#: weblate/static/editor/full.js:594
+#: weblate/static/editor/full.js:592
 msgid "Accept"
 msgstr ""
 
-#: weblate/static/editor/full.js:603
+#: weblate/static/editor/full.js:601
 msgid "Delete entry"
 msgstr ""
 
-#: weblate/static/editor/tools/search.js:49
+#: weblate/static/editor/tools/search.js:50
 msgid "No results found"
 msgstr ""
 
-#: weblate/static/editor/tools/search.js:102
+#: weblate/static/editor/tools/search.js:103
 #, javascript-format
 msgid "%s matching string"
 msgid_plural "%s matching strings"
@@ -97,16 +102,16 @@ msgstr[1] ""
 msgid "There are some unsaved changes, are you sure you want to leave?"
 msgstr "तेथे काही जतन न केलेले बदल आहेत, आपली खात्री आहे की आपण निघू इच्छिता?"
 
-#: weblate/static/js/screenshots/clipboard-paste.js:38
+#: weblate/static/js/screenshots/clipboard-paste.js:39
 msgid "Image Pasted!"
 msgstr ""
 
-#: weblate/static/js/screenshots/clipboard-paste.js:40
-#: weblate/static/js/screenshots/clipboard-paste.js:56
+#: weblate/static/js/screenshots/clipboard-paste.js:41
+#: weblate/static/js/screenshots/clipboard-paste.js:57
 msgid "Something went wrong!"
 msgstr ""
 
-#: weblate/static/js/screenshots/clipboard-paste.js:53
+#: weblate/static/js/screenshots/clipboard-paste.js:54
 msgid "No image found in clipboard"
 msgstr ""
 
@@ -122,48 +127,48 @@ msgstr "कोणतेही नवीन जुळणारे स्रोत
 msgid "Sort this column"
 msgstr "हा स्तंभ क्रमवारी लावा"
 
-#: weblate/static/loader-bootstrap.js:571
+#: weblate/static/loader-bootstrap.js:576
 msgid "Error while loading page:"
 msgstr "पृष्ठ लोड करताना त्रुटी:"
 
-#: weblate/static/loader-bootstrap.js:844
+#: weblate/static/loader-bootstrap.js:842
 msgid "Text copied to clipboard."
 msgstr "क्लिपबोर्डवर मजकूर कॉपी केला."
 
-#: weblate/static/loader-bootstrap.js:848
+#: weblate/static/loader-bootstrap.js:846
 msgid "Please press Ctrl+C to copy."
 msgstr "कृपया कॉपी करण्यासाठी Ctrl+C दाबा."
 
-#: weblate/static/loader-bootstrap.js:873
+#: weblate/static/loader-bootstrap.js:871
 msgid "Search…"
 msgstr "शोधा…"
 
-#: weblate/static/loader-bootstrap.js:875
+#: weblate/static/loader-bootstrap.js:873
 msgid "Available:"
 msgstr "उपलब्ध:"
 
-#: weblate/static/loader-bootstrap.js:877
+#: weblate/static/loader-bootstrap.js:875
 msgid "Chosen:"
 msgstr "निवडलेले:"
 
-#: weblate/static/loader-bootstrap.js:1181
+#: weblate/static/loader-bootstrap.js:1212
 msgid "Weblate is now scanning the repository, please be patient."
 msgstr "वेबलेट आता रेपॉजिटरी स्कॅन करीत आहे, कृपया धीर धरा."
 
-#: weblate/static/loader-bootstrap.js:1296
+#: weblate/static/loader-bootstrap.js:1327
 msgid ""
 "Notification settings removed, please do not forget to save the changes."
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1458
+#: weblate/static/loader-bootstrap.js:1489
 msgid "Custom range"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1459
+#: weblate/static/loader-bootstrap.js:1490
 msgid "Clear"
 msgstr "साफ"
 
-#: weblate/static/loader-bootstrap.js:1461
+#: weblate/static/loader-bootstrap.js:1492
 #, fuzzy
 #| msgctxt "Minimal (for example two letter) name of day in week"
 #| msgid "Su"
@@ -171,7 +176,7 @@ msgctxt "Short name of day"
 msgid "Su"
 msgstr "र"
 
-#: weblate/static/loader-bootstrap.js:1462
+#: weblate/static/loader-bootstrap.js:1493
 #, fuzzy
 #| msgctxt "Minimal (for example two letter) name of day in week"
 #| msgid "Mo"
@@ -179,7 +184,7 @@ msgctxt "Short name of day"
 msgid "Mo"
 msgstr "सो"
 
-#: weblate/static/loader-bootstrap.js:1463
+#: weblate/static/loader-bootstrap.js:1494
 #, fuzzy
 #| msgctxt "Minimal (for example two letter) name of day in week"
 #| msgid "Tu"
@@ -187,7 +192,7 @@ msgctxt "Short name of day"
 msgid "Tu"
 msgstr "मं"
 
-#: weblate/static/loader-bootstrap.js:1464
+#: weblate/static/loader-bootstrap.js:1495
 #, fuzzy
 #| msgctxt "Minimal (for example two letter) name of day in week"
 #| msgid "We"
@@ -195,7 +200,7 @@ msgctxt "Short name of day"
 msgid "We"
 msgstr "बु"
 
-#: weblate/static/loader-bootstrap.js:1465
+#: weblate/static/loader-bootstrap.js:1496
 #, fuzzy
 #| msgctxt "Minimal (for example two letter) name of day in week"
 #| msgid "Th"
@@ -203,7 +208,7 @@ msgctxt "Short name of day"
 msgid "Th"
 msgstr "गु"
 
-#: weblate/static/loader-bootstrap.js:1466
+#: weblate/static/loader-bootstrap.js:1497
 #, fuzzy
 #| msgctxt "Minimal (for example two letter) name of day in week"
 #| msgid "Fr"
@@ -211,7 +216,7 @@ msgctxt "Short name of day"
 msgid "Fr"
 msgstr "शु"
 
-#: weblate/static/loader-bootstrap.js:1467
+#: weblate/static/loader-bootstrap.js:1498
 #, fuzzy
 #| msgctxt "Minimal (for example two letter) name of day in week"
 #| msgid "Sa"
@@ -219,111 +224,111 @@ msgctxt "Short name of day"
 msgid "Sa"
 msgstr "श"
 
-#: weblate/static/loader-bootstrap.js:1470
+#: weblate/static/loader-bootstrap.js:1501
 msgctxt "Short name of month"
 msgid "Jan"
 msgstr "जाने"
 
-#: weblate/static/loader-bootstrap.js:1471
+#: weblate/static/loader-bootstrap.js:1502
 msgctxt "Short name of month"
 msgid "Feb"
 msgstr "फेब्रु"
 
-#: weblate/static/loader-bootstrap.js:1472
+#: weblate/static/loader-bootstrap.js:1503
 msgctxt "Short name of month"
 msgid "Mar"
 msgstr "मार्च"
 
-#: weblate/static/loader-bootstrap.js:1473
+#: weblate/static/loader-bootstrap.js:1504
 msgctxt "Short name of month"
 msgid "Apr"
 msgstr "एप्रि"
 
-#: weblate/static/loader-bootstrap.js:1474
+#: weblate/static/loader-bootstrap.js:1505
 msgctxt "Short name of month"
 msgid "May"
 msgstr "मे"
 
-#: weblate/static/loader-bootstrap.js:1475
+#: weblate/static/loader-bootstrap.js:1506
 msgctxt "Short name of month"
 msgid "Jun"
 msgstr "जून"
 
-#: weblate/static/loader-bootstrap.js:1476
+#: weblate/static/loader-bootstrap.js:1507
 msgctxt "Short name of month"
 msgid "Jul"
 msgstr "जुलै"
 
-#: weblate/static/loader-bootstrap.js:1477
+#: weblate/static/loader-bootstrap.js:1508
 msgctxt "Short name of month"
 msgid "Aug"
 msgstr "ऑग"
 
-#: weblate/static/loader-bootstrap.js:1478
+#: weblate/static/loader-bootstrap.js:1509
 msgctxt "Short name of month"
 msgid "Sep"
 msgstr "सप्टें"
 
-#: weblate/static/loader-bootstrap.js:1479
+#: weblate/static/loader-bootstrap.js:1510
 msgctxt "Short name of month"
 msgid "Oct"
 msgstr "ऑक्टो"
 
-#: weblate/static/loader-bootstrap.js:1480
+#: weblate/static/loader-bootstrap.js:1511
 msgctxt "Short name of month"
 msgid "Nov"
 msgstr "नोव्हें"
 
-#: weblate/static/loader-bootstrap.js:1481
+#: weblate/static/loader-bootstrap.js:1512
 msgctxt "Short name of month"
 msgid "Dec"
 msgstr "डिसें"
 
-#: weblate/static/loader-bootstrap.js:1485
+#: weblate/static/loader-bootstrap.js:1516
 msgid "Today"
 msgstr "आज"
 
-#: weblate/static/loader-bootstrap.js:1486
+#: weblate/static/loader-bootstrap.js:1517
 msgid "Yesterday"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1490
+#: weblate/static/loader-bootstrap.js:1521
 msgid "Last 7 days"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1491
+#: weblate/static/loader-bootstrap.js:1522
 msgid "Last 30 days"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1492
+#: weblate/static/loader-bootstrap.js:1523
 msgid "This month"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1496
+#: weblate/static/loader-bootstrap.js:1527
 msgid "Last month"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1500
+#: weblate/static/loader-bootstrap.js:1531
 msgid "This year"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1504
+#: weblate/static/loader-bootstrap.js:1535
 msgid "Last year"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1586
+#: weblate/static/loader-bootstrap.js:1617
 msgctxt "Alert to user when opening browser developer console"
 msgid "Stop!"
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1593
+#: weblate/static/loader-bootstrap.js:1624
 msgid ""
 "This is a browser feature intended for developers. If someone told you to "
 "copy-paste something here, they are likely trying to compromise your Weblate "
 "account."
 msgstr ""
 
-#: weblate/static/loader-bootstrap.js:1600
+#: weblate/static/loader-bootstrap.js:1631
 msgid "See https://en.wikipedia.org/wiki/Self-XSS for more information."
 msgstr ""
 

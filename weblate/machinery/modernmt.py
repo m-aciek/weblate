@@ -8,11 +8,13 @@ import os
 import tempfile
 
 from dateutil.parser import isoparse
+from requests.exceptions import HTTPError
 
 import weblate.utils.version
 
 from .base import (
     DownloadTranslations,
+    GlossaryDoesNotExistError,
     GlossaryMachineTranslationMixin,
     MachineTranslationError,
 )
@@ -47,9 +49,9 @@ class ModernMTTranslation(GlossaryMachineTranslationMixin):
             "MMT-PlatformVersion": weblate.utils.version.VERSION,
         }
 
-    def is_supported(self, source, language):
+    def is_supported(self, source_language, target_language):
         """Check whether given language combination is supported."""
-        return (source, language) in self.supported_languages
+        return (source_language, target_language) in self.supported_languages
 
     def check_failure(self, response) -> None:
         super().check_failure(response)
@@ -63,21 +65,26 @@ class ModernMTTranslation(GlossaryMachineTranslationMixin):
         response = self.request("get", self.get_api_url("languages"))
         payload = response.json()
 
-        for source, targets in payload["data"].items():
-            yield from ((source, target) for target in targets)
+        for source_language, target_languages in payload["data"].items():
+            yield from (
+                (source_language, target_language)
+                for target_language in target_languages
+            )
 
     def download_translations(
         self,
-        source,
-        language,
+        source_language,
+        target_language,
         text: str,
         unit,
         user,
         threshold: int = 75,
     ) -> DownloadTranslations:
         """Download list of possible translations from a service."""
-        params = {"q": text, "source": source, "target": language}
-        glossary_id: str | None = self.get_glossary_id(source, language, unit)
+        params = {"q": text, "source": source_language, "target": target_language}
+        glossary_id: str | None = self.get_glossary_id(
+            source_language, target_language, unit
+        )
 
         if glossary_id:
             params["glossaries"] = glossary_id
@@ -129,7 +136,11 @@ class ModernMTTranslation(GlossaryMachineTranslationMixin):
 
     def delete_glossary(self, glossary_id: str) -> None:
         """Delete single glossary."""
-        self.request("delete", self.get_api_url("memories", str(glossary_id)))
+        try:
+            self.request("delete", self.get_api_url("memories", str(glossary_id)))
+        except HTTPError as error:
+            if error.response.status_code == 404:
+                raise GlossaryDoesNotExistError from error
 
     def delete_oldest_glossary(self) -> None:
         """Delete oldest glossary if any."""
@@ -153,6 +164,7 @@ class ModernMTTranslation(GlossaryMachineTranslationMixin):
 
         Create a memory with the given name and the populate with tsv content.
         """
+        # ModernMT gracefully handles glossaries with duplicate name by updating the existing one
         response = self.request(
             "post",
             self.get_api_url("memories"),

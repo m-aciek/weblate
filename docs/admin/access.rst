@@ -210,6 +210,21 @@ user interface is that you can delegate it to other users without giving them
 the superuser privilege. In order to do so, add them to the `Administration`
 team of the project.
 
+.. _project-api:
+
+Per-project access tokens
++++++++++++++++++++++++++
+
+.. versionadded:: 4.10
+
+You can define project-scoped access tokens in :guilabel:`API access` tab. The
+API tokens can have expiry date set, and their permissions can be customized by
+team memberships same as with users.
+
+.. seealso::
+
+   :ref:`api-tokens`
+
 .. _custom-acl:
 
 Site-wide access control
@@ -564,6 +579,8 @@ List of privileges
 +                              +-------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                              | Update the internal repository            | :guilabel:`Administration`, :guilabel:`Manage repository`                                                                                                                                   |
 +------------------------------+-------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Announcements                | Post announcements                        | :guilabel:`Administration`, :guilabel:`Translation coordinator`                                                                                                                             |
++------------------------------+-------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | Site wide privileges         | Use management interface                  |                                                                                                                                                                                             |
 +                              +-------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                              | Add new projects                          | :guilabel:`Add new projects`                                                                                                                                                                |
@@ -606,7 +623,8 @@ List of built-in roles
 .. list-table::
 
    * - `Administration`
-     - * :guilabel:`View billing info`
+     - * :guilabel:`Post announcements`
+       * :guilabel:`View billing info`
        * :guilabel:`Download changes`
        * :guilabel:`Post comment`
        * :guilabel:`Delete comment`
@@ -693,6 +711,34 @@ List of built-in roles
        * :guilabel:`Download translation file`
        * :guilabel:`Dismiss failing check`
        * :guilabel:`Edit strings`
+       * :guilabel:`Edit source strings`
+       * :guilabel:`Overwrite existing strings with upload`
+       * :guilabel:`Upload translations`
+       * :guilabel:`Access the internal repository`
+       * :guilabel:`View upstream repository location`
+   * - `Translation coordinator`
+     - * :guilabel:`Post announcements`
+       * :guilabel:`Post comment`
+       * :guilabel:`Resolve comment`
+       * :guilabel:`Add glossary entry`
+       * :guilabel:`Delete glossary entry`
+       * :guilabel:`Edit glossary entry`
+       * :guilabel:`Add glossary terminology`
+       * :guilabel:`Upload glossary entries`
+       * :guilabel:`Use automatic suggestions`
+       * :guilabel:`Add screenshot`
+       * :guilabel:`Delete screenshot`
+       * :guilabel:`Edit screenshot`
+       * :guilabel:`Accept suggestion`
+       * :guilabel:`Add suggestion`
+       * :guilabel:`Delete suggestion`
+       * :guilabel:`Vote on suggestion`
+       * :guilabel:`Add language for translation`
+       * :guilabel:`Download translation file`
+       * :guilabel:`Dismiss failing check`
+       * :guilabel:`Edit strings`
+       * :guilabel:`Edit string when suggestions are enforced`
+       * :guilabel:`Review strings`
        * :guilabel:`Edit source strings`
        * :guilabel:`Overwrite existing strings with upload`
        * :guilabel:`Upload translations`

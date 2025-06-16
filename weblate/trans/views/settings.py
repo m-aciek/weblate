@@ -237,8 +237,10 @@ def perform_rename(form_cls, request: AuthenticatedHttpRequest, obj, perm: str):
     except ValidationError as err:
         messages.error(
             request,
-            gettext("Could not change %s due to outstanding issue in its settings: %s")
-            % (obj, err),
+            gettext(
+                "Could not change %(obj)s due to an outstanding issue in its settings: %(error)s"
+            )
+            % {"obj": obj, "error": err},
         )
         return redirect_param(obj, "#organize")
 
@@ -292,7 +294,9 @@ def announcement(request: AuthenticatedHttpRequest, path):
         request, path, (ProjectLanguage, Translation, Component, Project, Category)
     )
 
-    if not request.user.has_perm("component.edit", obj):
+    if not request.user.has_perm("component.edit", obj) and not request.user.has_perm(
+        "announcement.add", obj
+    ):
         raise PermissionDenied
 
     form = AnnouncementForm(request.POST)
@@ -431,7 +435,7 @@ class BackupsDownloadView(BackupsMixin):
                 continue
             # Generate random name for download
             name = os.path.join(
-                PROJECTBACKUP_PREFIX, f"{get_random_identifier(32)}.zip"
+                PROJECTBACKUP_PREFIX, f"{self.obj.slug}-{get_random_identifier(32)}.zip"
             )
             # Copy to static files
             with open(backup["path"], "rb") as handle:

@@ -27,7 +27,7 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 from django.utils.http import urlencode
 from django.utils.safestring import mark_safe
-from django.utils.text import slugify
+from django.utils.text import normalize_newlines, slugify
 from django.utils.translation import gettext, gettext_lazy
 from translation_finder import DiscoveryResult, discover
 
@@ -40,6 +40,7 @@ from weblate.formats.models import EXPORTERS, FILE_FORMATS
 from weblate.lang.data import BASIC_LANGUAGES
 from weblate.lang.models import Language
 from weblate.machinery.models import MACHINERY
+from weblate.trans.actions import ActionEvents
 from weblate.trans.backups import ProjectBackup
 from weblate.trans.defines import (
     BRANCH_LENGTH,
@@ -63,19 +64,21 @@ from weblate.trans.specialchars import RTL_CHARS_DATA, get_special_chars
 from weblate.trans.util import check_upload_method_permissions, is_repo_link
 from weblate.trans.validators import validate_check_flags
 from weblate.utils.antispam import is_spam
+from weblate.utils.files import FileUploadMethod
 from weblate.utils.forms import (
     CachedModelMultipleChoiceField,
     ColorWidget,
     ContextDiv,
     EmailField,
+    NormalizedNewlineCharField,
     QueryField,
     SearchField,
     SortedSelect,
     SortedSelectMultiple,
     UserField,
-    UsernameField,
 )
 from weblate.utils.hash import checksum_to_hash, hash_to_checksum
+from weblate.utils.html import format_html_join_comma
 from weblate.utils.state import (
     STATE_APPROVED,
     STATE_EMPTY,
@@ -86,11 +89,12 @@ from weblate.utils.state import (
     get_state_label,
 )
 from weblate.utils.validators import validate_file_extension
+from weblate.utils.views import get_sort_name
 from weblate.vcs.models import VCS_REGISTRY
 
 if TYPE_CHECKING:
     from weblate.accounts.models import Profile
-    from weblate.trans.mixins import URLMixin
+    from weblate.trans.mixins import BaseURLMixin, URLMixin
     from weblate.trans.models.translation import NewUnitParams
 
 BUTTON_TEMPLATE = """
@@ -246,7 +250,7 @@ class PluralTextarea(forms.Textarea):
                     gettext("Toggle text direction"),
                     rtl_name,
                     "rtl",
-                    mark_safe('checked="checked"'),  # noqa: S308
+                    mark_safe('checked="checked"'),
                     "RTL",
                 ),
                 (
@@ -264,7 +268,7 @@ class PluralTextarea(forms.Textarea):
             GROUP_TEMPLATE,
             [
                 (
-                    mark_safe('data-toggle="buttons"'),  # noqa: S308
+                    mark_safe('data-toggle="buttons"'),
                     rtl_switch,
                 )
             ],  # Only one group.
@@ -398,7 +402,7 @@ class PluralTextarea(forms.Textarea):
             if fieldname not in data:
                 break
             ret.append(data.get(fieldname, ""))
-        return [r.replace("\r", "") for r in ret]
+        return [normalize_newlines(r) for r in ret]
 
 
 class PluralField(forms.CharField):
@@ -658,15 +662,7 @@ class SimpleUploadForm(FieldDocsMixin, forms.Form):
     )
     method = forms.ChoiceField(
         label=gettext_lazy("File upload mode"),
-        choices=(
-            ("translate", gettext_lazy("Add as translation")),
-            ("approve", gettext_lazy("Add as approved translation")),
-            ("suggest", gettext_lazy("Add as suggestion")),
-            ("fuzzy", gettext_lazy("Add as translation needing edit")),
-            ("replace", gettext_lazy("Replace existing translation file")),
-            ("source", gettext_lazy("Update source strings")),
-            ("add", gettext_lazy("Add new strings")),
-        ),
+        choices=FileUploadMethod.choices,
         widget=forms.RadioSelect,
         required=True,
     )
@@ -763,10 +759,21 @@ class SearchForm(forms.Form):
             return {"q": request.GET["q"]}
         return None
 
-    def __init__(self, user: User, language=None, show_builder=True, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        request: AuthenticatedHttpRequest,
+        language: Language | None = None,
+        show_builder=True,
+        obj: type[Model | BaseURLMixin] | None = None,
+        **kwargs,
+    ) -> None:
         """Generate choices for other components in the same project."""
-        self.user = user
+        self.user = request.user
         self.language = language
+        sort_by = get_sort_name(request, obj)
+        self.sort_name = sort_by["name"]
+        self.sort_query = sort_by["query"]
         super().__init__(**kwargs)
 
         self.helper = FormHelper(self)
@@ -797,9 +804,6 @@ class SearchForm(forms.Form):
     def get_name(self):
         """Return verbose name for a search."""
         return FILTERS.get_search_name(self.cleaned_data.get("q", ""))
-
-    def get_search_query(self):
-        return self.cleaned_data["q"]
 
     def clean_offset(self):
         if self.cleaned_data.get("offset") is None:
@@ -946,10 +950,14 @@ class AutoForm(forms.Form):
         label=gettext_lazy("Score threshold"), initial=80, min_value=1, max_value=100
     )
 
-    def __init__(self, obj, user=None, *args, **kwargs) -> None:
+    def __init__(
+        self, obj: Component | Project | None, user=None, *args, **kwargs
+    ) -> None:
         """Generate choices for other components in the same project."""
         super().__init__(*args, **kwargs)
-        self.obj, machinery_settings = obj, {}
+        self.obj = obj
+        self.project: Project | None = None
+        machinery_settings = {}
 
         if isinstance(obj, Component):
             self.components = obj.project.component_set.filter(
@@ -959,6 +967,7 @@ class AutoForm(forms.Form):
                 project__contribute_shared_tm=True,
             ).exclude(project=obj.project)
             machinery_settings = obj.project.get_machinery_settings()
+            self.project = obj.project
         elif isinstance(obj, Project):
             self.components = obj.component_set.filter(
                 source_language_id__in=obj.source_language_ids
@@ -967,6 +976,7 @@ class AutoForm(forms.Form):
                 project__contribute_shared_tm=True,
             ).exclude(project=obj)
             machinery_settings = obj.get_machinery_settings()
+            self.project = obj
         else:
             # Site-wide add-ons
             self.components = Component.objects.all()
@@ -1028,7 +1038,7 @@ class AutoForm(forms.Form):
             ("translate", gettext("Add as translation")),
             ("fuzzy", gettext('Add as "Needing edit"')),
         ]
-        if user is not None and user.has_perm("unit.review", obj):
+        if user is not None and (user.has_perm("unit.review", obj) or obj is None):
             choices.append(("approved", gettext("Add as approved translation")))
         self.fields["mode"].choices = choices
 
@@ -1051,8 +1061,10 @@ class AutoForm(forms.Form):
             except Component.DoesNotExist as error:
                 raise ValidationError(gettext("Component not found!")) from error
         elif "/" not in component:
+            if self.project is None:
+                raise ValidationError(gettext("Component not found!"))
             try:
-                result = self.components.get(slug=component, project=self.obj.project)
+                result = self.components.get(slug=component, project=self.project)
             except Component.DoesNotExist as error:
                 raise ValidationError(gettext("Component not found!")) from error
         else:
@@ -1078,8 +1090,7 @@ class CommentForm(forms.Form):
     scope = forms.ChoiceField(
         label=gettext_lazy("Scope"),
         help_text=gettext_lazy(
-            "Is your comment specific to this "
-            "translation, or generic for all of them?"
+            "Is your comment specific to this translation, or generic for all of them?"
         ),
         choices=(
             (
@@ -1098,18 +1109,25 @@ class CommentForm(forms.Form):
             ),
         ),
     )
-    comment = forms.CharField(
+    comment = NormalizedNewlineCharField(
         widget=MarkdownTextarea,
         label=gettext_lazy("New comment"),
         help_text=gettext_lazy("You can use Markdown and mention users by @username."),
         max_length=1000,
     )
 
-    def __init__(self, project, *args, **kwargs) -> None:
+    def __init__(self, translation: Translation, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        remove: set[str] = set()
         # Remove bug-report in case source review is not enabled
-        if not project.source_review:
-            self.fields["scope"].choices = self.fields["scope"].choices[1:]
+        if not translation.component.project.source_review:
+            remove.add("report")
+        # Remove translation comment when commenting on source
+        if translation.is_source:
+            remove.add("translation")
+        self.fields["scope"].choices = [
+            choice for choice in self.fields["scope"].choices if choice[0] not in remove
+        ]
 
 
 class LanguageCodeChoiceField(forms.ModelChoiceField):
@@ -1158,11 +1176,11 @@ class NewLanguageOwnerForm(forms.Form):
             Q(translation__component=self.component) | Q(component=self.component)
         )
 
-    def __init__(self, component, *args, **kwargs) -> None:
+    def __init__(self, user: User, component: Component, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.component = component
         languages = self.get_lang_objects()
-        self.fields["lang"].choices = languages.as_choices()
+        self.fields["lang"].choices = languages.as_choices(user=user)
 
 
 class NewLanguageForm(NewLanguageOwnerForm):
@@ -1190,8 +1208,8 @@ class NewLanguageForm(NewLanguageOwnerForm):
             .distinct()
         )
 
-    def __init__(self, component, *args, **kwargs) -> None:
-        super().__init__(component, *args, **kwargs)
+    def __init__(self, user: User, component: Component, *args, **kwargs) -> None:
+        super().__init__(user, component, *args, **kwargs)
         self.fields["lang"].choices = [
             ("", gettext("Please choose")),
             *self.fields["lang"].choices,
@@ -1202,7 +1220,9 @@ class NewLanguageForm(NewLanguageOwnerForm):
         return [self.cleaned_data["lang"]]
 
 
-def get_new_language_form(request: AuthenticatedHttpRequest, component):
+def get_new_language_form(
+    request: AuthenticatedHttpRequest, component: Component
+) -> type[NewLanguageOwnerForm | NewLanguageForm]:
     """Return new language form for user."""
     if not request.user.has_perm("translation.add", component):
         raise PermissionDenied
@@ -1251,6 +1271,9 @@ class ContextForm(FieldDocsMixin, forms.ModelForm):
     def save(self, commit=True):
         self.instance.update_explanation(
             self.cleaned_data["explanation"], self.user, save=False
+        )
+        self.instance.update_extra_flags(
+            self.cleaned_data["extra_flags"], self.user, save=False
         )
         if commit:
             self.instance.save(same_content=True)
@@ -1321,6 +1344,21 @@ class ReportsForm(forms.Form):
         choices=[("", gettext_lazy("All languages"))],
         required=False,
     )
+    sort_by = forms.ChoiceField(
+        label=gettext_lazy("Sort by"),
+        choices=[
+            ("count", gettext_lazy("Strings translated")),
+            ("date_joined", gettext_lazy("Date joined")),
+        ],
+        required=False,
+    )
+    sort_order = forms.ChoiceField(
+        label=gettext_lazy("Sort order"),
+        choices=[
+            ("descending", gettext_lazy("Descending")),
+            ("ascending", gettext_lazy("Ascending")),
+        ],
+    )
 
     def __init__(self, scope: dict[str, Model], *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -1330,6 +1368,8 @@ class ReportsForm(forms.Form):
             Field("style"),
             Field("period"),
             Field("language"),
+            Field("sort_by"),
+            Field("sort_order"),
         )
         if not scope:
             languages = Language.objects.have_translation()
@@ -1464,6 +1504,7 @@ class ComponentSettingsForm(
             "license",
             "agreement",
             "allow_translation_propagation",
+            "contribute_project_tm",
             "enable_suggestions",
             "suggestion_voting",
             "suggestion_autoaccept",
@@ -1497,6 +1538,7 @@ class ComponentSettingsForm(
             "intermediate",
             "language_regex",
             "key_filter",
+            "secondary_language",
             "variant_regex",
             "restricted",
             "auto_lock_error",
@@ -1508,6 +1550,7 @@ class ComponentSettingsForm(
         widgets = {
             "enforced_checks": SelectChecksWidget,
             "source_language": SortedSelect,
+            "secondary_language": SortedSelect,
             "language_code_style": SortedSelect,
         }
         field_classes = {"enforced_checks": SelectChecksField}
@@ -1561,10 +1604,12 @@ class ComponentSettingsForm(
                     Fieldset(
                         gettext("Translation settings"),
                         "allow_translation_propagation",
+                        "contribute_project_tm",
                         "manage_units",
                         "check_flags",
                         "variant_regex",
                         "enforced_checks",
+                        "secondary_language",
                     ),
                     css_id="translation",
                 ),
@@ -2072,15 +2117,18 @@ class ProjectSettingsForm(SettingsBaseForm, ProjectDocsMixin, ProjectAntispamMix
             "contribute_shared_tm",
             "enable_hooks",
             "language_aliases",
+            "secondary_language",
             "access_control",
             "enforced_2fa",
             "translation_review",
             "source_review",
+            "check_flags",
         )
         widgets = {
             "access_control": forms.RadioSelect,
             "instructions": MarkdownTextarea,
             "language_aliases": forms.TextInput,
+            "secondary_language": SortedSelect,
         }
 
     def clean(self) -> None:
@@ -2119,7 +2167,13 @@ class ProjectSettingsForm(SettingsBaseForm, ProjectDocsMixin, ProjectAntispamMix
                             "You must specify a license for these components "
                             "to make them publicly accessible: %s"
                         )
-                        % ", ".join(unlicensed.values_list("name", flat=True))
+                        % format_html_join_comma(
+                            '<a href="{}">{}</a>',
+                            (
+                                (component.get_absolute_url(), component.name)
+                                for component in unlicensed
+                            ),
+                        )
                     }
                 )
 
@@ -2127,7 +2181,7 @@ class ProjectSettingsForm(SettingsBaseForm, ProjectDocsMixin, ProjectAntispamMix
         super().save(commit=commit)
         if self.changed_access:
             self.instance.change_set.create(
-                action=Change.ACTION_ACCESS_EDIT,
+                action=ActionEvents.ACCESS_EDIT,
                 user=self.user,
                 details={"access_control": self.instance.access_control},
             )
@@ -2179,8 +2233,10 @@ class ProjectSettingsForm(SettingsBaseForm, ProjectDocsMixin, ProjectAntispamMix
                     "set_language_team",
                     "use_shared_tm",
                     "contribute_shared_tm",
+                    "check_flags",
                     "enable_hooks",
                     "language_aliases",
+                    "secondary_language",
                     "translation_review",
                     "source_review",
                     ContextDiv(
@@ -2434,8 +2490,7 @@ class NewMonolingualUnitForm(NewUnitBaseForm):
     source = PluralField(
         label=gettext_lazy("Source language text"),
         help_text=gettext_lazy(
-            "You can edit this later, as with any other string in "
-            "the source language."
+            "You can edit this later, as with any other string in the source language."
         ),
         required=True,
     )
@@ -2668,7 +2723,7 @@ class BulkEditForm(forms.Form):
 
 class ContributorAgreementForm(forms.Form):
     confirm = forms.BooleanField(
-        label=gettext_lazy("I accept the contributor agreement"), required=True
+        label=gettext_lazy("I accept the contributor license agreement"), required=True
     )
     next = forms.CharField(required=False, widget=forms.HiddenInput)
 
@@ -2795,26 +2850,18 @@ class ChangesForm(forms.Form):
         label=gettext_lazy("Action"),
         required=False,
         widget=SortedSelectMultiple,
-        choices=Change.ACTION_CHOICES,
+        choices=ActionEvents.choices,
     )
-    user = UsernameField(
+    user = UserField(
         label=gettext_lazy("Author username"), required=False, help_text=None
+    )
+    exclude_user = UserField(
+        label=gettext_lazy("Exclude author (username)"), required=False, help_text=None
     )
     period = DateRangeField(
         label=gettext_lazy("Change period"),
         required=False,
     )
-
-    def clean_user(self):
-        username = self.cleaned_data.get("user")
-        if not username:
-            return None
-        try:
-            return User.objects.get(username=username)
-        except User.DoesNotExist as error:
-            raise forms.ValidationError(
-                gettext("Could not find matching user!")
-            ) from error
 
     def items(self):
         items = []
@@ -2848,11 +2895,20 @@ class ChangesForm(forms.Form):
 class LabelForm(forms.ModelForm):
     class Meta:
         model = Label
-        fields = ("name", "description", "color")
-        widgets = {"color": ColorWidget()}
+        fields = ("name", "description", "color", "project")
+        widgets = {
+            "color": ColorWidget(),
+            "project": forms.HiddenInput(),
+        }
 
-    def __init__(self, *args, **kwargs) -> None:
+    def clean_project(self):
+        # Ignore any passed value, override by current one
+        return self.project
+
+    def __init__(self, project: Project, *args, **kwargs) -> None:
+        kwargs["initial"] = {"project": project}
         super().__init__(*args, **kwargs)
+        self.project = project
         self.helper = FormHelper(self)
         self.helper.form_tag = False
 

@@ -13,6 +13,7 @@ from django.utils import timezone
 from django.utils.html import format_html
 
 from weblate.auth.models import User
+from weblate.checks.flags import Flags
 from weblate.checks.tests.test_checks import MockLanguage, MockUnit
 from weblate.lang.models import Language
 from weblate.trans.models import Component, Project, Translation, Unit
@@ -271,7 +272,7 @@ class TranslationFormatTestCase(FixtureTestCase):
 
     def test_diff_github_9821(self) -> None:
         unit = Unit(translation=self.translation)
-        unit.all_flags = {"python-brace-format"}
+        unit.all_flags = Flags("python-brace-format")
         self.assertHTMLEqual(
             format_translation(
                 ["由 {username} 邀请至 {project} 项目。"],
@@ -388,6 +389,20 @@ class TranslationFormatTestCase(FixtureTestCase):
             """,
         )
 
+    def test_diff_whitespace_leading_added(self) -> None:
+        self.assertHTMLEqual(
+            format_translation(
+                ["新增 :http:get:"],
+                self.component.source_language,
+                diff="新增：http:get:",
+            )["items"][0]["content"],
+            """新增
+            <del>：</del>
+            <ins><span class="hlspace"><span class="space-space"> </span></span>:</ins>
+            http:get:
+            """,
+        )
+
     def test_glossary(self) -> None:
         self.assertHTMLEqual(
             format_translation(
@@ -400,6 +415,27 @@ class TranslationFormatTestCase(FixtureTestCase):
                 title="Glossary term:
 ahoj [hello]">Hello</span>
             world
+            """,
+        )
+
+    def test_glossary_newline(self) -> None:
+        self.assertHTMLEqual(
+            format_translation(
+                ["Hello\nworld"],
+                self.component.source_language,
+                glossary=[self.build_glossary("world", "svět", [(6, 11)])],
+            )["items"][0]["content"],
+            """
+            Hello
+            <span class="hlspace">
+                <span class="space-nl">
+                </span>
+            </span><br>
+            <span class="glossary-term"
+                title="Glossary term:
+svět [world]">
+                world
+            </span>
             """,
         )
 
@@ -501,7 +537,7 @@ glosář [glossary]">glossary</span>
 
     def test_glossary_format(self) -> None:
         unit = Unit(translation=self.translation)
-        unit.all_flags = {"php-format"}
+        unit.all_flags = Flags("php-format")
         self.assertHTMLEqual(
             format_translation(
                 ["%3$sHow"],
@@ -666,14 +702,34 @@ class DiffTestCase(SimpleTestCase):
         self.assertEqual(self.html_diff("first text", "first text"), "first text")
 
     def test_add(self) -> None:
-        self.assertEqual(
-            self.html_diff("first text", "first new text"), "first <ins>new </ins>text"
+        self.assertHTMLEqual(
+            self.html_diff("first text", "first new text"),
+            """
+            first
+            <ins>
+            new
+            <span class="hlspace">
+            <span class="space-space">
+            </span>
+            </span>
+            </ins>
+            text
+            """,
         )
 
     def test_unicode(self) -> None:
-        self.assertEqual(
+        self.assertHTMLEqual(
             self.html_diff("zkouška text", "zkouška nový text"),
-            "zkouška <ins>nový </ins>text",
+            """
+            zkouška
+            <ins>nový
+            <span class="hlspace">
+            <span class="space-space">
+            </span>
+            </span>
+            </ins>
+            text
+            """,
         )
 
     def test_remove(self) -> None:
@@ -684,6 +740,7 @@ class DiffTestCase(SimpleTestCase):
             <del>old
              <span class="hlspace">
              <span class="space-space">
+             </span>
              </span>
             </del>
             text""",

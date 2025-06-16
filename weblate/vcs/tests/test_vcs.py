@@ -1597,7 +1597,7 @@ class VCSGitLabTest(VCSGitUpstreamTest):
 
         # Check that it doesn't raise error when pull request already exists
         self.mock_responses(
-            pr_status=422,
+            pr_status=409,
             pr_response={"message": ["Another open merge request already exists"]},
         )
         super().test_push(branch)
@@ -1823,16 +1823,16 @@ class VCSHgTest(VCSGitTest):
     def test_configure_remote(self) -> None:
         with self.repo.lock:
             self.repo.configure_remote("/pullurl", "/pushurl", "branch")
-        self.assertEqual(self.repo.get_config("paths.default"), "/pullurl")
-        self.assertEqual(self.repo.get_config("paths.default-push"), "/pushurl")
+        self.assertEqual(self.repo.get_config("paths", "default"), "/pullurl")
+        self.assertEqual(self.repo.get_config("paths", "default-push"), "/pushurl")
 
     def test_configure_remote_no_push(self) -> None:
         with self.repo.lock:
             self.repo.configure_remote("/pullurl", "", "branch")
-        self.assertEqual(self.repo.get_config("paths.default-push"), "")
+        self.assertEqual(self.repo.get_config("paths", "default-push"), "")
         with self.repo.lock:
             self.repo.configure_remote("/pullurl", "/push", "branch")
-        self.assertEqual(self.repo.get_config("paths.default-push"), "/push")
+        self.assertEqual(self.repo.get_config("paths", "default-push"), "/push")
 
     def test_revision_info(self) -> None:
         # Latest commit
@@ -1843,7 +1843,7 @@ class VCSHgTest(VCSGitTest):
         with self.repo.lock:
             self.repo.set_committer("Foo Bar Žač", "foo@example.net")
         self.assertEqual(
-            self.repo.get_config("ui.username"), "Foo Bar Žač <foo@example.net>"
+            self.repo.get_config("ui", "username"), "Foo Bar Žač <foo@example.net>"
         )
 
     def test_status(self) -> None:
@@ -2028,8 +2028,7 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
             body = {"id": "333"}
         elif status == 409:
             pr_exist_message = (
-                "Only one pull request may be open "
-                "for a given source and target branch"
+                "Only one pull request may be open for a given source and target branch"
             )
             body = {"errors": [{"context": "<string>", "message": pr_exist_message}]}
         else:
@@ -2256,7 +2255,7 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     _sets_push = False
     _apihost = "bitbucket.org"
 
-    def mock_responses(self):
+    def mock_responses(self) -> None:
         """
         Mock the successful responses Bitbucket Cloud API.
 

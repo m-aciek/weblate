@@ -18,24 +18,27 @@ repos:
     args: [--no-sort-keys, --autofix, --no-ensure-ascii]
     exclude: ^weblate/trans/fixtures/simple-project.json|weblate/trans/tests/data/.*.json$
 - repo: https://github.com/adamchainz/django-upgrade
-  rev: 1.22.2
+  rev: 1.25.0
   hooks:
   - id: django-upgrade
-    args: [--target-version, '5.0']
+    args: [--target-version, '5.1']
+- repo: https://github.com/adamchainz/djade-pre-commit
+  rev: 1.4.0
+  hooks:
+  - id: djade
+    args: [--target-version, '5.1']
 - repo: https://github.com/adrienverge/yamllint
-  rev: v1.35.1
+  rev: v1.37.1
   hooks:
   - id: yamllint
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.8.3
+  rev: v0.11.13
   hooks:
-  - id: ruff
-    args: [--fix, --exit-non-zero-on-fix]
+  - id: ruff-check
+    args:
+    - --fix
+    - --exit-non-zero-on-fix
   - id: ruff-format
-- repo: https://github.com/asottile/blacken-docs
-  rev: 1.19.1
-  hooks:
-  - id: blacken-docs
 - repo: meta
   hooks:
   - id: check-hooks-apply
@@ -45,10 +48,12 @@ repos:
   hooks:
   - id: pretty-format-yaml
     args: [--autofix, --indent, '2']
-  - id: pretty-format-toml
-    args: [--autofix]
+- repo: https://github.com/pappasam/toml-sort
+  rev: v0.24.2
+  hooks:
+  - id: toml-sort-fix
 - repo: https://github.com/executablebooks/mdformat
-  rev: 0.7.19
+  rev: 0.7.22
   hooks:
   - id: mdformat
     additional_dependencies:
@@ -57,16 +62,9 @@ repos:
     - mdformat-shfmt==0.2.0
     - mdformat_tables==1.0.0
 - repo: https://github.com/scop/pre-commit-shfmt
-  rev: v3.9.0-1
+  rev: v3.11.0-1
   hooks:
   - id: shfmt
-- repo: https://github.com/awebdeveloper/pre-commit-stylelint
-  rev: 0.0.2
-  hooks:
-  - id: stylelint
-    args: [--formatter=compact]
-    additional_dependencies:
-    - stylelint@16.12.0
 - repo: https://github.com/fsfe/reuse-tool
   rev: v5.0.2
   hooks:
@@ -78,17 +76,18 @@ repos:
     require_serial: true
     args: [-x]
 - repo: https://github.com/biomejs/pre-commit
-  rev: v0.6.1
+  rev: v1.9.4
   hooks:
   - id: biome-check
+    args: [--error-on-warnings]
     additional_dependencies:
     - '@biomejs/biome@1.9.4'
 - repo: https://github.com/abravalheri/validate-pyproject
-  rev: v0.23
+  rev: v0.24.1
   hooks:
   - id: validate-pyproject
 - repo: https://github.com/djlint/djLint
-  rev: v1.36.3
+  rev: v1.36.4
   hooks:
   - id: djlint-reformat-django
   - id: djlint-django
@@ -106,14 +105,53 @@ repos:
     entry: \S  +(?![\| +])
     language: pygrep
     exclude: docs/devel/reporting-example.rst
+  - id: rst-http
+    name: http link in rst text
+    description: Detect mistake of using http links
+    types: [rst]
+    entry: http://(?!example\.|[a-z]*\.example\.|weblate:|localhost|anubis|127\.0\.0\.1|user:password@proxy)
+    language: pygrep
+  - id: rst-bullet-stop
+    name: Changes end with a stop
+    description: Bullet list in changes should end with a stop.
+    files: docs/changes\.rst
+    entry: ^ *\* .*[^.]\n$
+    language: pygrep
+  - id: py-join-comma
+    name: Localized comma in join
+    types: [python]
+    args: [--multiline]
+    entry: format_html_join\(\s*", "
+    language: pygrep
+- repo: https://github.com/sphinx-contrib/sphinx-lint
+  rev: v1.0.0
+  hooks:
+  - id: sphinx-lint
 
 - repo: https://github.com/codespell-project/codespell
-  rev: v2.3.0
+  rev: v2.4.1
   hooks:
   - id: codespell
     additional_dependencies:
     - tomli
     exclude: client/yarn.lock
-exclude: ^.*\.(csv|svg|wsdl(\.[^.]*)?)|weblate/trans/tests/data/memory-broken\.json|weblate/templates/browserconfig\.xml|weblate/templates/configuration/custom\.css|weblate/trans/tests/data/cs-CZ\.rc|weblate/static/vendor/.*|weblate/static/js/vendor/.*|docs/make\.bat|weblate/templates/addons/js/weblate\.js|uv\.lock$
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.7
+  hooks:
+  - id: actionlint
+- repo: https://github.com/adamchainz/blacken-docs
+  rev: 1.19.1
+  hooks:
+  - id: blacken-docs
+- repo: https://github.com/zizmorcore/zizmor-pre-commit
+  rev: v1.9.0
+  hooks:
+  - id: zizmor
+- repo: https://github.com/docker-compose-linter/pre-commit-dclint
+  rev: v3.0.0
+  hooks:
+  - id: dclint
+    files: ^.*/(docker-)?compose(-.*)?\.ya?ml$
+exclude: ^.*\.(csv|svg|wsdl(\.[^.]*)?)|weblate/trans/tests/data/memory-broken\.json|weblate/templates/browserconfig\.xml|weblate/templates/configuration/custom\.css|weblate/trans/tests/data/cs-CZ\.rc|weblate/static/vendor/.*|weblate/static/js/vendor/.*|docs/make\.bat|weblate/templates/addons/js/weblate\.js|uv\.lock|docs/specs/openapi.yaml$
 ci:
   autoupdate_schedule: quarterly

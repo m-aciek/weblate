@@ -13,7 +13,8 @@ from django.urls import reverse
 
 from weblate.addons.resx import ResxUpdateAddon
 from weblate.checks.models import Check
-from weblate.trans.models import Change, Component, Unit
+from weblate.trans.actions import ActionEvents
+from weblate.trans.models import Change, Component, Translation, Unit
 from weblate.trans.tests.test_views import ViewTestCase
 from weblate.trans.util import join_plural
 from weblate.utils.hash import hash_to_checksum
@@ -192,7 +193,7 @@ class EditTest(ViewTestCase):
 
         test_target = "TEST TRANSLATION"
 
-        def check_translated():
+        def check_translated() -> None:
             self.assertTrue(
                 Unit.objects.filter(
                     translation__language__code="cs",
@@ -381,7 +382,7 @@ class EditResourceTest(EditTest):
         self.assertEqual(
             Unit.objects.filter(context="key", state=STATE_TRANSLATED).count(), 2
         )
-        self.component.create_translations(force=True)
+        self.component.create_translations_immediate(force=True)
         self.assertEqual(
             Unit.objects.filter(context="key", state=STATE_TRANSLATED).count(), 2
         )
@@ -529,9 +530,11 @@ class EditPoMonoTest(EditTest):
         self.assertEqual(response.status_code, 403)
         # Actual removal
         response = self.client.post(
-            reverse("delete-unit", kwargs={"unit_id": unit.source_unit.pk})
+            reverse("delete-unit", kwargs={"unit_id": unit.source_unit.pk}),
+            data={"next": self.translate_url + "?offset=3"},
         )
         self.assertEqual(response.status_code, 302)
+        self.assert_redirects_offset(response, self.translate_url, 3)
         component = Component.objects.get(pk=self.component.pk)
         self.assertEqual(component.stats.all, 12)
         self.assertEqual(unit_count - 4, Unit.objects.count())
@@ -659,6 +662,98 @@ class EditXliffMonoTest(EditTest):
 class EditLinkTest(EditTest):
     def create_component(self):
         return self.create_link()
+
+
+class EditPropagateTest(EditTest):
+    def create_component(self):
+        result = super().create_component()
+        self._create_component(
+            "po", "second-po/*.po", name="Second", project=result.project
+        )
+        return result
+
+    def test_edit(self) -> None:
+        def get_targets() -> list[str]:
+            return list(
+                Unit.objects.filter(
+                    source=self.source, translation__language_code="cs"
+                ).values_list("target", flat=True)
+            )
+
+        # String should not be translated now
+        self.assertEqual(get_targets(), ["", ""])
+
+        super().test_edit()
+
+        # Verify that propagation worked well
+        self.assertEqual(get_targets(), [self.second_target, self.second_target])
+
+        second_translation = Translation.objects.get(
+            component__slug="second", language_code="cs"
+        )
+
+        # Verify second component backend
+        self.assert_backend(1, translation=second_translation)
+
+        # Force rescan
+        components = Component.objects.all()
+        for component in components:
+            component.do_file_scan()
+
+        # Verify that propagated units survived scan
+        self.assertEqual(get_targets(), [self.second_target, self.second_target])
+
+        # Verify that changes were properly generated
+        for unit in Unit.objects.filter(
+            source=self.source, translation__language_code="cs"
+        ):
+            self.assertEqual(
+                unit.change_set.filter(action=ActionEvents.NEW_UNIT_REPO).count(),
+                1,
+            )
+            self.assertEqual(
+                unit.change_set.filter(action=ActionEvents.STRING_REPO_UPDATE).count(),
+                0,
+            )
+            if unit.translation.component.slug == "second":
+                self.assertEqual(
+                    unit.change_set.filter(action=ActionEvents.PROPAGATED_EDIT).count(),
+                    2,
+                )
+            else:
+                self.assertEqual(
+                    unit.change_set.filter(action=ActionEvents.NEW).count(), 1
+                )
+                self.assertEqual(
+                    unit.change_set.filter(action=ActionEvents.CHANGE).count(),
+                    1,
+                )
+
+        # Bring strins out of sync
+        unit = self.get_unit()
+        test_edit = "Test edit\n"
+        unit.translate(
+            None,
+            test_edit,
+            STATE_TRANSLATED,
+            change_action=ActionEvents.AUTO,
+            propagate=False,
+        )
+        self.assertEqual(set(get_targets()), {self.second_target, test_edit})
+        self.assertEqual(
+            {"inconsistent"}, set(unit.check_set.values_list("name", flat=True))
+        )
+
+        # Resync them
+        unit.translate(
+            None,
+            self.second_target,
+            STATE_TRANSLATED,
+            change_action=ActionEvents.AUTO,
+            propagate=False,
+        )
+        self.assertEqual(set(get_targets()), {self.second_target})
+        self.assertEqual(set(), set(unit.check_set.values_list("name", flat=True)))
 
 
 class EditTSTest(EditTest):
@@ -1098,7 +1193,7 @@ class EditSourceTest(ViewTestCase):
         )
 
         # Check sync should be no-op now
-        self.component.create_translations()
+        self.component.create_translations_immediate()
 
         # Check that translation was preserved
         self.assertEqual(

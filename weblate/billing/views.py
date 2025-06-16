@@ -40,7 +40,9 @@ def download_invoice(request: AuthenticatedHttpRequest, pk):
     """Download invoice PDF."""
     invoice = get_object_or_404(Invoice, pk=pk)
 
-    if not invoice.ref:
+    filename = invoice.full_filename
+
+    if not filename:
         msg = "No reference!"
         raise Http404(msg)
 
@@ -52,7 +54,7 @@ def download_invoice(request: AuthenticatedHttpRequest, pk):
         raise Http404(msg)
 
     return FileResponse(
-        open(invoice.full_filename, "rb"),
+        open(filename, "rb"),
         as_attachment=True,
         filename=invoice.filename,
         content_type="application/pdf",
@@ -96,7 +98,7 @@ def handle_post(request: AuthenticatedHttpRequest, billing) -> None:
                 billing.save(update_fields=["payment"])
                 mail_admins_contact(
                     request,
-                    subject=f"Hosting request for {billing}",
+                    subject=f"Hosting request for {project}",
                     message=HOSTING_TEMPLATE,
                     context={
                         "billing": billing,

@@ -13,10 +13,11 @@ from typing import NamedTuple
 
 import cairo
 import gi
-from django.conf import settings
 from django.core.cache import cache as django_cache
+from django.db.models.fields.files import FieldFile
 
 from weblate.utils.data import data_dir
+from weblate.utils.icons import find_static_file
 
 gi.require_version("PangoCairo", "1.0")
 gi.require_version("Pango", "1.0")
@@ -108,10 +109,14 @@ def configure_fontconfig() -> None:
             FONTCONFIG_CONFIG.format(
                 data_dir("cache", "fonts"),
                 fonts_dir,
-                os.path.join(
-                    settings.STATIC_ROOT, "js", "vendor", "fonts", "font-source", "TTF"
+                os.path.dirname(
+                    find_static_file(
+                        "js/vendor/fonts/font-source/TTF/SourceSans3-Regular.ttf"
+                    )
                 ),
-                os.path.join(settings.STATIC_ROOT, "vendor", "font-kurinto"),
+                os.path.dirname(
+                    find_static_file("vendor/font-kurinto/KurintoSans-Rg.ttf")
+                ),
             )
         )
 
@@ -250,6 +255,7 @@ def render_size(
     pixel_size, line_count, buffer = _render_size(
         text,
         font=font,
+        weight=weight,
         size=size,
         spacing=spacing,
         width=width,
@@ -291,6 +297,10 @@ def check_render_size(
 def get_font_name(filelike):
     """Return tuple of font family and style, for example ('Ubuntu', 'Regular')."""
     from PIL import ImageFont
+
+    # Form uploaded file
+    if isinstance(filelike, FieldFile):
+        filelike = filelike.file
 
     if not hasattr(filelike, "loaded_font"):
         filelike.loaded_font = ImageFont.truetype(filelike)

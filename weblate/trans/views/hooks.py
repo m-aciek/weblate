@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TypedDict
 from urllib.parse import quote, urlparse
 
 from django.conf import settings
 from django.db.models import Q
 from django.http import (
     Http404,
+    HttpResponse,
     HttpResponseBadRequest,
     HttpResponseNotAllowed,
     JsonResponse,
@@ -19,15 +21,13 @@ from django.http import (
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from weblate.auth.models import AuthenticatedHttpRequest
+from weblate.auth.models import AuthenticatedHttpRequest, User
 from weblate.logger import LOGGER
-from weblate.trans.models import Change, Component, Project
+from weblate.trans.actions import ActionEvents
+from weblate.trans.models import Component, Project
 from weblate.trans.tasks import perform_update
 from weblate.utils.errors import report_error
 from weblate.utils.views import parse_path
-
-if TYPE_CHECKING:
-    from weblate.auth.models import AuthenticatedHttpRequest
 
 BITBUCKET_GIT_REPOS = (
     "ssh://git@{server}/{full_name}.git",
@@ -69,7 +69,18 @@ AZURE_REPOS = (
     "{organization}@vs-ssh.visualstudio.com:v3/{organization}/{project}/{repository}",
 )
 
-HOOK_HANDLERS = {}
+
+class HandlerResponse(TypedDict):
+    service_long_name: str
+    repo_url: str
+    repos: list[str]
+    branch: str | None
+    full_name: str
+
+
+HandlerType = Callable[[dict, AuthenticatedHttpRequest], HandlerResponse | None]
+
+HOOK_HANDLERS: dict[str, HandlerType] = {}
 
 
 def hook_response(
@@ -77,14 +88,14 @@ def hook_response(
     message: str = "success",
     status: int = 200,
     **kwargs,
-):
+) -> JsonResponse:
     """Create a hook response."""
     data = {"status": message, "message": response}
     data.update(kwargs)
     return JsonResponse(data=data, status=status)
 
 
-def register_hook(handler):
+def register_hook(handler: HandlerType) -> HandlerType:
     """Register hook handler."""
     name = handler.__name__.split("_")[0]
     HOOK_HANDLERS[name] = handler
@@ -92,7 +103,7 @@ def register_hook(handler):
 
 
 @csrf_exempt
-def update(request: AuthenticatedHttpRequest, path):
+def update(request: AuthenticatedHttpRequest, path) -> HttpResponse:
     """Update git repository API hook."""
     if not settings.ENABLE_HOOKS:
         return HttpResponseNotAllowed([])
@@ -105,7 +116,7 @@ def update(request: AuthenticatedHttpRequest, path):
     return hook_response()
 
 
-def parse_hook_payload(request: AuthenticatedHttpRequest):
+def parse_hook_payload(request: AuthenticatedHttpRequest) -> dict:
     """
     Parse hook payload.
 
@@ -118,7 +129,7 @@ def parse_hook_payload(request: AuthenticatedHttpRequest):
 
 @require_POST
 @csrf_exempt
-def vcs_service_hook(request: AuthenticatedHttpRequest, service):
+def vcs_service_hook(request: AuthenticatedHttpRequest, service: str) -> HttpResponse:
     """
     Shared code between VCS service hooks.
 
@@ -171,6 +182,11 @@ def vcs_service_hook(request: AuthenticatedHttpRequest, service):
         | Q(repo__iendswith=f"{full_name}/")
         | Q(repo__iendswith=f"{full_name}.git")
     )
+    user = User.objects.get_or_create_bot(
+        scope="webhook",
+        username=service,
+        verbose=f"{service_data['service_long_name']} webhook",
+    )
 
     for repo in repos:
         # We need to match also URLs which include username and password
@@ -209,8 +225,8 @@ def vcs_service_hook(request: AuthenticatedHttpRequest, service):
     for obj in enabled_components:
         updates += 1
         LOGGER.info("%s notification will update %s", service_long_name, obj)
-        obj.change_set.create(action=Change.ACTION_HOOK, details=service_data)
-        perform_update.delay("Component", obj.pk)
+        obj.change_set.create(action=ActionEvents.HOOK, details=service_data, user=user)
+        perform_update.delay("Component", obj.pk, user_id=user.id)
 
     match_status = {
         "repository_matches": repo_components_count,
@@ -235,7 +251,7 @@ def vcs_service_hook(request: AuthenticatedHttpRequest, service):
     )
 
 
-def bitbucket_extract_changes(data):
+def bitbucket_extract_changes(data: dict) -> list[dict]:
     if "changes" in data:
         return data["changes"]
     if "push" in data:
@@ -245,7 +261,7 @@ def bitbucket_extract_changes(data):
     return []
 
 
-def bitbucket_extract_branch(data):
+def bitbucket_extract_branch(data: dict) -> str | None:
     changes = bitbucket_extract_changes(data)
     if changes:
         last = changes[-1]
@@ -263,7 +279,7 @@ def bitbucket_extract_branch(data):
     return None
 
 
-def bitbucket_extract_full_name(repository):
+def bitbucket_extract_full_name(repository: dict) -> str:
     if "full_name" in repository:
         return repository["full_name"]
     if "fullName" in repository:
@@ -276,7 +292,7 @@ def bitbucket_extract_full_name(repository):
     raise ValueError(msg)
 
 
-def bitbucket_extract_repo_url(data, repository):
+def bitbucket_extract_repo_url(data, repository: dict) -> str:
     if "links" in repository:
         if "html" in repository["links"]:
             return repository["links"]["html"]["href"]
@@ -288,7 +304,9 @@ def bitbucket_extract_repo_url(data, repository):
 
 
 @register_hook
-def bitbucket_hook_helper(data, request: AuthenticatedHttpRequest):
+def bitbucket_hook_helper(
+    data, request: AuthenticatedHttpRequest
+) -> HandlerResponse | None:
     """Parse service hook from Bitbucket."""
     # Bitbucket ping event
     if request and request.headers.get("x-event-key") not in {
@@ -342,7 +360,9 @@ def bitbucket_hook_helper(data, request: AuthenticatedHttpRequest):
 
 
 @register_hook
-def github_hook_helper(data, request: AuthenticatedHttpRequest):
+def github_hook_helper(
+    data: dict, request: AuthenticatedHttpRequest
+) -> HandlerResponse | None:
     """Parse hooks from GitHub."""
     # Ignore non push events
     if request and request.headers.get("x-github-event") != "push":
@@ -379,7 +399,9 @@ def github_hook_helper(data, request: AuthenticatedHttpRequest):
 
 
 @register_hook
-def gitea_hook_helper(data, request: AuthenticatedHttpRequest):
+def gitea_hook_helper(
+    data: dict, request: AuthenticatedHttpRequest
+) -> HandlerResponse | None:
     return {
         "service_long_name": "Gitea",
         "repo_url": data["repository"]["html_url"],
@@ -394,7 +416,9 @@ def gitea_hook_helper(data, request: AuthenticatedHttpRequest):
 
 
 @register_hook
-def gitee_hook_helper(data, request: AuthenticatedHttpRequest):
+def gitee_hook_helper(
+    data: dict, request: AuthenticatedHttpRequest
+) -> HandlerResponse | None:
     return {
         "service_long_name": "Gitee",
         "repo_url": data["repository"]["html_url"],
@@ -411,7 +435,9 @@ def gitee_hook_helper(data, request: AuthenticatedHttpRequest):
 
 
 @register_hook
-def gitlab_hook_helper(data, request: AuthenticatedHttpRequest):
+def gitlab_hook_helper(
+    data: dict, request: AuthenticatedHttpRequest
+) -> HandlerResponse | None:
     """Parse hook from GitLab."""
     # Ignore non known events
     if "ref" not in data:
@@ -428,20 +454,20 @@ def gitlab_hook_helper(data, request: AuthenticatedHttpRequest):
         data["repository"]["git_ssh_url"],
         data["repository"]["homepage"],
     ]
-    full_name = ssh_url.split(":", 1)[1]
-    full_name = full_name.removesuffix(".git")
 
     return {
         "service_long_name": "GitLab",
         "repo_url": data["repository"]["homepage"],
         "repos": repos,
         "branch": branch,
-        "full_name": full_name,
+        "full_name": data["project"]["path_with_namespace"],
     }
 
 
 @register_hook
-def pagure_hook_helper(data, request: AuthenticatedHttpRequest):
+def pagure_hook_helper(
+    data: dict, request: AuthenticatedHttpRequest
+) -> HandlerResponse | None:
     """Parse hook from Pagure."""
     # Ignore non known events
     if "msg" not in data or data.get("topic") != "git.receive":
@@ -469,7 +495,9 @@ def expand_quoted(name: str):
 
 
 @register_hook
-def azure_hook_helper(data, request: AuthenticatedHttpRequest):
+def azure_hook_helper(
+    data: dict, request: AuthenticatedHttpRequest
+) -> HandlerResponse | None:
     if data.get("eventType") != "git.push":
         return None
 

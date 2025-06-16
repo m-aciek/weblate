@@ -16,12 +16,22 @@ from django.utils.translation import gettext, gettext_lazy
 from lxml.cssselect import CSSSelector
 
 from weblate.formats.models import FILE_FORMATS
+from weblate.trans.actions import ActionEvents
 from weblate.trans.discovery import ComponentDiscovery
 from weblate.trans.forms import AutoForm, BulkEditForm
 from weblate.trans.models import Component, Project, Translation
-from weblate.utils.forms import CachedModelChoiceField, ContextDiv
+from weblate.utils.forms import (
+    CachedModelChoiceField,
+    ContextDiv,
+    SortedSelectMultiple,
+    WeblateServiceURLField,
+)
 from weblate.utils.render import validate_render, validate_render_translation
-from weblate.utils.validators import validate_filename, validate_re
+from weblate.utils.validators import (
+    validate_base64_encoded_string,
+    validate_filename,
+    validate_re,
+)
 
 if TYPE_CHECKING:
     from weblate.auth.models import User
@@ -201,6 +211,10 @@ class GitSquashForm(BaseAddonForm):
 
 class JSONCustomizeForm(BaseAddonForm):
     sort_keys = forms.BooleanField(label=gettext_lazy("Sort JSON keys"), required=False)
+    use_compact_separators = forms.BooleanField(
+        label=gettext_lazy("Avoid spaces after separators"),
+        required=False,
+    )
     indent = forms.IntegerField(
         label=gettext_lazy("JSON indentation"), min_value=0, initial=4, required=True
     )
@@ -504,7 +518,9 @@ class CDNJSForm(BaseAddonForm):
         max_value=100,
         min_value=0,
         required=True,
-        help_text=gettext_lazy("Threshold for inclusion of translations."),
+        help_text=gettext_lazy(
+            "The percentage of translated strings that must be present for translation to be included."
+        ),
     )
     css_selector = forms.CharField(
         label=gettext_lazy("CSS selector"),
@@ -576,31 +592,31 @@ class PseudolocaleAddonForm(BaseAddonForm):
     )
     # This shadows prefix from the Form class
     prefix = forms.CharField(  # type: ignore[assignment]
-        label=gettext_lazy("Fixed string prefix"),
+        label=gettext_lazy("Prepended static text"),
         required=False,
         initial="",
     )
     var_prefix = forms.CharField(
-        label=gettext_lazy("Variable string prefix"),
+        label=gettext_lazy("Prepended variable text"),
         required=False,
         initial="",
     )
     suffix = forms.CharField(
-        label=gettext_lazy("Fixed string suffix"),
+        label=gettext_lazy("Appended static text"),
         required=False,
         initial="",
     )
     var_suffix = forms.CharField(
-        label=gettext_lazy("Variable string suffix"),
+        label=gettext_lazy("Appended variable text"),
         required=False,
         initial="",
     )
     var_multiplier = forms.FloatField(
-        label=gettext_lazy("Variable part multiplier"),
+        label=gettext_lazy("Variable text multiplier"),
         required=False,
         initial=0.1,
         help_text=gettext_lazy(
-            "How many times to repeat the variable part depending on "
+            "How many times to repeat the variable text depending on "
             "the length of the source string."
         ),
     )
@@ -652,3 +668,40 @@ class PropertiesSortAddonForm(BaseAddonForm):
         required=False,
         initial=False,
     )
+
+
+class ChangeBaseAddonForm(BaseAddonForm):
+    """Base form for Change-based addons."""
+
+    events = forms.MultipleChoiceField(
+        label=gettext_lazy("Change events"),
+        required=False,
+        widget=SortedSelectMultiple(),
+        choices=ActionEvents.choices,
+    )
+
+
+class BaseWebhooksAddonForm(ChangeBaseAddonForm):
+    """Form for webhook add-on configuration."""
+
+    webhook_url = WeblateServiceURLField(
+        label=gettext_lazy("Webhook URL"),
+        required=True,
+    )
+
+    field_order = ["webhook_url", "events"]
+
+
+class WebhooksAddonForm(BaseWebhooksAddonForm):
+    """Form for webhook add-on configuration."""
+
+    secret = forms.CharField(
+        label=gettext_lazy("Secret"),
+        validators=[
+            validate_base64_encoded_string,
+        ],
+        required=False,
+        help_text=gettext_lazy("A Base64 encoded string"),
+    )
+
+    field_order = ["webhook_url", "secret", "events"]

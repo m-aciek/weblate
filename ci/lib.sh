@@ -18,7 +18,7 @@ check() {
 }
 
 run_coverage() {
-    uv run --no-sources --all-extras coverage run --source . --append "$@"
+    uv run --all-extras coverage run --source . --append "$@"
 }
 
 get_mysql_args() {
@@ -56,6 +56,8 @@ cleanup_database() {
         fi
         psql --host="$CI_DB_HOST" -c 'DROP DATABASE IF EXISTS weblate;' -U postgres
         psql --host="$CI_DB_HOST" -c 'CREATE DATABASE weblate;' -U postgres
+        # Replaces weblate/utils/migrations/0001_alter_role.py
+        psql --host="$CI_DB_HOST" -c 'ALTER ROLE postgres SET timezone = UTC;' -U postgres
     fi
 }
 

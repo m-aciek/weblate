@@ -14,10 +14,14 @@ from weblate_language_data.check_languages import LANGUAGES
 from weblate.checks.base import TargetCheck
 from weblate.checks.data import IGNORE_WORDS
 from weblate.checks.format import FLAG_RULES, PERCENT_MATCH
+from weblate.checks.markup import BBCODE_MATCH
 from weblate.checks.qt import QT_FORMAT_MATCH, QT_PLURAL_MATCH
 from weblate.checks.ruby import RUBY_FORMAT_MATCH
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from weblate.checks.flags import Flags
     from weblate.trans.models import Unit
 
 # Email address to ignore
@@ -60,7 +64,13 @@ EMOJI_RE = re.compile(r"[\U00002600-\U000027bf]|[\U0001f000-\U0001fffd]")
 DB_TAGS = ("screen", "indexterm", "programlisting")
 
 
-def strip_format(msg, flags):
+def replace_format_placeholder(match: re.Match) -> str:
+    return f"x-weblate-{match.start(0)}"
+
+
+def strip_format(
+    msg: str, flags: Flags, replacement: str | Callable[[re.Match], str] = ""
+) -> str:
     """
     Remove format strings from the strings.
 
@@ -80,12 +90,14 @@ def strip_format(msg, flags):
         regex = RST_MATCH
     elif "percent-placeholders" in flags:
         regex = PERCENT_MATCH
+    elif "bbcode-text" in flags:
+        regex = BBCODE_MATCH
     else:
         return msg
-    return regex.sub("", msg)
+    return regex.sub(replacement, msg)
 
 
-def strip_string(msg):
+def strip_string(msg: str) -> str:
     """Strip (usually) untranslated parts from the string."""
     # Strip HTML markup
     stripped = strip_tags(msg)
@@ -122,7 +134,7 @@ def test_word(word, extra_ignore):
     )
 
 
-def strip_placeholders(msg, unit: Unit):
+def strip_placeholders(msg: str, unit: Unit) -> str:
     return re.sub(
         "|".join(
             re.escape(param) if isinstance(param, str) else param.pattern
@@ -138,7 +150,7 @@ class SameCheck(TargetCheck):
 
     check_id = "same"
     name = gettext_lazy("Unchanged translation")
-    description = gettext_lazy("Source and translation are identical")
+    description = gettext_lazy("Source and translation are identical.")
 
     def should_ignore(self, source: str, unit: Unit) -> bool:
         """Check whether given unit should be ignored."""
@@ -198,7 +210,7 @@ class SameCheck(TargetCheck):
         # or are whole uppercase (abbreviations)
         if len(stripped) <= 1 or stripped.isupper():
             return True
-        # Check if we have any word which is not in blacklist
+        # Check if we have any word which is not in exceptions list
         # (words which are often same in foreign language)
         for word in SPLIT_RE.split(stripped.lower()):
             if not test_word(word, extra_ignore):
@@ -213,14 +225,14 @@ class SameCheck(TargetCheck):
 
         source_language = unit.translation.component.source_language.base_code
 
-        # Ignore the check for source language,
-        # English variants will have most things untranslated
-        # Interlingua is also quite often similar to English
-        return bool(
-            unit.translation.language.is_base((source_language,))
+        return (
+            # Ignore the check for source language,
+            unit.translation.language.is_base({source_language})
+            # English variants will have most things untranslated
+            # Interlingua is also quite often similar to English
             or (
                 source_language == "en"
-                and unit.translation.language.is_base(("en", "ia"))
+                and unit.translation.language.is_base({"en", "ia"})
             )
         )
 

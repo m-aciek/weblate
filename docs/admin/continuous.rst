@@ -224,8 +224,9 @@ as shown on the image below:
 
 .. image:: /images/github-settings.png
 
-For the payload URL, append ``/hooks/github/`` to your Weblate URL, for example
-for the Hosted Weblate service, this is ``https://hosted.weblate.org/hooks/github/``.
+The :guilabel:`Payload URL` consists of your Weblate URL appended by
+``/hooks/github/``, for example for the Hosted Weblate service, this is
+``https://hosted.weblate.org/hooks/github/``.
 
 You can leave other values at default settings (Weblate can handle both
 content types and consumes just the `push` event).
@@ -445,12 +446,12 @@ Gitea, Pagure, Azure DevOps, Bitbucket Data Center and Bitbucket Cloud:
      - Branch name
 
    * - Bitbucket Data Center pull request from fork
-     - :ref:`vcs-bitbucket-server`
+     - :ref:`vcs-bitbucket-data-center`
      - `empty`
      - `empty`
 
    * - Bitbucket Data Center pull request from branch
-     - :ref:`vcs-bitbucket-server`
+     - :ref:`vcs-bitbucket-data-center`
      - SSH URL [#empty]_
      - Branch name
 
@@ -558,10 +559,20 @@ With :ref:`component-allow_translation_propagation` enabled (what is the default
 components with matching strings. Such translations are properly credited to
 currently translating user in all components.
 
-.. note::
+Propagation preconditions:
 
-   The translation propagation requires the key to be match for monolingual
-   translation formats, so keep that in mind when creating translation keys.
+- All components have to reside in a single project (linking component is not enough).
+- Enable :ref:`component-allow_translation_propagation` to automatically reuse translations for matching strings.
+- The translation propagation requires the key to be match for monolingual
+  translation formats, so keep that in mind when creating translation keys.
+- The strings are propagated while translating, strings loaded from the
+  repository are not propagated.
+
+.. tip::
+
+   This feature currently has limitations, and we want to make it more
+   universal. Please share your feedback at
+   https://github.com/WeblateOrg/weblate/issues/3166.
 
 Consistency check
 +++++++++++++++++

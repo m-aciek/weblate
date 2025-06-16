@@ -57,7 +57,7 @@ sources.
    .. code-block:: sh
 
       . scripts/test-database.sh
-      ./manage.py test
+      pytest
 
 .. seealso::
 
@@ -81,6 +81,9 @@ It will create a development Docker image and start it. Weblate is running on
 as the password. The new installation is empty, so you might want to continue with
 :ref:`adding-projects`.
 
+Weblate is configured to use :program:`maildev` container as a e-mail server.
+The delivered e-mails can be seen at <http://127.0.0.1:1080/>.
+
 The :file:`Dockerfile` and :file:`docker-compose.yml` for this are located in the
 :file:`dev-docker` directory. For easier access to the database during development,
 the container running PostgreSQL is exposed on port ``5433``.
@@ -91,7 +94,7 @@ for example running only tests in the ``weblate.machine`` module:
 
 .. code-block:: sh
 
-   ./rundev.sh test --failfast weblate.machine
+   ./rundev.sh test --exitfirst weblate/machine
 
 .. note::
 

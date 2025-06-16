@@ -9,14 +9,18 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from zipfile import BadZipfile
 
 from django.conf import settings
+from django.db import models
 from django.db.models import Model
+from django.utils.translation import gettext_lazy
 from drf_spectacular.extensions import OpenApiSerializerExtension
 from drf_spectacular.plumbing import build_basic_type, build_object_type
 from drf_spectacular.utils import (
     OpenApiExample,
+    extend_schema_field,
     extend_schema_serializer,
     inline_serializer,
 )
+from drf_standardized_errors.openapi_serializers import ServerErrorEnum
 from rest_framework import serializers
 
 from weblate.accounts.models import Subscription
@@ -31,6 +35,7 @@ from weblate.trans.models import (
     AutoComponentList,
     Category,
     Change,
+    Comment,
     Component,
     ComponentList,
     Label,
@@ -222,6 +227,13 @@ class FullUserSerializer(serializers.ModelSerializer[User]):
         many=True,
         read_only=True,
     )
+    languages = serializers.HyperlinkedIdentityField(
+        view_name="api:language-detail",
+        lookup_field="code",
+        source="profile.languages",
+        many=True,
+        read_only=True,
+    )
     notifications = serializers.HyperlinkedIdentityField(
         view_name="api:user-notifications",
         lookup_field="username",
@@ -229,6 +241,9 @@ class FullUserSerializer(serializers.ModelSerializer[User]):
     )
     statistics_url = serializers.HyperlinkedIdentityField(
         view_name="api:user-statistics", lookup_field="username"
+    )
+    contributions_url = serializers.HyperlinkedIdentityField(
+        view_name="api:user-contributions", lookup_field="username"
     )
 
     class Meta:
@@ -239,6 +254,7 @@ class FullUserSerializer(serializers.ModelSerializer[User]):
             "full_name",
             "username",
             "groups",
+            "languages",
             "notifications",
             "is_superuser",
             "is_active",
@@ -247,6 +263,7 @@ class FullUserSerializer(serializers.ModelSerializer[User]):
             "last_login",
             "url",
             "statistics_url",
+            "contributions_url",
         )
         extra_kwargs = {
             "url": {"view_name": "api:user-detail", "lookup_field": "username"}
@@ -263,6 +280,7 @@ class BasicUserSerializer(serializers.ModelSerializer[User]):
         )
 
 
+@extend_schema_field(str)
 class PermissionSerializer(serializers.RelatedField[Permission, str, str]):
     class Meta:
         model = Permission
@@ -315,6 +333,87 @@ class RoleSerializer(serializers.ModelSerializer[Role]):
                 Permission.objects.filter(codename__in=permissions_validated)
             )
         return instance
+
+
+class CommentSerializer(serializers.Serializer[Comment]):
+    scope = serializers.ChoiceField(
+        choices=["report", "global", "translation"],
+        label=gettext_lazy("Scope"),
+        help_text=gettext_lazy(
+            "Is your comment specific to this translation, or generic for all of them?"
+        ),
+        write_only=True,
+    )
+    comment = serializers.CharField(
+        max_length=1000,
+        label=gettext_lazy("Comment text"),
+        help_text=gettext_lazy("You can use Markdown and mention users by @username."),
+    )
+    timestamp = serializers.DateTimeField(
+        required=False,
+        label=gettext_lazy("Creation timestamp"),
+        help_text=gettext_lazy(
+            "If you’re an admin, you can set the explicit timestamp at which the comment was created."
+        ),
+    )
+    user_email = serializers.EmailField(
+        required=False,
+        label=gettext_lazy("Commenter’s email"),
+        help_text=gettext_lazy(
+            "If you’re an admin, you can attribute this comment to another user by their email."
+        ),
+        write_only=True,
+    )
+
+    id = serializers.IntegerField(read_only=True)
+    user = serializers.HyperlinkedRelatedField(
+        read_only=True, view_name="api:user-detail", lookup_field="username"
+    )
+
+    class Meta:
+        model = Comment
+        fields = ["scope", "comment", "timestamp", "user_email", "id", "user"]
+
+    def validate_scope(self, value):
+        unit: Unit | None = self.context.get("unit", None)
+        if unit is None:
+            return value
+
+        # Remove bug-report in case source review is not enabled
+        if value == "report" and not unit.translation.component.project.source_review:
+            msg = f'"{value}" is not a valid choice as source review is disabled.'
+            raise serializers.ValidationError(msg)
+
+        # Remove translation comment when commenting on source
+        if value == "translation" and unit.translation.is_source:
+            msg = f'"{value}" is not a valid choice for source units.'
+            raise serializers.ValidationError(msg)
+
+        return value
+
+    def create(self, validated_data):
+        request = self.context["request"]
+        unit = self.context["unit"]
+
+        text = validated_data.pop("comment")
+        scope = validated_data.pop("scope")
+        timestamp = validated_data.pop("timestamp", None)
+        user_email = validated_data.pop("user_email", None)
+
+        user = request.user
+        if user_email:
+            override = User.objects.filter(email=user_email).first()
+            if override:
+                user = override
+
+        return Comment.objects.add(
+            request=request,
+            unit=unit,
+            text=text,
+            scope=scope,
+            user=user,
+            timestamp=timestamp,
+        )
 
 
 class GroupSerializer(serializers.ModelSerializer[Group]):
@@ -418,6 +517,7 @@ class ProjectSerializer(serializers.ModelSerializer[Project]):
             "web",
             "web_url",
             "url",
+            "check_flags",
             "components_list_url",
             "repository_url",
             "statistics_url",
@@ -432,6 +532,7 @@ class ProjectSerializer(serializers.ModelSerializer[Project]):
             "instructions",
             "enable_hooks",
             "language_aliases",
+            "secondary_language",
             "enforced_2fa",
             "machinery_settings",
         )
@@ -599,6 +700,7 @@ class ComponentSerializer(RemovableSerializer[Component]):
             "auto_lock_error",
             "language_regex",
             "key_filter",
+            "secondary_language",
             "variant_regex",
             "zipfile",
             "docfile",
@@ -1060,7 +1162,12 @@ class UnitLabelsSerializer(serializers.RelatedField, LabelSerializer):
 
     def to_internal_value(self, data):
         try:
-            label = self.get_queryset().get(id=data)
+            pk = int(data)
+        except ValueError as err:
+            msg = "Invalid label ID."
+            raise serializers.ValidationError(msg) from err
+        try:
+            label = self.get_queryset().get(id=pk)
         except Label.DoesNotExist as err:
             msg = "Label with this ID was not found in this project."
             raise serializers.ValidationError(msg) from err
@@ -1083,6 +1190,9 @@ class UnitSerializer(serializers.ModelSerializer[Unit]):
         ),
         strip_parts=1,
     )
+    language_code = serializers.CharField(
+        source="translation.language.code", read_only=True
+    )
     source_unit = serializers.HyperlinkedRelatedField(
         read_only=True, view_name="api:unit-detail"
     )
@@ -1097,6 +1207,7 @@ class UnitSerializer(serializers.ModelSerializer[Unit]):
         model = Unit
         fields = (
             "translation",
+            "language_code",
             "source",
             "previous_source",
             "target",
@@ -1590,3 +1701,20 @@ def edit_service_settings_response_serializer(
         ),
     }
     return {code: serializers_[code] for code in codes}
+
+
+class ErrorCode423Enum(models.TextChoices):
+    REPOSITORY_LOCKED = "repository-locked"
+    COMPONENT_LOCKED = "component-locked"
+    UNKNOWN_LOCKED = "unknown-locked"
+
+
+class Error423Serializer(serializers.Serializer):
+    code = serializers.ChoiceField(choices=ErrorCode423Enum.choices)
+    detail = serializers.CharField()
+    attr = serializers.CharField(allow_null=True)
+
+
+class ErrorResponse423Serializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=ServerErrorEnum.choices)
+    errors = Error423Serializer(many=True)

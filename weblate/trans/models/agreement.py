@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 class ContributorAgreementManager(models.Manager):
     def has_agreed(self, user: User, component: Component):
+        if user.is_anonymous:
+            return False
         cache_key = (user.pk, component.pk)
         if cache_key not in user.cla_cache:
             user.cla_cache[cache_key] = self.filter(
@@ -41,8 +43,8 @@ class ContributorAgreement(models.Model):
 
     class Meta:
         unique_together = [("user", "component")]
-        verbose_name = "contributor agreement"
-        verbose_name_plural = "contributor agreements"
+        verbose_name = "contributor license agreement"
+        verbose_name_plural = "contributor license agreements"
 
     def __str__(self) -> str:
         return f"{self.user.username}:{self.component}"

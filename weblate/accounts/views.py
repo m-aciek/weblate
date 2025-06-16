@@ -81,6 +81,7 @@ from social_core.exceptions import (
     AuthMissingParameter,
     AuthStateForbidden,
     AuthStateMissing,
+    AuthUnreachableProvider,
     InvalidEmail,
     MissingBackend,
 )
@@ -130,6 +131,7 @@ from weblate.accounts.utils import (
     SESSION_WEBAUTHN_AUDIT,
     DeviceType,
     get_key_name,
+    lock_user,
     remove_user,
 )
 from weblate.auth.forms import UserEditForm
@@ -157,6 +159,9 @@ from weblate.utils.zammad import ZammadError, submit_zammad_ticket
 
 if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest
+
+AUTHID_SALT = "weblate.authid"
+AUTHID_MAX_AGE = 600
 
 CONTACT_TEMPLATE = """
 Message from %(name)s <%(email)s>:
@@ -267,6 +272,11 @@ def mail_admins_contact(
             )
         except ZammadError as error:
             messages.error(request, str(error))
+        except OSError:
+            report_error("Could not create ticket")
+            messages.error(
+                request, gettext("Could not open a ticket, please try again later.")
+            )
         else:
             messages.success(
                 request,
@@ -685,6 +695,10 @@ class UserPage(UpdateView):
                 AuditLog.objects.create(user, None, "twofactor-remove", device=key_name)
             return HttpResponseRedirect(self.get_success_url() + "#edit")
 
+        if "disable_password" in request.POST:
+            lock_user(user, "admin-locked")
+            return HttpResponseRedirect(self.get_success_url() + "#edit")
+
         return super().post(request, *args, **kwargs)
 
     def get_queryset(self):
@@ -921,6 +935,9 @@ def register(request: AuthenticatedHttpRequest):
     # Allow registration at all?
     registration_open = settings.REGISTRATION_OPEN or bool(invitation)
 
+    # Hide captcha for invitations
+    hide_captcha = invitation is not None
+
     # Get list of allowed backends
     backends = get_auth_keys()
     if settings.REGISTRATION_ALLOW_BACKENDS and not invitation:
@@ -929,7 +946,9 @@ def register(request: AuthenticatedHttpRequest):
         backends = set()
 
     if request.method == "POST" and "email" in backends:
-        form = RegistrationForm(request=request, data=request.POST)
+        form = RegistrationForm(
+            request=request, data=request.POST, hide_captcha=hide_captcha
+        )
         if form.is_valid():
             if form.cleaned_data["email_user"]:
                 AuditLog.objects.create(
@@ -939,7 +958,9 @@ def register(request: AuthenticatedHttpRequest):
             store_userid(request)
             return social_complete(request, "email")
     else:
-        form = RegistrationForm(request=request, initial=initial)
+        form = RegistrationForm(
+            request=request, initial=initial, hide_captcha=hide_captcha
+        )
 
     # Redirect if there is only one backend
     if len(backends) == 1 and "email" not in backends and not invitation:
@@ -1317,15 +1338,17 @@ def social_auth(request: AuthenticatedHttpRequest, backend: str):
     except MissingBackend:
         msg = "Backend not found"
         raise Http404(msg) from None
-    # Store session ID for OpenID based auth. The session cookies will not be sent
-    # on returning POST request due to SameSite cookie policy
+
+    # Store session ID for OpenID based auth. The session cookies will
+    # not be sent on returning POST request due to SameSite cookie policy
     if isinstance(request.backend, OpenIdAuth):
         request.backend.redirect_uri += "?authid={}".format(
             dumps(
                 (request.session.session_key, get_ip_address(request)),
-                salt="weblate.authid",
+                salt=AUTHID_SALT,
             )
         )
+
     try:
         return do_auth(request.backend, redirect_name=REDIRECT_FIELD_NAME)
     except AuthException as error:
@@ -1382,7 +1405,7 @@ def handle_missing_parameter(
         return auth_fail(request, " ".join(messages))
     if error.parameter in {"email", "user", "expires"}:
         return auth_redirect_token(request)
-    if error.parameter in {"state", "code"}:
+    if error.parameter in {"state", "code", "RelayState"}:
         return auth_redirect_state(request)
     if error.parameter == "disabled":
         return auth_fail(request, gettext("New registrations are turned off."))
@@ -1405,12 +1428,15 @@ def social_complete(request: AuthenticatedHttpRequest, backend: str):  # noqa: C
     if "authid" in request.GET:
         try:
             session_key, ip_address = loads(
-                request.GET["authid"], max_age=600, salt="weblate.authid"
+                request.GET["authid"],
+                max_age=AUTHID_MAX_AGE,
+                salt=AUTHID_SALT,
             )
         except (BadSignature, SignatureExpired):
+            report_error("authid signature")
             return auth_redirect_token(request)
         if ip_address != get_ip_address(request):
-            return auth_redirect_token(request)
+            return auth_fail(request, "IP address changed, please try again.")
         engine = import_module(settings.SESSION_ENGINE)
         request.session = engine.SessionStore(session_key)
 
@@ -1475,6 +1501,11 @@ def social_complete(request: AuthenticatedHttpRequest, backend: str):  # noqa: C
             gettext(
                 "The supplied user identity is already in use for another account."
             ),
+        )
+    except AuthUnreachableProvider:
+        return registration_fail(
+            request,
+            gettext("The authentication provider could not be reached."),
         )
     except ValidationError as error:
         report_error("Could not register")
@@ -1561,6 +1592,7 @@ class UserList(ListView):
     paginate_by = 50
     model = User
     form_class = UserSearchForm
+    initial_query = ""
 
     def get_base_queryset(self):
         return User.objects.filter(is_active=True, is_bot=False)
@@ -1579,7 +1611,11 @@ class UserList(ListView):
 
     def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:  # type: ignore[override]
         super().setup(request, *args, **kwargs)
-        self.form = form = self.form_class(request.GET)
+        if "q" in request.GET:
+            form = self.form_class(request.GET)
+        else:
+            form = self.form_class({"q": self.initial_query})
+        self.form = form
         self.sort_query = ""
         if form.is_valid():
             self.sort_query = form.cleaned_data.get("sort_by", "")
@@ -1757,7 +1793,7 @@ class TOTPView(FormView):
 
 
 class SecondFactorMixin(View):
-    def second_factor_completed(self, device: Device):
+    def second_factor_completed(self, device: Device) -> None:
         # Store audit log entry aboute used device and update last used device type
         user = self.get_user()
         user.profile.log_2fa(self.request, device)
@@ -1819,6 +1855,7 @@ class SecondFactorLoginView(SecondFactorMixin, RedirectURLMixin, FormView):
         context["title"] = gettext("Second factor sign in")
         return context
 
+    @method_decorator(session_ratelimit_post("second_factor"))
     def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         self.user = self.get_user()
         return super().dispatch(request, *args, **kwargs)
@@ -1835,6 +1872,7 @@ class WeblateBeginCredentialAuthenticationView(
     pass
 
 
+@method_decorator(session_ratelimit_post("second_factor"), name="dispatch")
 class WeblateCompleteCredentialAuthenticationView(
     SecondFactorMixin, CompleteCredentialAuthenticationView
 ):

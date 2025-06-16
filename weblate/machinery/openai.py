@@ -11,12 +11,17 @@ from typing import TYPE_CHECKING, Literal, overload
 
 from django.core.cache import cache
 
-from weblate.glossary.models import get_glossary_terms, render_glossary_units_tsv
+from weblate.glossary.models import (
+    fetch_glossary_terms,
+    get_glossary_terms,
+    render_glossary_units_tsv,
+)
 from weblate.utils.errors import add_breadcrumb
 
 from .base import (
     BatchMachineTranslation,
     DownloadMultipleTranslations,
+    MachineryRateLimitError,
     MachineTranslationError,
 )
 from .forms import AzureOpenAIMachineryForm, OpenAIMachineryForm
@@ -68,7 +73,7 @@ class BaseOpenAITranslation(BatchMachineTranslation):
     def __init__(self, settings=None) -> None:
         super().__init__(settings)
 
-    def is_supported(self, source, language) -> bool:
+    def is_supported(self, source_language, target_language) -> bool:
         return True
 
     def format_prompt_part(self, name: Literal["style", "persona"]):
@@ -88,7 +93,9 @@ class BaseOpenAITranslation(BatchMachineTranslation):
         rephrase: bool = False,
     ) -> str:
         glossary = ""
+
         if any(units):
+            fetch_glossary_terms([unit for unit in units if unit is not None])
             glossary = render_glossary_units_tsv(
                 chain.from_iterable(
                     get_glossary_terms(unit, include_variants=False)
@@ -124,8 +131,8 @@ class BaseOpenAITranslation(BatchMachineTranslation):
 
     def download_multiple_translations(
         self,
-        source,
-        language,
+        source_language,
+        target_language,
         sources: list[tuple[str, Unit | None]],
         user=None,
         threshold: int = 75,
@@ -148,11 +155,18 @@ class BaseOpenAITranslation(BatchMachineTranslation):
         # Fetch rephrasing each string separately
         if rephrase:
             for text, unit in rephrase:
-                self._download(result, source, language, [text], [unit], rephrase=True)
+                self._download(
+                    result,
+                    source_language,
+                    target_language,
+                    [text],
+                    [unit],
+                    rephrase=True,
+                )
 
         # Fetch translations in batch
         if texts:
-            self._download(result, source, language, texts, units)
+            self._download(result, source_language, target_language, texts, units)
 
         return result
 
@@ -160,8 +174,8 @@ class BaseOpenAITranslation(BatchMachineTranslation):
     def _download(
         self,
         result: DownloadMultipleTranslations,
-        source,
-        language,
+        source_language,
+        target_language,
         texts: list[str],
         units: list[Unit],
         *,
@@ -171,27 +185,30 @@ class BaseOpenAITranslation(BatchMachineTranslation):
     def _download(
         self,
         result: DownloadMultipleTranslations,
-        source,
-        language,
+        source_language,
+        target_language,
         texts: list[str],
         units: list[Unit | None],
     ): ...
     def _download(
         self,
         result: DownloadMultipleTranslations,
-        source,
-        language,
+        source_language,
+        target_language,
         texts,
         units,
         *,
         rephrase=False,
     ):
+        from openai import RateLimitError
         from openai.types.chat import (
             ChatCompletionSystemMessageParam,
             ChatCompletionUserMessageParam,
         )
 
-        prompt = self._get_prompt(source, language, texts, units, rephrase=rephrase)
+        prompt = self._get_prompt(
+            source_language, target_language, texts, units, rephrase=rephrase
+        )
         content = SEPARATOR.join(texts if not rephrase else [*texts, units[0].target])
         add_breadcrumb("openai", "prompt", prompt=prompt)
         add_breadcrumb("openai", "chat", content=content)
@@ -204,13 +221,20 @@ class BaseOpenAITranslation(BatchMachineTranslation):
             ),
         ]
 
-        response = self.client.chat.completions.create(
-            model=self.get_model(),
-            messages=messages,  # type: ignore[arg-type]
-            temperature=0,
-            frequency_penalty=0,
-            presence_penalty=0,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.get_model(),
+                messages=messages,  # type: ignore[arg-type]
+                temperature=0,
+                frequency_penalty=0,
+                presence_penalty=0,
+            )
+        except RateLimitError as error:
+            if not isinstance(error.body, dict) or not (
+                message := error.body.get("message")
+            ):
+                message = error.message
+            raise MachineryRateLimitError(message) from error
 
         translations_string = response.choices[0].message.content
         add_breadcrumb("openai", "response", translations_string=translations_string)

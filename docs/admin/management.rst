@@ -404,8 +404,8 @@ be made simple using wildcards, or it can use the full power of regular expressi
 The simple matching uses ``**`` for component name and ``*`` for language, for
 example: ``**/*.po``
 
-The regular expression has to contain groups named `component` and `language`.
-For example: ``(?P<language>[^/]*)/(?P<component>[^-/]*)\.po``
+The regular expression has to contain groups named `component` and `language`,
+for example: ``(?P<language>[^/]*)/(?P<component>[^-/]*)\.po``.
 
 The import matches existing components based on files and adds the ones that
 do not exist. It does not change already existing ones.
@@ -465,8 +465,8 @@ separate a folder with the translations of each chapter:
 
     weblate import_project \
         debian-handbook \
-        git://anonscm.debian.org/debian-handbook/debian-handbook.git \
-        squeeze/master \
+        https://salsa.debian.org/hertzog/debian-handbook.git \
+        bullseye/main \
         '*/**.po'
 
 Then the Tanaguru tool, where the file format needs be specified,
@@ -530,6 +530,19 @@ Importing Sphinx documentation split to multiple files and directories:
 
     More detailed examples can be found in the :ref:`starting` chapter,
     alternatively you might want to use :wladmin:`import_json`.
+
+import_projectbackup
+--------------------
+
+.. weblate-admin:: import_projectbackup <project_name> <project_slug> <username> <filename>
+
+.. versionadded:: 5.10
+
+Imports :ref:`projectbackup`.
+
+.. hint::
+
+   Usually it is more comfortable to import project when :ref:`adding-projects`.
 
 importuserdata
 --------------
@@ -614,11 +627,45 @@ To install :ref:`mt-deepl`:
 
 .. code-block:: shell
 
-   weblate install_service --service deepl --configuration '{"key": "x", "url": "https://api.deepl.com/v2/"}' --update
+   weblate install_machinery --service deepl --configuration '{"key": "x", "url": "https://api.deepl.com/v2/"}' --update
 
 .. seealso::
 
    :doc:`machine`
+
+list_addons
+-----------
+
+.. weblate-admin:: list_addons
+
+Lists add-ons in reStructuredText as a template for :doc:`/admin/addons`.
+
+.. seealso::
+
+   :doc:`/contributing/documentation`
+
+list_permissions
+----------------
+
+.. weblate-admin:: list_permissions
+
+Lists permissions in reStructuredText as a template for :doc:`/admin/access`.
+
+.. seealso::
+
+   :doc:`/contributing/documentation`
+
+list_checks
+-----------
+
+.. weblate-admin:: list_checks
+
+Lists quality checks in reStructuredText as a template for :doc:`/admin/checks` and :doc:`/user/checks`.
+
+.. seealso::
+
+   :doc:`/contributing/documentation`
+
 
 list_languages
 --------------
@@ -629,6 +676,17 @@ Lists supported languages in MediaWiki markup - language codes, English names
 and localized names.
 
 This is used to generate <https://wiki.l10n.cz/Slovn%C3%ADk_s_n%C3%A1zvy_jazyk%C5%AF>.
+
+list_machinery
+--------------
+
+.. weblate-admin:: list_machinery
+
+Lists automatic suggestions services in reStructuredText as a template for :doc:`/admin/machine`.
+
+.. seealso::
+
+   :doc:`/contributing/documentation`
 
 list_translators
 ----------------
@@ -728,7 +786,7 @@ move_language
 
 Allows you to merge language content. This is useful when updating to a new
 version which contains aliases for previously unknown languages that have been
-created with the `(generated)` suffix. It moves all content from the `source`
+created with the :samp:`(generated)` suffix. It moves all content from the `source`
 language to the `target` one.
 
 Example:
@@ -739,7 +797,7 @@ Example:
 
 After moving the content, you should check whether there is anything left (this is
 subject to race conditions when somebody updates the repository meanwhile) and
-remove the `(generated)` language.
+remove the :samp:`(generated)` language.
 
 pushgit
 -------

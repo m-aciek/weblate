@@ -8,7 +8,11 @@ from logging.handlers import SysLogHandler
 from django.core.exceptions import PermissionDenied
 from django.http import Http404
 
-from weblate.api.spectacular import get_spectacular_settings
+from weblate.api.spectacular import (
+    get_drf_settings,
+    get_drf_standardized_errors_sertings,
+    get_spectacular_settings,
+)
 from weblate.utils.environment import (
     get_env_bool,
     get_env_credentials,
@@ -101,6 +105,7 @@ LANGUAGE_CODE = "en-us"
 LANGUAGES = (
     ("ar", "العربية"),
     ("az", "Azərbaycan"),
+    ("ba", "башҡорт теле"),
     ("be", "Беларуская"),
     ("be-latn", "Biełaruskaja"),
     ("bg", "Български"),
@@ -169,7 +174,7 @@ MEDIA_ROOT = os.path.join(DATA_DIR, "media")
 
 # URL that handles the media served from MEDIA_ROOT. Make sure to use a
 # trailing slash.
-MEDIA_URL = f"{URL_PREFIX}/media/"
+MEDIA_URL = get_env_str("WEBLATE_MEDIA_URL", f"{URL_PREFIX}/media/")
 
 # Absolute path to the directory static files should be collected to.
 # Don't put anything in this directory yourself; store your static files
@@ -177,7 +182,7 @@ MEDIA_URL = f"{URL_PREFIX}/media/"
 STATIC_ROOT = os.path.join(CACHE_DIR, "static")
 
 # URL prefix for static files.
-STATIC_URL = f"{URL_PREFIX}/static/"
+STATIC_URL = get_env_str("WEBLATE_STATIC_URL", f"{URL_PREFIX}/static/")
 
 # Additional locations of static files
 STATICFILES_DIRS = (
@@ -326,15 +331,6 @@ if SOCIAL_AUTH_GITHUB_ENTERPRISE_KEY:
         "social_core.backends.github_enterprise.GithubEnterpriseOAuth2",
     )
 
-
-SOCIAL_AUTH_BITBUCKET_KEY = get_env_str("WEBLATE_SOCIAL_AUTH_BITBUCKET_KEY")
-if SOCIAL_AUTH_BITBUCKET_KEY:
-    SOCIAL_AUTH_BITBUCKET_SECRET = get_env_str(
-        "WEBLATE_SOCIAL_AUTH_BITBUCKET_SECRET", required=True
-    )
-    SOCIAL_AUTH_BITBUCKET_VERIFIED_EMAILS_ONLY = True
-    AUTHENTICATION_BACKENDS += ("social_core.backends.bitbucket.BitbucketOAuth",)
-
 SOCIAL_AUTH_BITBUCKET_OAUTH2_KEY = get_env_str(
     "WEBLATE_SOCIAL_AUTH_BITBUCKET_OAUTH2_KEY"
 )
@@ -383,7 +379,6 @@ if SOCIAL_AUTH_GITLAB_KEY:
     SOCIAL_AUTH_GITLAB_SECRET = get_env_str(
         "WEBLATE_SOCIAL_AUTH_GITLAB_SECRET", required=True
     )
-    SOCIAL_AUTH_GITLAB_SCOPE = ["read_user"]
     if "WEBLATE_SOCIAL_AUTH_GITLAB_API_URL" in os.environ:
         SOCIAL_AUTH_GITLAB_API_URL = get_env_str("WEBLATE_SOCIAL_AUTH_GITLAB_API_URL")
     AUTHENTICATION_BACKENDS += ("social_core.backends.gitlab.GitLabOAuth2",)
@@ -632,6 +627,9 @@ SOCIAL_AUTH_PROTECTED_USER_FIELDS = ("email",)
 SOCIAL_AUTH_SLUGIFY_USERNAMES = True
 SOCIAL_AUTH_SLUGIFY_FUNCTION = "weblate.accounts.pipeline.slugify_username"
 
+# Value higher than 0 enables validation using zxcvbn
+PASSWORD_MINIMAL_STRENGTH = get_env_int("WEBLATE_MIN_PASSWORD_SCORE", 3)
+
 # Password validation configuration
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -641,22 +639,24 @@ AUTH_PASSWORD_VALIDATORS = [
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
         "OPTIONS": {"min_length": 10},
     },
-    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
-    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
-    {"NAME": "weblate.accounts.password_validation.CharsPasswordValidator"},
+    {"NAME": "weblate.accounts.password_validation.MaximalLengthValidator"},
     {"NAME": "weblate.accounts.password_validation.PastPasswordsValidator"},
 ]
+
 # Optional password strength validation by django-zxcvbn-password
-MIN_PASSWORD_SCORE = get_env_int("WEBLATE_MIN_PASSWORD_SCORE", 3)
-if MIN_PASSWORD_SCORE:
+if PASSWORD_MINIMAL_STRENGTH > 0:
     AUTH_PASSWORD_VALIDATORS.append(
-        {
-            "NAME": "zxcvbn_password.ZXCVBNValidator",
-            "OPTIONS": {
-                "min_score": MIN_PASSWORD_SCORE,
-                "user_attributes": ("username", "email", "full_name"),
+        {"NAME": "django_zxcvbn_password_validator.ZxcvbnPasswordValidator"}
+    )
+else:
+    AUTH_PASSWORD_VALIDATORS.extend(
+        [
+            {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+            {
+                "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"
             },
-        }
+            {"NAME": "weblate.accounts.password_validation.CharsPasswordValidator"},
+        ]
     )
 
 # Password hashing (prefer Argon)
@@ -677,6 +677,7 @@ CSP_FORM_SRC = get_env_list("WEBLATE_CSP_FORM_SRC")
 
 # Allow new user registrations
 REGISTRATION_OPEN = get_env_bool("WEBLATE_REGISTRATION_OPEN", True)
+REGISTRATION_CAPTCHA = get_env_bool("WEBLATE_REGISTRATION_CAPTCHA", True)
 REGISTRATION_REBIND = get_env_bool("WEBLATE_REGISTRATION_REBIND", False)
 REGISTRATION_ALLOW_BACKENDS = get_env_list("WEBLATE_REGISTRATION_ALLOW_BACKENDS")
 
@@ -783,7 +784,12 @@ INSTALLED_APPS = [
     "django_otp_webauthn",
     "drf_spectacular",
     "drf_spectacular_sidecar",
+    "drf_standardized_errors",
 ]
+
+# django_zxcvbn_password_validator integration
+if PASSWORD_MINIMAL_STRENGTH > 0:
+    INSTALLED_APPS.append("django_zxcvbn_password_validator")
 
 # Legal integration
 LEGAL_INTEGRATION = get_env_str("WEBLATE_LEGAL_INTEGRATION")
@@ -982,11 +988,12 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 50000000
 # Allow more fields for case with a lot of subscriptions in profile
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 2000
 
-# Apply session coookie settings to language cookie as ewll
+# Apply session coookie settings to language cookie as well with exception
+# of SameSite as we want language to be honored in CSRF error messages.
 LANGUAGE_COOKIE_SECURE = SESSION_COOKIE_SECURE
 LANGUAGE_COOKIE_HTTPONLY = SESSION_COOKIE_HTTPONLY
 LANGUAGE_COOKIE_AGE = SESSION_COOKIE_AGE_AUTHENTICATED * 10
-LANGUAGE_COOKIE_SAMESITE = SESSION_COOKIE_SAMESITE
+LANGUAGE_COOKIE_SAMESITE = "None"
 
 # Some security headers
 SECURE_BROWSER_XSS_FILTER = True
@@ -1082,6 +1089,7 @@ CHECK_LIST = [
     "weblate.checks.chars.MaxLengthCheck",
     "weblate.checks.chars.KashidaCheck",
     "weblate.checks.chars.PunctuationSpacingCheck",
+    "weblate.checks.chars.KabyleCharactersCheck",
     "weblate.checks.format.PythonFormatCheck",
     "weblate.checks.format.PythonBraceFormatCheck",
     "weblate.checks.format.PHPFormatCheck",
@@ -1099,6 +1107,7 @@ CHECK_LIST = [
     "weblate.checks.format.VueFormattingCheck",
     "weblate.checks.format.I18NextInterpolationCheck",
     "weblate.checks.format.ESTemplateLiteralsCheck",
+    "weblate.checks.format.AutomatticComponentsCheck",
     "weblate.checks.angularjs.AngularJSInterpolationCheck",
     "weblate.checks.icu.ICUMessageFormatCheck",
     "weblate.checks.icu.ICUSourceCheck",
@@ -1122,6 +1131,8 @@ CHECK_LIST = [
     "weblate.checks.markup.MarkdownSyntaxCheck",
     "weblate.checks.markup.URLCheck",
     "weblate.checks.markup.SafeHTMLCheck",
+    "weblate.checks.markup.RSTReferencesCheck",
+    "weblate.checks.markup.RSTSyntaxCheck",
     "weblate.checks.placeholders.PlaceholderCheck",
     "weblate.checks.placeholders.RegexCheck",
     "weblate.checks.duplicate.DuplicateCheck",
@@ -1182,6 +1193,8 @@ WEBLATE_ADDONS = [
     "weblate.addons.resx.ResxUpdateAddon",
     "weblate.addons.yaml.YAMLCustomizeAddon",
     "weblate.addons.cdn.CDNJSAddon",
+    "weblate.addons.webhooks.WebhookAddon",
+    "weblate.addons.webhooks.SlackWebhookAddon",
 ]
 modify_env_list(WEBLATE_ADDONS, "ADDONS")
 
@@ -1270,35 +1283,12 @@ SESSION_ENGINE = os.environ.get(
 MESSAGE_STORAGE = "django.contrib.messages.storage.session.SessionStorage"
 
 # REST framework settings for API
-REST_FRAMEWORK = {
-    # Use Django's standard `django.contrib.auth` permissions,
-    # or allow read-only access for unauthenticated users.
-    "DEFAULT_PERMISSION_CLASSES": [
-        # Require authentication for login required sites
-        "rest_framework.permissions.IsAuthenticated"
-        if REQUIRE_LOGIN
-        else "rest_framework.permissions.IsAuthenticatedOrReadOnly"
-    ],
-    "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework.authentication.TokenAuthentication",
-        "weblate.api.authentication.BearerAuthentication",
-        "rest_framework.authentication.SessionAuthentication",
-    ),
-    "DEFAULT_THROTTLE_CLASSES": (
-        "weblate.api.throttling.UserRateThrottle",
-        "weblate.api.throttling.AnonRateThrottle",
-    ),
-    "DEFAULT_THROTTLE_RATES": {
-        "anon": get_env_ratelimit("WEBLATE_API_RATELIMIT_ANON", "100/day"),
-        "user": get_env_ratelimit("WEBLATE_API_RATELIMIT_USER", "5000/hour"),
-    },
-    "DEFAULT_PAGINATION_CLASS": "weblate.api.pagination.StandardPagination",
-    "PAGE_SIZE": 50,
-    "VIEW_DESCRIPTION_FUNCTION": "weblate.api.views.get_view_description",
-    "EXCEPTION_HANDLER": "weblate.api.views.weblate_exception_handler",
-    "UNAUTHENTICATED_USER": "weblate.auth.models.get_anonymous",
-    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-}
+REST_FRAMEWORK = get_drf_settings(
+    require_login=REQUIRE_LOGIN,
+    anon_throttle=get_env_ratelimit("WEBLATE_API_RATELIMIT_ANON", "100/day"),
+    user_throttle=get_env_ratelimit("WEBLATE_API_RATELIMIT_USER", "5000/hour"),
+)
+DRF_STANDARDIZED_ERRORS = get_drf_standardized_errors_sertings()
 SPECTACULAR_SETTINGS = get_spectacular_settings(INSTALLED_APPS, SITE_URL, SITE_TITLE)
 
 # Fonts CDN URL
@@ -1330,6 +1320,7 @@ LOGIN_REQUIRED_URLS_EXCEPTIONS = get_env_list(
         rf"{URL_PREFIX}/contact/$",  # Optional for contact form
         rf"{URL_PREFIX}/legal/(.*)$",  # Optional for legal app
         rf"{URL_PREFIX}/avatar/(.*)$",  # Optional for avatars
+        rf"{URL_PREFIX}/site.webmanifest$",  # The request for the manifest is made without credentials
     ],
 )
 modify_env_list(LOGIN_REQUIRED_URLS_EXCEPTIONS, "LOGIN_REQUIRED_URLS_EXCEPTIONS")
@@ -1399,12 +1390,13 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BROKER_CONNECTION_RETRY = True
 
 # Celery settings, it is not recommended to change these
-CELERY_WORKER_MAX_MEMORY_PER_CHILD = 200000
+CELERY_WORKER_MAX_MEMORY_PER_CHILD = 450000 if DEBUG else 250000
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_TASK_ROUTES = {
     "weblate.trans.tasks.auto_translate*": {"queue": "translate"},
     "weblate.accounts.tasks.notify_*": {"queue": "notify"},
     "weblate.accounts.tasks.send_mails": {"queue": "notify"},
+    "weblate.addons.tasks.addon_change": {"queue": "notify"},
     "weblate.utils.tasks.settings_backup": {"queue": "backup"},
     "weblate.utils.tasks.database_backup": {"queue": "backup"},
     "weblate.wladmin.tasks.backup": {"queue": "backup"},
@@ -1505,9 +1497,8 @@ AKISMET_API_KEY = get_env_str("WEBLATE_AKISMET_API_KEY")
 ZAMMAD_URL = get_env_str("WEBLATE_ZAMMAD_URL")
 
 # Web Monetization
-INTERLEDGER_PAYMENT_POINTERS = get_env_list(
-    "WEBLATE_INTERLEDGER_PAYMENT_POINTERS", ["$ilp.uphold.com/ENU7fREdeZi9"]
-)
+INTERLEDGER_PAYMENT_POINTERS = get_env_list("WEBLATE_INTERLEDGER_PAYMENT_POINTERS", [])
+INTERLEDGER_PAYMENT_BUILTIN = get_env_bool("WEBLATE_INTERLEDGER_PAYMENT_BUILTIN", True)
 
 ADDITIONAL_CONFIG = "/app/data/settings-override.py"
 if os.path.exists(ADDITIONAL_CONFIG):

@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import random
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 from django.test import SimpleTestCase
 from translate.lang.data import languages
 
 from weblate.checks.flags import Flags
+from weblate.checks.format import BaseFormatCheck
 from weblate.lang.models import Language, Plural
 
 if TYPE_CHECKING:
@@ -81,6 +83,7 @@ class MockTranslation:
         self.is_template = False
         self.is_source = False
         self.plural = self.language.plural
+        self.id = 1
 
     @staticmethod
     def log_debug(text, *args):
@@ -144,10 +147,9 @@ class MockUnit:
         return self.source
 
 
-class CheckTestCase(SimpleTestCase):
+class CheckTestCase(SimpleTestCase, ABC):
     """Generic test, also serves for testing base class."""
 
-    check: BaseCheck | None = None
     default_lang = "cs"
 
     def setUp(self) -> None:
@@ -166,12 +168,21 @@ class CheckTestCase(SimpleTestCase):
         )
         self.test_highlight: tuple[str, str, list[tuple[int, int, str]]] | None = None
 
-    def do_test(self, expected, data, lang=None) -> None:
+    @property
+    @abstractmethod
+    def check(self) -> BaseCheck:
+        raise NotImplementedError
+
+    def do_test(
+        self, expected: bool, data: tuple[str, str, str] | None, lang: str | None = None
+    ):
         """Perform single check if we have data to test."""
+        if data is None:
+            self.skipTest("Not supported")
+        if isinstance(self.check, BaseFormatCheck):
+            self.skipTest("Not supported")
         if lang is None:
             lang = self.default_lang
-        if not data or self.check is None:
-            return
         params = '"{}"/"{}" ({})'.format(*data)
 
         unit = MockUnit(None, data[2], lang, source=data[0])
@@ -182,7 +193,7 @@ class CheckTestCase(SimpleTestCase):
             self.assertFalse(should_skip, msg=f"Check should not skip for {params}")
         elif should_skip:
             # There is nothing to test here
-            return
+            return None
 
         # Verify check logic
         result = self.check.check_single(
@@ -192,6 +203,7 @@ class CheckTestCase(SimpleTestCase):
             self.assertTrue(result, msg=f"Check did not fire for {params}")
         else:
             self.assertFalse(result, msg=f"Check did fire for {params}")
+        return result
 
     def test_single_good_matching(self) -> None:
         self.do_test(False, self.test_good_matching)
@@ -215,8 +227,8 @@ class CheckTestCase(SimpleTestCase):
         self.do_test(True, self.test_failure_3)
 
     def test_check_good_flag(self) -> None:
-        if self.check is None or self.test_good_flag is None:
-            return
+        if self.test_good_flag is None:
+            self.skipTest("Not supported")
         self.assertFalse(
             self.check.check_target(
                 [self.test_good_flag[0]],
@@ -231,8 +243,6 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_good_matching_singular(self) -> None:
-        if self.check is None:
-            return
         self.assertFalse(
             self.check.check_target(
                 [self.test_good_matching[0]],
@@ -247,8 +257,6 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_good_none_singular(self) -> None:
-        if self.check is None:
-            return
         self.assertFalse(
             self.check.check_target(
                 [self.test_good_none[0]],
@@ -263,8 +271,8 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_good_ignore_singular(self) -> None:
-        if self.check is None or self.test_good_ignore is None:
-            return
+        if self.test_good_ignore is None:
+            self.skipTest("Not supported")
         self.assertFalse(
             self.check.check_target(
                 [self.test_good_ignore[0]],
@@ -279,8 +287,6 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_good_matching_plural(self) -> None:
-        if self.check is None:
-            return
         self.assertFalse(
             self.check.check_target(
                 [self.test_good_matching[0]] * 2,
@@ -295,8 +301,8 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_failure_1_singular(self) -> None:
-        if self.test_failure_1 is None or self.check is None:
-            return
+        if self.test_failure_1 is None:
+            self.skipTest("Not supported")
         self.assertTrue(
             self.check.check_target(
                 [self.test_failure_1[0]],
@@ -311,8 +317,8 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_failure_1_plural(self) -> None:
-        if self.test_failure_1 is None or self.check is None:
-            return
+        if self.test_failure_1 is None:
+            self.skipTest("Not supported")
         self.assertTrue(
             self.check.check_target(
                 [self.test_failure_1[0]] * 2,
@@ -327,8 +333,8 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_failure_2_singular(self) -> None:
-        if self.test_failure_2 is None or self.check is None:
-            return
+        if self.test_failure_2 is None:
+            self.skipTest("Not supported")
         self.assertTrue(
             self.check.check_target(
                 [self.test_failure_2[0]],
@@ -343,8 +349,8 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_failure_3_singular(self) -> None:
-        if self.test_failure_3 is None or self.check is None:
-            return
+        if self.test_failure_3 is None:
+            self.skipTest("Not supported")
         self.assertTrue(
             self.check.check_target(
                 [self.test_failure_3[0]],
@@ -359,8 +365,6 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_ignore_check(self) -> None:
-        if self.check is None:
-            return
         self.assertFalse(
             self.check.check_target(
                 [self.test_ignore_check[0]] * 2,
@@ -375,8 +379,8 @@ class CheckTestCase(SimpleTestCase):
         )
 
     def test_check_highlight(self) -> None:
-        if self.check is None or self.test_highlight is None:
-            return
+        if self.test_highlight is None:
+            self.skipTest("Not supported")
         unit = MockUnit(
             None,
             self.test_highlight[0],

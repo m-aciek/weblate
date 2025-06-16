@@ -23,12 +23,31 @@ Weblate Documentation
      Weblate.
 
 Welcome to the official documentation of `Weblate <https://weblate.org>`_, the
-libre software web-based continuous localization system. If you are new to this
-documentation, we recommend that you read the :doc:`user/basic` to get an
-overview of what Weblate does.
+libre software web-based continuous localization system.
 
 The table of contents in the sidebar should let you easily access the documentation
 for your topic of interest. You can also use the search function in the top-left corner.
+
+First time here?
+-----------------
+Read the :doc:`user/basic` to get an overview of what Weblate does.
+
+Joining a translation project
+------------------------------
+If you would like to contribute to a project as a translator, read about :doc:`user/translating`.
+
+Starting a translation project
+-------------------------------
+For starting your own project on our cloud service Hosted Weblate, refer to :doc:`admin/projects`.
+For self-hosting your own Weblate clone, read our :doc:`admin/install`.
+
+FAQ
+----
+Check our :doc:`faq`.
+
+Community
+----------
+Learn more about :ref:`contributing`.
 
 .. toctree::
     :caption: User docs
@@ -44,11 +63,29 @@ for your topic of interest. You can also use the search function in the top-left
     user/search
     workflows
     faq
-    formats
     vcs
     api
     wlc
     python
+
+.. toctree::
+    :caption: Application developer guide
+    :maxdepth: 1
+    :hidden:
+
+    devel/starting
+    devel/integration
+    devel/gettext
+    devel/mobile
+    devel/sphinx
+    devel/html
+    devel/third-party
+    devel/alerts
+    devel/community
+    devel/translations
+    devel/review
+    devel/share
+    devel/reporting
 
 
 .. toctree::
@@ -83,24 +120,6 @@ for your topic of interest. You can also use the search function in the top-left
     legal
 
 .. toctree::
-    :caption: Application developer guide
-    :maxdepth: 1
-    :hidden:
-
-    devel/starting
-    devel/integration
-    devel/gettext
-    devel/sphinx
-    devel/html
-    devel/thirdparty
-    devel/alerts
-    devel/community
-    devel/translations
-    devel/review
-    devel/share
-    devel/reporting
-
-.. toctree::
     :caption: Contributor docs
     :maxdepth: 1
     :hidden:
@@ -110,6 +129,7 @@ for your topic of interest. You can also use the search function in the top-left
     contributing/start
     contributing/code
     contributing/debugging
+    contributing/documentation
     contributing/internals
     contributing/addons
     contributing/frontend
@@ -117,11 +137,33 @@ for your topic of interest. You can also use the search function in the top-left
     contributing/tests
     contributing/schemas
     contributing/release
-    contributing/security
     contributing/modules
     contributing/about
     contributing/license
     contributing/trademark
+
+.. toctree::
+   :caption: Secure Weblate
+   :maxdepth: 1
+   :hidden:
+
+   security/index
+   security/dependencies
+   security/issues
+   security/incident-response-plan
+   security/passwords
+   security/disaster-recovery-plan
+   security/threat-model
+   security/privacy-compliance
+
+.. toctree::
+   :caption: File formats
+   :maxdepth: 1
+   :glob:
+   :hidden:
+
+   formats
+   formats/*
 
 .. toctree::
     :caption: Change history

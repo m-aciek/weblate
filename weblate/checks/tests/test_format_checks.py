@@ -9,6 +9,7 @@ from __future__ import annotations
 from django.test import SimpleTestCase
 
 from weblate.checks.format import (
+    AutomatticComponentsCheck,
     BaseFormatCheck,
     CFormatCheck,
     CSharpFormatCheck,
@@ -33,7 +34,7 @@ from weblate.checks.qt import QtFormatCheck, QtPluralCheck
 from weblate.checks.ruby import RubyFormatCheck
 from weblate.checks.tests.test_checks import CheckTestCase, MockUnit
 from weblate.lang.models import Language
-from weblate.trans.models import Component, Translation, Unit
+from weblate.trans.models import Component, Project, Translation, Unit
 from weblate.trans.tests.test_views import FixtureTestCase
 from weblate.trans.util import join_plural
 
@@ -160,7 +161,8 @@ class PythonFormatCheckTest(CheckTestCase):
             translation=Translation(
                 component=Component(
                     file_format="po",
-                    source_language=Language("en"),
+                    source_language=Language(code="en"),
+                    project=Project(),
                 )
             ),
         )
@@ -184,7 +186,8 @@ class PythonFormatCheckTest(CheckTestCase):
             translation=Translation(
                 component=Component(
                     file_format="po",
-                    source_language=Language("en"),
+                    source_language=Language(code="en"),
+                    project=Project(),
                 )
             ),
         )
@@ -527,7 +530,8 @@ class PerlBraceFormatCheckTest(CheckTestCase):
             translation=Translation(
                 component=Component(
                     file_format="po",
-                    source_language=Language("en"),
+                    source_language=Language(code="en"),
+                    project=Project(),
                 )
             ),
         )
@@ -633,6 +637,7 @@ class PythonBraceFormatCheckTest(CheckTestCase):
                 component=Component(
                     file_format="po",
                     source_language=Language("en"),
+                    project=Project(),
                 )
             ),
         )
@@ -655,6 +660,7 @@ class PythonBraceFormatCheckTest(CheckTestCase):
                 component=Component(
                     file_format="po",
                     source_language=Language("en"),
+                    project=Project(),
                 )
             ),
         )
@@ -678,6 +684,8 @@ class CSharpFormatCheckTest(CheckTestCase):
             "{0}string{1}",
             [(0, 3, "{0}"), (9, 12, "{1}")],
         )
+        self.test_failure_1 = ("{0} string", "0 string", "c-sharp-format")
+        self.test_failure_2 = ("{0} string", "0 string", "csharp-format")
 
     def test_no_format(self) -> None:
         self.assertFalse(self.check.check_format("strins", "string", False, None))
@@ -935,6 +943,7 @@ class JavaMessageFormatCheckTest(CheckTestCase):
                 component=Component(
                     file_format="po",
                     source_language=Language("en"),
+                    project=Project(),
                 ),
                 language=Language("cs"),
             ),
@@ -1174,6 +1183,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="po",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         # Singular, correct format string
@@ -1205,6 +1215,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="po",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         self.assertTrue(
@@ -1229,6 +1240,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="po",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         self.assertFalse(
@@ -1244,6 +1256,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="aresource",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         self.assertTrue(
@@ -1262,6 +1275,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="po",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         self.assertFalse(
@@ -1294,6 +1308,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="po",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         self.assertFalse(
@@ -1326,6 +1341,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="po",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         self.assertTrue(
@@ -1344,6 +1360,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="po",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         self.assertFalse(
@@ -1362,6 +1379,7 @@ class PluralTest(FixtureTestCase):
             component=Component(
                 file_format="po",
                 source_language=Language("en"),
+                project=Project(),
             ),
         )
         self.assertFalse(
@@ -1486,6 +1504,7 @@ class ESTemplateLiteralsCheckTest(CheckTestCase):
                 component=Component(
                     file_format="po",
                     source_language=Language("en"),
+                    project=Project(),
                 )
             ),
         )
@@ -1600,6 +1619,55 @@ class VueFormattingCheckTest(CheckTestCase):
         )
         self.assertTrue(
             self.check.check_format("{foo} string", "{bar} string", False, None)
+        )
+
+
+class AutomatticComponentsCheckTest(CheckTestCase):
+    check = AutomatticComponentsCheck()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.test_highlight = (
+            "automattic-components-format",
+            "{{ strong }} hello, world {{/strong}}, {{ languages /}}",
+            [
+                (0, 12, "{{ strong }}"),
+                (26, 37, "{{/strong}}"),
+                (39, 55, "{{ languages /}}"),
+            ],
+        )
+
+    def test_no_format(self) -> None:
+        self.assertFalse(self.check.check_format("strins", "string", False, None))
+
+    def test_format(self) -> None:
+        self.assertFalse(
+            self.check.check_format(
+                "{{foo}} string {{/foo}}", "{{foo}} string {{/foo}}", False, None
+            )
+        )
+        self.assertFalse(
+            self.check.check_format("{{foo/}} string", "{{foo/}} string", False, None)
+        )
+
+    def test_missing_format(self) -> None:
+        self.assertTrue(
+            self.check.check_format("{{foo}} string", "string", False, None)
+        )
+        self.assertTrue(
+            self.check.check_format(
+                "{{foo}} string {{/foo}}", "{{foo}} string", False, None
+            )
+        )
+
+    def test_wrong_format(self) -> None:
+        self.assertTrue(
+            self.check.check_format(
+                "{{foo}} string {{/foo}}", "{{foo}} string {{/bar}}", False, None
+            )
+        )
+        self.assertTrue(
+            self.check.check_format("{{foo/}} string", "{{baz/}} string", False, None)
         )
 
 

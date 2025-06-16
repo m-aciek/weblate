@@ -13,6 +13,7 @@ from django.utils.translation import gettext_lazy
 from weblate.checks.base import CountingCheck, TargetCheck, TargetCheckParametrized
 from weblate.checks.markup import strip_entities
 from weblate.checks.parser import single_value_flag
+from weblate.checks.same import strip_format
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -45,7 +46,7 @@ class BeginNewlineCheck(TargetCheck):
     check_id = "begin_newline"
     name = gettext_lazy("Starting newline")
     description = gettext_lazy(
-        "Source and translation do not both start with a newline"
+        "Source and translation do not both start with a newline."
     )
 
     def check_single(self, source: str, target: str, unit: Unit):
@@ -57,7 +58,7 @@ class EndNewlineCheck(TargetCheck):
 
     check_id = "end_newline"
     name = gettext_lazy("Trailing newline")
-    description = gettext_lazy("Source and translation do not both end with a newline")
+    description = gettext_lazy("Source and translation do not both end with a newline.")
 
     def check_single(self, source: str, target: str, unit: Unit):
         return self.check_chars(source, target, -1, {"\n"})
@@ -69,7 +70,7 @@ class BeginSpaceCheck(TargetCheck):
     check_id = "begin_space"
     name = gettext_lazy("Starting spaces")
     description = gettext_lazy(
-        "Source and translation do not both start with same number of spaces"
+        "Source and translation do not both start with same number of spaces."
     )
 
     def check_single(self, source: str, target: str, unit: Unit):
@@ -99,12 +100,47 @@ class BeginSpaceCheck(TargetCheck):
         return [("^ *", replacement, "u")]
 
 
+class KabyleCharactersCheck(TargetCheck):
+    """Flag and suggest standard Kabyle characters instead of visually similar but incorrect ones."""
+
+    check_id = "kabyle-characters"
+    name = gettext_lazy("Non‑standard characters in Kabyle")
+    description = gettext_lazy(
+        "Use standardized Latin Kabyle characters (e.g. ɣ instead of Greek γ; ɛ instead of ε)."
+    )
+
+    confusable_to_standard = {
+        "\u03b3": "\u0263",
+        "\u0393": "\u0194",
+        "\u03b5": "\u025b",
+        "\u0395": "\u0190",
+        "\u011f": "\u01e7",
+        "\u011e": "\u01e6",
+    }
+
+    def should_skip(self, unit: Unit) -> bool:
+        # Only run on Kabyle (covers 'kab' plus any variants)
+        if not unit.translation.language.is_base({"kab"}):
+            return True
+        return super().should_skip(unit)
+
+    def check_single(self, source: str, target: str, unit: Unit) -> bool:
+        # by now we know it's Kabyle, so just look for confusables
+        return any(char in target for char in self.confusable_to_standard)
+
+    def get_fixup(self, unit: Unit) -> Iterable[tuple[str, str, str]]:
+        return [
+            (re.escape(confusable), standard, "gu")
+            for confusable, standard in self.confusable_to_standard.items()
+        ]
+
+
 class EndSpaceCheck(TargetCheck):
     """Whitespace check."""
 
     check_id = "end_space"
     name = gettext_lazy("Trailing space")
-    description = gettext_lazy("Source and translation do not both end with a space")
+    description = gettext_lazy("Source and translation do not both end with a space.")
 
     def check_single(self, source: str, target: str, unit: Unit):
         # One letter things are usually decimal/thousand separators
@@ -140,7 +176,7 @@ class DoubleSpaceCheck(TargetCheck):
 
     check_id = "double_space"
     name = gettext_lazy("Double space")
-    description = gettext_lazy("Translation contains double space")
+    description = gettext_lazy("Translation contains double space.")
 
     def check_single(self, source: str, target: str, unit: Unit):
         # One letter things are usually decimal/thousand separators
@@ -163,7 +199,7 @@ class EndStopCheck(TargetCheck):
     check_id = "end_stop"
     name = gettext_lazy("Mismatched full stop")
     description = gettext_lazy(
-        "Source and translation do not both end with a full stop"
+        "Source and translation do not both end with a full stop."
     )
 
     def _check_my(self, source: str, target: str):
@@ -172,38 +208,41 @@ class EndStopCheck(TargetCheck):
             return False
         return self.check_chars(source, target, -1, {".", "။"})
 
+    def should_skip(self, unit: Unit) -> bool:
+        # Thai and Lojban does not have a full stop
+        if unit.translation.language.is_base({"th", "jbo"}):
+            return True
+        return super().should_skip(unit)
+
     def check_single(self, source: str, target: str, unit: Unit):
         if len(source) <= 4:
             # Might need to use shortcut in translation
             return False
         if not target:
             return False
-        # Thai and Lojban does not have a full stop
-        if unit.translation.language.is_base(("th", "jbo")):
-            return False
         # Allow ... to be translated into ellipsis
         if source.endswith("...") and target[-1] == "…":
             return False
-        if unit.translation.language.is_base(("ja",)) and source[-1] in {":", ";"}:
+        if unit.translation.language.is_cjk() and source[-1] in {":", ";"}:
             # Japanese sentence might need to end with full stop
             # in case it's used before list.
             return self.check_chars(source, target, -1, {";", ":", "：", ".", "。"})
-        if unit.translation.language.is_base(("hy",)):
+        if unit.translation.language.is_base({"hy"}):
             return self.check_chars(
                 source,
                 target,
                 -1,
                 {".", "。", "।", "۔", "։", "·", "෴", "។", ":", "՝", "?", "!", "`"},
             )
-        if unit.translation.language.is_base(("hi", "bn", "or")):
+        if unit.translation.language.is_base({"hi", "bn", "or"}):
             # Using | instead of । is not typographically correct, but
             # seems to be quite usual. \u0964 is correct, but \u09F7
             # is also sometimes used instead in some popular editors.
             return self.check_chars(source, target, -1, {".", "\u0964", "\u09f7", "|"})
-        if unit.translation.language.is_base(("sat",)):
+        if unit.translation.language.is_base({"sat"}):
             # Santali uses "᱾" as full stop
             return self.check_chars(source, target, -1, {".", "᱾"})
-        if unit.translation.language.is_base(("my",)):
+        if unit.translation.language.is_base({"my"}):
             return self._check_my(source, target)
         return self.check_chars(
             source, target, -1, {".", "。", "।", "۔", "։", "·", "෴", "។", "።"}
@@ -215,7 +254,13 @@ class EndColonCheck(TargetCheck):
 
     check_id = "end_colon"
     name = gettext_lazy("Mismatched colon")
-    description = gettext_lazy("Source and translation do not both end with a colon")
+    description = gettext_lazy("Source and translation do not both end with a colon.")
+
+    def should_skip(self, unit: Unit) -> bool:
+        # Thai and Lojban does not have a colon
+        if unit.translation.language.is_base({"th", "jbo"}):
+            return True
+        return super().should_skip(unit)
 
     def _check_hy(self, source: str, target: str):
         if source[-1] == ":":
@@ -232,11 +277,9 @@ class EndColonCheck(TargetCheck):
     def check_single(self, source: str, target: str, unit: Unit):
         if not source or not target:
             return False
-        if unit.translation.language.is_base(("jbo",)):
-            return False
-        if unit.translation.language.is_base(("hy",)):
+        if unit.translation.language.is_base({"hy"}):
             return self._check_hy(source, target)
-        if unit.translation.language.is_base(("ja",)):
+        if unit.translation.language.is_cjk():
             return self._check_ja(source, target)
         return self.check_chars(source, target, -1, {":", "：", "៖"})
 
@@ -247,9 +290,15 @@ class EndQuestionCheck(TargetCheck):
     check_id = "end_question"
     name = gettext_lazy("Mismatched question mark")
     description = gettext_lazy(
-        "Source and translation do not both end with a question mark"
+        "Source and translation do not both end with a question mark."
     )
     question_el = ("?", ";", ";")
+
+    def should_skip(self, unit: Unit) -> bool:
+        # Thai and Lojban does not have a question mark
+        if unit.translation.language.is_base({"th", "jbo"}):
+            return True
+        return super().should_skip(unit)
 
     def _check_hy(self, source: str, target: str):
         if source[-1] == "?":
@@ -269,13 +318,11 @@ class EndQuestionCheck(TargetCheck):
             return False
         if source.endswith(INTERROBANGS) or target.endswith(INTERROBANGS):
             return False
-        if unit.translation.language.is_base(("jbo",)):
-            return False
-        if unit.translation.language.is_base(("hy",)):
+        if unit.translation.language.is_base({"hy"}):
             return self._check_hy(source, target)
-        if unit.translation.language.is_base(("el",)):
+        if unit.translation.language.is_base({"el"}):
             return self._check_el(source, target)
-        if unit.translation.language.is_base(("my",)):
+        if unit.translation.language.is_base({"my"}):
             return self._check_my(source, target)
 
         return self.check_chars(
@@ -289,8 +336,14 @@ class EndExclamationCheck(TargetCheck):
     check_id = "end_exclamation"
     name = gettext_lazy("Mismatched exclamation mark")
     description = gettext_lazy(
-        "Source and translation do not both end with an exclamation mark"
+        "Source and translation do not both end with an exclamation mark."
     )
+
+    def should_skip(self, unit: Unit) -> bool:
+        # Thai and Lojban and Armenian does not have an exclamation mark
+        if unit.translation.language.is_base({"hy", "th", "jbo"}):
+            return True
+        return super().should_skip(unit)
 
     def check_single(self, source: str, target: str, unit: Unit):
         if not source or not target:
@@ -298,15 +351,13 @@ class EndExclamationCheck(TargetCheck):
         if source.endswith(INTERROBANGS) or target.endswith(INTERROBANGS):
             return False
         if (
-            unit.translation.language.is_base(("eu",))
+            unit.translation.language.is_base({"eu"})
             and source[-1] == "!"
             and "¡" in target
             and "!" in target
         ):
             return False
-        if unit.translation.language.is_base(("hy", "jbo")):
-            return False
-        if unit.translation.language.is_base(("my",)):
+        if unit.translation.language.is_base({"my"}):
             return self.check_chars(source, target, -1, {"!", "႟"})
         if source.endswith("Texy!") or target.endswith("Texy!"):
             return False
@@ -316,10 +367,10 @@ class EndExclamationCheck(TargetCheck):
 class EndInterrobangCheck(TargetCheck):
     """Check for final interrobang expression."""
 
-    check_id = "end_Interrobang"
+    check_id = "end_interrobang"
     name = gettext_lazy("Mismatched interrobang")
     description = gettext_lazy(
-        "Source and translation do not both end with an interrobang expression"
+        "Source and translation do not both end with an interrobang expression."
     )
 
     def check_single(self, source: str, target: str, unit: Unit):
@@ -335,13 +386,17 @@ class EndEllipsisCheck(TargetCheck):
     check_id = "end_ellipsis"
     name = gettext_lazy("Mismatched ellipsis")
     description = gettext_lazy(
-        "Source and translation do not both end with an ellipsis"
+        "Source and translation do not both end with an ellipsis."
     )
+
+    def should_skip(self, unit: Unit) -> bool:
+        # Thai and Lojban does not have a ellipsis
+        if unit.translation.language.is_base({"th", "jbo"}):
+            return True
+        return super().should_skip(unit)
 
     def check_single(self, source: str, target: str, unit: Unit):
         if not target:
-            return False
-        if unit.translation.language.is_base(("jbo",)):
             return False
         # Allow ... to be translated into ellipsis
         if source.endswith("...") and target[-1] == "…":
@@ -356,7 +411,7 @@ class EscapedNewlineCountingCheck(CountingCheck):
     check_id = "escaped_newline"
     name = gettext_lazy("Mismatched \\n")
     description = gettext_lazy(
-        "Number of \\n literals in translation does not match source"
+        "Number of \\n literals in translation does not match source."
     )
 
     ignore_re = re.compile(r"[A-Z]:\\\\[^\\ ]+(\\[^\\ ]+)+")
@@ -377,7 +432,7 @@ class NewLineCountCheck(CountingCheck):
     check_id = "newline-count"
     name = gettext_lazy("Mismatching line breaks")
     description = gettext_lazy(
-        "Number of new lines in translation does not match source"
+        "Number of new lines in translation does not match source."
     )
 
 
@@ -386,10 +441,10 @@ class ZeroWidthSpaceCheck(TargetCheck):
 
     check_id = "zero-width-space"
     name = gettext_lazy("Zero-width space")
-    description = gettext_lazy("Translation contains extra zero-width space character")
+    description = gettext_lazy("Translation contains extra zero-width space character.")
 
     def check_single(self, source: str, target: str, unit: Unit):
-        if unit.translation.language.is_base(("km",)):
+        if unit.translation.language.is_base({"km"}):
             return False
         if "\u200b" in source:
             return False
@@ -404,7 +459,7 @@ class MaxLengthCheck(TargetCheckParametrized):
 
     check_id = "max-length"
     name = gettext_lazy("Maximum length of translation")
-    description = gettext_lazy("Translation should not exceed given length")
+    description = gettext_lazy("Translation should not exceed given length.")
     default_disabled = True
 
     @property
@@ -424,11 +479,11 @@ class EndSemicolonCheck(TargetCheck):
     check_id = "end_semicolon"
     name = gettext_lazy("Mismatched semicolon")
     description = gettext_lazy(
-        "Source and translation do not both end with a semicolon"
+        "Source and translation do not both end with a semicolon."
     )
 
     def check_single(self, source: str, target: str, unit: Unit):
-        if unit.translation.language.is_base(("el",)) and source and source[-1] == "?":
+        if unit.translation.language.is_base({"el"}) and source and source[-1] == "?":
             # Complement to question mark check
             return False
         return self.check_chars(
@@ -439,7 +494,7 @@ class EndSemicolonCheck(TargetCheck):
 class KashidaCheck(TargetCheck):
     check_id = "kashida"
     name = gettext_lazy("Kashida letter used")
-    description = gettext_lazy("The decorative kashida letters should not be used")
+    description = gettext_lazy("The decorative kashida letters should not be used.")
 
     kashida_regex = (
         # Allow kashida after certain letters
@@ -460,16 +515,20 @@ class PunctuationSpacingCheck(TargetCheck):
     check_id = "punctuation_spacing"
     name = gettext_lazy("Punctuation spacing")
     description = gettext_lazy(
-        "Missing non breakable space before double punctuation sign"
+        "Missing non breakable space before double punctuation sign."
     )
 
-    def check_single(self, source: str, target: str, unit: Unit) -> bool:
+    def should_skip(self, unit: Unit) -> bool:
         if (
-            not unit.translation.language.is_base(("fr", "br"))
+            not unit.translation.language.is_base({"fr"})
             or unit.translation.language.code == "fr_CA"
         ):
-            return False
+            return True
+        return super().should_skip(unit)
 
+    def check_single(self, source: str, target: str, unit: Unit) -> bool:
+        # Remove possible markup
+        target = strip_format(target, unit.all_flags)
         # Remove XML/HTML entities to simplify parsing
         target = strip_entities(target)
 

@@ -4,13 +4,14 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import time
 import warnings
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 from django.conf import settings
 from django.core import mail
@@ -18,10 +19,15 @@ from django.test.utils import modify_settings, override_settings
 from django.urls import reverse
 from django.utils.functional import cached_property
 from selenium import webdriver
-from selenium.common.exceptions import ElementNotVisibleException, WebDriverException
+from selenium.common.exceptions import (
+    ElementNotVisibleException,
+    NoSuchElementException,
+    WebDriverException,
+)
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.remote_connection import RemoteConnection
 from selenium.webdriver.support.expected_conditions import (
     presence_of_element_located,
     staleness_of,
@@ -31,7 +37,8 @@ from selenium.webdriver.support.ui import Select, WebDriverWait
 from weblate.fonts.tests.utils import FONT
 from weblate.lang.models import Language
 from weblate.screenshots.views import ensure_tesseract_language
-from weblate.trans.models import Change, Component, Project, Unit
+from weblate.trans.actions import ActionEvents
+from weblate.trans.models import Change, Component, Project, Translation, Unit
 from weblate.trans.tests.test_models import BaseLiveServerTestCase
 from weblate.trans.tests.test_views import RegistrationTestMixin
 from weblate.trans.tests.utils import (
@@ -46,13 +53,18 @@ from weblate.vcs.ssh import get_key_data
 from weblate.wladmin.models import ConfigurationError, SupportStatus
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from selenium.webdriver.remote.webdriver import WebDriver
+    from selenium.webdriver.remote.webelement import WebElement
+
+    from weblate.auth.models import User
 
 TEST_BACKENDS = (
     "social_core.backends.email.EmailAuth",
     "social_core.backends.google.GoogleOAuth2",
     "social_core.backends.github.GithubOAuth2",
-    "social_core.backends.bitbucket.BitbucketOAuth",
+    "social_core.backends.bitbucket.BitbucketOAuth2",
     "social_core.backends.suse.OpenSUSEOpenId",
     "social_core.backends.ubuntu.UbuntuOpenId",
     "social_core.backends.fedora.FedoraOpenId",
@@ -81,10 +93,16 @@ class SeleniumTests(
     site_domain = ""
 
     @contextmanager
-    def wait_for_page_load(self, timeout=30):
+    def wait_for_page_load(self, timeout: int = 30) -> Iterator[None]:
         old_page = self.driver.find_element(By.TAG_NAME, "html")
         yield
-        WebDriverWait(self.driver, timeout).until(staleness_of(old_page))
+        try:
+            WebDriverWait(self.driver, timeout).until(staleness_of(old_page))
+        except WebDriverException:
+            # Retry the same condition to workaround issue in Chomedriver/Selenium, see
+            # https://github.com/SeleniumHQ/selenium/issues/15401
+            time.sleep(0.1)
+            WebDriverWait(self.driver, timeout).until(staleness_of(old_page))
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -133,12 +151,21 @@ class SeleniumTests(
             os.environ["LANG"] = backup_lang
 
         if cls._driver is not None:
+            # Increase webdriver timeout to avoid occasssional errors
+            # in macos CI
+            if isinstance(cls._driver.command_executor, RemoteConnection):
+                cls._driver.command_executor.set_timeout(240)
+
             cls._driver.implicitly_wait(5)
+
+        # Configure verbose logging to be shown in case of the test failure
+        logger = logging.getLogger("selenium")
+        logger.setLevel(logging.DEBUG)
 
         super().setUpClass()
 
     @cached_property
-    def actions(self):
+    def actions(self) -> webdriver.ActionChains:
         return webdriver.ActionChains(self.driver)
 
     @property
@@ -182,12 +209,16 @@ class SeleniumTests(
         with open(os.path.join(self.image_path, name), "wb") as handle:
             handle.write(self.driver.get_screenshot_as_png())
 
-    def click(self, element="", htmlid=None) -> None:
+    def click(self, element: WebElement | str = "", htmlid: str | None = None) -> None:
         """Click on element and scroll it into view."""
-        if htmlid:
-            element = self.driver.find_element(By.ID, htmlid)
-        if isinstance(element, str):
-            element = self.driver.find_element(By.LINK_TEXT, element)
+        try:
+            if htmlid:
+                element = self.driver.find_element(By.ID, htmlid)
+            if isinstance(element, str):
+                element = self.driver.find_element(By.LINK_TEXT, element)
+        except NoSuchElementException:
+            print(self.driver.page_source)  # noqa: T201
+            raise
 
         try:
             element.click()
@@ -195,19 +226,14 @@ class SeleniumTests(
             self.actions.move_to_element(element).perform()
             element.click()
 
-    def upload_file(self, element, filename) -> None:
+    def upload_file(self, element: WebElement, filename: str) -> None:
         filename = os.path.abspath(filename)
         if not os.path.exists(filename):
             msg = f"Test file not found: {filename}"
             raise ValueError(msg)
         element.send_keys(filename)
 
-    def clear_field(self, element):
-        element.send_keys(Keys.CONTROL + "a")
-        element.send_keys(Keys.DELETE)
-        return element
-
-    def do_login(self, create=True, superuser=False):
+    def do_login(self, *, create: bool = True, superuser: bool = False) -> User:
         # login page
         with self.wait_for_page_load():
             self.click(htmlid="login-button")
@@ -236,7 +262,11 @@ class SeleniumTests(
             self.click(self.driver.find_element(By.XPATH, '//input[@value="Sign in"]'))
         return user
 
-    def open_manage(self, login=True):
+    @overload
+    def open_manage(self, *, login: Literal[True] = True) -> User: ...
+    @overload
+    def open_manage(self, *, login: Literal[False]) -> None: ...
+    def open_manage(self, *, login=True):
         # Login as superuser
         user = self.do_login(superuser=True) if login else None
 
@@ -245,8 +275,12 @@ class SeleniumTests(
             self.click(htmlid="admin-button")
         return user
 
-    def open_admin(self, login=True):
-        user = self.open_manage(login)
+    @overload
+    def open_admin(self, *, login: Literal[True] = True) -> User: ...
+    @overload
+    def open_admin(self, *, login: Literal[False]) -> None: ...
+    def open_admin(self, *, login=True):
+        user = self.open_manage(login=login)
         with self.wait_for_page_load():
             self.click("Tools")
         with self.wait_for_page_load():
@@ -286,7 +320,7 @@ class SeleniumTests(
         # We should be back on home page
         self.driver.find_element(By.ID, "dashboard-return")
 
-    def register_user(self):
+    def register_user(self) -> str:
         # registration page
         with self.wait_for_page_load():
             self.click(htmlid="register-button")
@@ -376,7 +410,7 @@ class SeleniumTests(
             self.click("SSH keys")
         self.screenshot("ssh-keys.png")
 
-    def create_component(self):
+    def create_component(self) -> Project:
         project = Project.objects.create(name="WeblateOrg", slug="weblateorg")
         Component.objects.create(
             name="Language names",
@@ -398,20 +432,16 @@ class SeleniumTests(
         )
         return project
 
-    def create_glossary(self, project, language):
-        glossary = project.glossaries[0].translation_set.get(language=language)
-        glossary.add_unit(
-            None,
-            "",
-            "machine translation",
-            "strojový překlad",
+    def create_glossary(
+        self, user: User, project: Project, language: Language
+    ) -> Translation:
+        glossary: Translation = project.glossaries[0].translation_set.get(
+            language=language
         )
         glossary.add_unit(
-            None,
-            "",
-            "project",
-            "projekt",
+            None, "", "machine translation", "strojový překlad", author=user
         )
+        glossary.add_unit(None, "", "project", "projekt", author=user)
         return glossary
 
     def view_site(self) -> None:
@@ -423,7 +453,7 @@ class SeleniumTests(
         # Generate nice changes data
         for day in range(365):
             for _unused in range(int(10 + 10 * math.sin(2 * math.pi * day / 30))):
-                change = Change.objects.create(action=Change.ACTION_CREATE_PROJECT)
+                change = Change.objects.create(action=ActionEvents.CREATE_PROJECT)
                 change.timestamp -= timedelta(days=day)
                 change.save()
 
@@ -458,6 +488,7 @@ class SeleniumTests(
             self.click("Browse all projects")
         with self.wait_for_page_load():
             self.click("WeblateOrg")
+        self.click("Components")
         with self.wait_for_page_load():
             self.click("Django")
         self.click("Manage")
@@ -470,6 +501,8 @@ class SeleniumTests(
         # Make sure tesseract data is present and not downloaded at request time
         # what will cause test timeout.
         ensure_tesseract_language("eng")
+
+        user = self.do_login(superuser=True)
 
         text = (
             "Automatic translation via machine translation uses active "
@@ -485,7 +518,7 @@ class SeleniumTests(
         )
         source.explanation = "Help text for automatic translation tool"
         source.save()
-        self.create_glossary(project, language)
+        self.create_glossary(user, project, language)
         source.translation.component.alert_set.all().delete()
 
         def capture_unit(name, tab) -> None:
@@ -511,13 +544,13 @@ class SeleniumTests(
                 )
             )
 
-        self.do_login(superuser=True)
         capture_unit("source-information.png", "toggle-nearby")
         self.click(htmlid="projects-menu")
         with self.wait_for_page_load():
             self.click("Browse all projects")
         with self.wait_for_page_load():
             self.click("WeblateOrg")
+        self.click("Components")
         with self.wait_for_page_load():
             self.click("Django")
         self.click("Manage")
@@ -565,14 +598,16 @@ class SeleniumTests(
         element = self.driver.find_element(By.ID, "id_name")
         element.send_keys("All components")
         self.click("Add another Automatic component list assignment")
-        self.clear_field(
-            self.driver.find_element(By.ID, "id_autocomponentlist_set-0-project_match")
-        ).send_keys("^.*$")
-        self.clear_field(
-            self.driver.find_element(
-                By.ID, "id_autocomponentlist_set-0-component_match"
-            )
-        ).send_keys("^.*$")
+        element = self.driver.find_element(
+            By.ID, "id_autocomponentlist_set-0-project_match"
+        )
+        element.clear()
+        element.send_keys("^.*$")
+        element = self.driver.find_element(
+            By.ID, "id_autocomponentlist_set-0-component_match"
+        )
+        element.clear()
+        element.send_keys("^.*$")
         self.screenshot("componentlist-add.png")
         with self.wait_for_page_load():
             element.submit()
@@ -663,8 +698,7 @@ class SeleniumTests(
             "https://github.com/WeblateOrg/demo.git"
         )
         self.driver.find_element(By.ID, "id_repoweb").send_keys(
-            "https://github.com/WeblateOrg/demo/blob/"
-            "{{branch}}/{{filename}}#L{{line}}"
+            "https://github.com/WeblateOrg/demo/blob/{{branch}}/{{filename}}#L{{line}}"
         )
         self.driver.find_element(By.ID, "id_filemask").send_keys(
             "weblate/langdata/locale/*/LC_MESSAGES/django.po"
@@ -676,9 +710,9 @@ class SeleniumTests(
         Select(self.driver.find_element(By.ID, "id_license")).select_by_value(
             "GPL-3.0-or-later"
         )
-        self.clear_field(
-            self.driver.find_element(By.ID, "id_language_regex")
-        ).send_keys(language_regex)
+        element = self.driver.find_element(By.ID, "id_language_regex")
+        element.clear()
+        element.send_keys(language_regex)
         self.screenshot("add-component.png")
         # This takes long
         with self.wait_for_page_load(timeout=1200):
@@ -794,18 +828,17 @@ class SeleniumTests(
             )
         element = self.driver.find_element(By.ID, "id_match")
         element.send_keys(
-            "weblate/locale/(?P<language>[^/]*)/LC_MESSAGES/"
-            "(?P<component>[^/]*)\\.po"
+            "weblate/locale/(?P<language>[^/]*)/LC_MESSAGES/(?P<component>[^/]*)\\.po"
         )
-        self.clear_field(
-            self.driver.find_element(By.ID, "id_language_regex")
-        ).send_keys(language_regex)
+        element = self.driver.find_element(By.ID, "id_language_regex")
+        element.clear()
+        element.send_keys(language_regex)
         self.driver.find_element(By.ID, "id_new_base_template").send_keys(
             "weblate/locale/{{ component }}.pot"
         )
-        self.clear_field(self.driver.find_element(By.ID, "id_name_template")).send_keys(
-            "{{ component|title }}"
-        )
+        element = self.driver.find_element(By.ID, "id_name_template")
+        element.clear()
+        element.send_keys("{{ component|title }}")
         Select(self.driver.find_element(By.ID, "id_file_format")).select_by_value("po")
         with self.wait_for_page_load():
             element.submit()
@@ -824,7 +857,7 @@ class SeleniumTests(
         self.click("Insights")
         self.screenshot("reporting.png")
 
-        # Contributor agreement
+        # Contributor license agreement
         self.click("Manage")
         with self.wait_for_page_load():
             self.click("Settings")
@@ -836,7 +869,7 @@ class SeleniumTests(
             self.click("Language names")
         self.screenshot("contributor-agreement.png")
         with self.wait_for_page_load():
-            self.click("View contributor agreement")
+            self.click("View contributor license agreement")
         element = self.driver.find_element(By.ID, "id_confirm")
         self.click(element)
         with self.wait_for_page_load():
@@ -891,15 +924,15 @@ class SeleniumTests(
 
         # Return to original unit
         element = self.driver.find_element(By.ID, "id_q")
-        self.clear_field(element)
+        element.clear()
         element.send_keys("'%(count)s word'")
         with self.wait_for_page_load():
             element.submit()
 
         # Trigger check
-        self.clear_field(self.driver.find_element(By.ID, "id_a2a808c8ccbece08_0"))
+        self.driver.find_element(By.ID, "id_a2a808c8ccbece08_0").clear()
         element = self.driver.find_element(By.ID, "id_a2a808c8ccbece08_1")
-        self.clear_field(element)
+        element.clear()
         element.send_keys("několik slov")
         with self.wait_for_page_load():
             element.submit()
@@ -986,8 +1019,7 @@ class SeleniumTests(
             self.driver.find_element(By.ID, "id_name").submit()
 
         self.driver.find_element(By.ID, "id_repoweb").send_keys(
-            "https://github.com/WeblateOrg/demo/blob/"
-            "{{branch}}/{{filename}}#L{{line}}"
+            "https://github.com/WeblateOrg/demo/blob/{{branch}}/{{filename}}#L{{line}}"
         )
         self.driver.find_element(By.ID, "id_filemask").send_keys(
             "weblate/langdata/locale/*/LC_MESSAGES/django.po"
@@ -999,9 +1031,9 @@ class SeleniumTests(
         Select(self.driver.find_element(By.ID, "id_license")).select_by_value(
             "GPL-3.0-or-later"
         )
-        self.clear_field(
-            self.driver.find_element(By.ID, "id_language_regex")
-        ).send_keys("^(cs|he|hu)$")
+        element = self.driver.find_element(By.ID, "id_language_regex")
+        element.clear()
+        element.send_keys("^(cs|he|hu)$")
         self.screenshot("user-add-component.png")
 
     def test_alerts(self) -> None:
@@ -1021,6 +1053,7 @@ class SeleniumTests(
             self.click("Browse all projects")
         with self.wait_for_page_load():
             self.click("WeblateOrg")
+        self.click("Components")
         with self.wait_for_page_load():
             self.click("Duplicates")
         self.click("Alerts")
@@ -1164,6 +1197,7 @@ class SeleniumTests(
         # Navigate to component
         with self.wait_for_page_load():
             self.click("WeblateOrg")
+        self.click("Components")
         with self.wait_for_page_load():
             self.click("Android")
 
@@ -1207,10 +1241,10 @@ class SeleniumTests(
         time.sleep(0.2)
 
     def test_glossary(self) -> None:
-        self.do_login()
+        user = self.do_login()
         project = self.create_component()
         language = Language.objects.get(code="cs")
-        glossary = self.create_glossary(project, language)
+        glossary = self.create_glossary(user, project, language)
 
         self.driver.get(f"{self.live_server_url}{glossary.get_absolute_url()}")
         self.screenshot("glossary-component.png")

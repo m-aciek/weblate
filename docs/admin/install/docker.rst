@@ -33,22 +33,8 @@ behind HTTPS terminating proxy. You can also deploy with a HTTPS proxy, see
 2. Create a :file:`docker-compose.override.yml` file with your settings.
    See :ref:`docker-environment` for full list of environment variables.
 
-   .. code-block:: yaml
-
-        version: '3'
-        services:
-          weblate:
-            ports:
-              - 80:8080
-            environment:
-              WEBLATE_EMAIL_HOST: smtp.example.com
-              WEBLATE_EMAIL_HOST_USER: user
-              WEBLATE_EMAIL_HOST_PASSWORD: pass
-              WEBLATE_SERVER_EMAIL: weblate@example.com
-              WEBLATE_DEFAULT_FROM_EMAIL: weblate@example.com
-              WEBLATE_SITE_DOMAIN: weblate.example.com
-              WEBLATE_ADMIN_PASSWORD: password for the admin user
-              WEBLATE_ADMIN_EMAIL: weblate.admin@example.com
+   .. literalinclude:: ../../../weblate/examples/docker-compose.yml
+      :language: yaml
 
    .. note::
 
@@ -119,6 +105,36 @@ Docker container with HTTPS support
 
 Please see :ref:`docker-deploy` for generic deployment instructions, this
 section only mentions differences compared to it.
+
+
+.. _docker-ssl-proxy:
+
+SSL terminating proxy
++++++++++++++++++++++
+
+SSL can be terminated outside Weblate container. To make this work well
+together, several headers need to be passed to the container so that it is
+aware of its actual environment. In more detail, these headers are described in
+:ref:`reverse-proxy`.
+
+.. code-block:: nginx
+   :caption: Example nginx reverse proxy configuration for a Docker container.
+
+   location / {
+       proxy_pass http://127.0.0.1:8080;
+       proxy_read_timeout 3600s;
+       proxy_set_header Host $host;
+       proxy_set_header X-Forwarded-Proto https;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Host $server_name;
+   }
+
+.. code-block:: sh
+   :caption: Docker container environment for external SSL termination.
+
+   WEBLATE_ENABLE_HTTPS=1
+   WEBLATE_IP_PROXY_HEADER=HTTP_X_FORWARDED_FOR
 
 Using own SSL certificates
 ++++++++++++++++++++++++++
@@ -630,6 +646,19 @@ Generic settings
         environment:
           WEBLATE_REGISTRATION_OPEN: 0
 
+.. envvar:: WEBLATE_REGISTRATION_CAPTCHA
+
+   .. versionadded:: 5.10
+
+   Configures whether captcha is used for registration and other unauthenticated actions, see :std:setting:`REGISTRATION_CAPTCHA`.
+
+   **Example:**
+
+   .. code-block:: yaml
+
+      environment:
+        WEBLATE_REGISTRATION_CAPTCHA: 0
+
 .. envvar:: WEBLATE_REGISTRATION_ALLOW_BACKENDS
 
    Configure which authentication methods can be used to create new account via
@@ -692,6 +721,12 @@ Generic settings
       :setting:`ENABLE_HTTPS`
       :ref:`production-site`,
       :envvar:`WEBLATE_SECURE_PROXY_SSL_HEADER`
+
+.. envvar:: WEBLATE_INTERLEDGER_PAYMENT_BUILTIN
+
+    .. versionadded:: 5.11
+
+    Configures :setting:`INTERLEDGER_PAYMENT_BUILTIN`.
 
 .. envvar:: WEBLATE_INTERLEDGER_PAYMENT_POINTERS
 
@@ -801,7 +836,7 @@ Generic settings
 .. envvar:: WEBLATE_DEFAULT_PULL_MESSAGE
 
     Configures the default title and message for pull requests via API by changing
-    :setting:`DEFAULT_PULL_MESSAGE`
+    :setting:`DEFAULT_PULL_MESSAGE`.
 
     .. seealso::
 
@@ -851,6 +886,15 @@ Generic settings
 
    Configures URL prefix where Weblate is running, see :setting:`URL_PREFIX`.
 
+.. envvar:: WEBLATE_MEDIA_URL
+
+   Configures URL that handles the media served from
+   :setting:`django:MEDIA_ROOT`.
+
+.. envvar:: WEBLATE_STATIC_URL
+
+   Configures URL prefix for static files server from :setting:`CACHE_DIR`.
+
 .. envvar:: WEBLATE_SILENCED_SYSTEM_CHECKS
 
    Configures checks which you do not want to be displayed, see
@@ -863,7 +907,7 @@ Generic settings
 .. envvar:: WEBLATE_CSP_FONT_SRC
 .. envvar:: WEBLATE_CSP_FORM_SRC
 
-    Allows to customize ``Content-Security-Policy`` HTTP header.
+    Allows to customize :http:header:`Content-Security-Policy` HTTP header.
 
     .. seealso::
 
@@ -881,11 +925,11 @@ Generic settings
 
 .. envvar:: WEBLATE_LICENSE_REQUIRED
 
-   Configures :setting:`LICENSE_REQUIRED`
+   Configures :setting:`LICENSE_REQUIRED`.
 
 .. envvar:: WEBLATE_WEBSITE_REQUIRED
 
-   Configures :setting:`WEBSITE_REQUIRED`
+   Configures :setting:`WEBSITE_REQUIRED`.
 
 .. envvar:: WEBLATE_HIDE_VERSION
 
@@ -1137,7 +1181,7 @@ Or the path to a file containing the Python dictionary:
 .. envvar:: WEBLATE_BITBUCKETSERVER_HOST
 .. envvar:: WEBLATE_BITBUCKETSERVER_CREDENTIALS
 
-    Configures :ref:`vcs-bitbucket-server` by changing :setting:`BITBUCKETSERVER_CREDENTIALS`.
+    Configures :ref:`vcs-bitbucket-data-center` by changing :setting:`BITBUCKETSERVER_CREDENTIALS`.
 
 .. envvar:: WEBLATE_BITBUCKETCLOUD_USERNAME
 .. envvar:: WEBLATE_BITBUCKETCLOUD_WORKSPACE
@@ -1276,8 +1320,6 @@ Bitbucket
 
 .. envvar:: WEBLATE_SOCIAL_AUTH_BITBUCKET_OAUTH2_KEY
 .. envvar:: WEBLATE_SOCIAL_AUTH_BITBUCKET_OAUTH2_SECRET
-.. envvar:: WEBLATE_SOCIAL_AUTH_BITBUCKET_KEY
-.. envvar:: WEBLATE_SOCIAL_AUTH_BITBUCKET_SECRET
 
     Enables :ref:`bitbucket_auth`.
 
@@ -1347,8 +1389,7 @@ Keycloak
 .. envvar:: WEBLATE_SOCIAL_AUTH_KEYCLOAK_TITLE
 .. envvar:: WEBLATE_SOCIAL_AUTH_KEYCLOAK_IMAGE
 
-    Enables Keycloak authentication, see
-    `documentation <https://github.com/python-social-auth/social-core/blob/master/social_core/backends/keycloak.py>`_.
+    Enables Keycloak authentication, see :doc:`psa:backends/keycloak`.
 
 Linux vendors
 ~~~~~~~~~~~~~
@@ -1425,8 +1466,13 @@ Other authentication settings
 .. envvar:: WEBLATE_MIN_PASSWORD_SCORE
 
    Minimal password score as evaluated by the `zxcvbn
-   <https://github.com/dropbox/zxcvbn>`_ password strength estimator.
+   <https://github.com/dwolfhub/zxcvbn-python>`_ password strength estimator.
    Defaults to 3, set to 0 to disable strength checking.
+
+   .. seealso::
+
+      :ref:`password-authentication`,
+      :setting:`PASSWORD_MINIMAL_STRENGTH`
 
 
 PostgreSQL database setup
@@ -1464,7 +1510,7 @@ both Weblate and PostgreSQL containers.
 .. envvar:: POSTGRES_SSL_MODE
 
    Configure how PostgreSQL handles SSL in connection to the server, for possible choices see
-   `SSL Mode Descriptions <https://www.postgresql.org/docs/11/libpq-ssl.html#LIBPQ-SSL-SSLMODE-STATEMENTS>`_
+   `SSL Mode Descriptions <https://www.postgresql.org/docs/11/libpq-ssl.html#LIBPQ-SSL-SSLMODE-STATEMENTS>`_.
 
 .. envvar:: POSTGRES_ALTER_ROLE
 
@@ -1937,17 +1983,50 @@ Container settings
    ``web``
       Web server.
 
+.. envvar:: WEBLATE_ANUBIS_URL
+
+   .. versionadded:: 5.11.4
+
+   URL of `Anubis`_ server to handle subrequest authentication. This can be
+   useful to filter incoming HTTP requests using proof-of-work to stop AI
+   crawlers. You need to configure `Anubis for Subrequest Authentication`_ to
+   make it work.
+
+   This can be done using docker compose, for example:
+
+   .. code-block:: yaml
+
+      anubis:
+         image: ghcr.io/techarohq/anubis:latest
+         environment:
+            BIND: ":8923"
+            DIFFICULTY: "4"
+            METRICS_BIND: ":9090"
+            SERVE_ROBOTS_TXT: "false"
+            TARGET: " "
+            OG_PASSTHROUGH: "false"
+            ED25519_PRIVATE_KEY_HEX: "$(openssl rand -hex 32)"
+
+   You can then turn on the Anubis usage in Weblate using:
+
+   .. code-block:: yaml
+
+      environment:
+         WEBLATE_ANUBIS_URL: http://anubis:8923
+
+.. _Anubis: https://anubis.techaro.lol/
+.. _Anubis for Subrequest Authentication: https://anubis.techaro.lol/docs/admin/configuration/subrequest-auth
 
 .. _docker-volume:
 
 Docker container volumes
 ------------------------
 
-There are two volumes (``data`` and ``cache``) exported by the Weblate container. The
+There are two volumes (:file:`data` and :file:`cache`) exported by the Weblate container. The
 other service containers (PostgreSQL or Redis) have their data volumes as well,
 but those are not covered by this document.
 
-The ``data`` volume is mounted as :file:`/app/data` and is used to store
+The :file:`data` volume is mounted as :file:`/app/data` and is used to store
 Weblate persistent data such as cloned repositories or to customize Weblate
 installation. :setting:`DATA_DIR` describes in more detail what is stored here.
 
@@ -1956,7 +2035,7 @@ configuration, but usually it is stored in
 :file:`/var/lib/docker/volumes/weblate-docker_weblate-data/_data/` (the path
 consist of name of your docker-compose directory, container, and volume names).
 
-The ``cache`` volume is mounted as :file:`/app/cache` and is used to store static
+The :file:`cache` volume is mounted as :file:`/app/cache` and is used to store static
 files and :setting:`CACHE_DIR`. Its content is recreated on container startup
 and the volume can be mounted using ephemeral filesystem such as `tmpfs`.
 
@@ -1964,8 +2043,8 @@ When creating the volumes manually, the directories should be owned by UID 1000
 as that is user used inside the container.
 
 Weblate container can also be executed with a read-only root file system. In
-this case, two additional ``tmpfs`` volumes should be mounted: ``/tmp`` and
-``/run``.
+this case, two additional ``tmpfs`` volumes should be mounted: :file:`/tmp` and
+:file:`/run`.
 
 .. seealso::
 

@@ -65,14 +65,14 @@ Architecture overview
             label="Third-party services",
             style=filled
          ];
-         mt	[label="Machine translation",
+         mt [label="Machine translation",
             style=dotted];
-         sentry	[label="Sentry\nError collection",
+         sentry [label="Sentry\nError collection",
             style=dotted];
-         graylog	[label="Graylog\nLog collection",
+         graylog [label="Graylog\nLog collection",
             style=dotted];
-         mail	[label="E-mail server"];
-         auth	[label="SSO\nAuthentication provider",
+         mail [label="E-mail server"];
+         auth [label="SSO\nAuthentication provider",
             style=dotted];
       }
       subgraph cluster_ingress {
@@ -80,7 +80,7 @@ Architecture overview
             label=Ingress,
             style=filled
          ];
-         web	[label="Web server",
+         web [label="Web server",
             shape=hexagon];
       }
       subgraph cluster_weblate {
@@ -88,11 +88,11 @@ Architecture overview
             label="Weblate code-base",
             style=filled
          ];
-         celery	[fillcolor="#144d3f",
+         celery [fillcolor="#144d3f",
             fontcolor=white,
             label="Celery workers",
             style=filled];
-         wsgi	[fillcolor="#144d3f",
+         wsgi [fillcolor="#144d3f",
             fontcolor=white,
             label="WSGI server",
             style=filled];
@@ -102,26 +102,26 @@ Architecture overview
             label=Services,
             style=filled
          ];
-         redis	[label="Redis\nTask queue\nCache",
+         redis [label="Redis\nTask queue\nCache",
             shape=cylinder];
-         db	[label="PostgreSQL\nDatabase",
+         db [label="PostgreSQL\nDatabase",
             shape=cylinder];
-         fs	[label=Filesystem,
+         fs [label=Filesystem,
             shape=cylinder];
       }
       web -> wsgi;
       web -> fs;
-      celery -> mt	[style=dotted];
-      celery -> sentry	[style=dotted];
-      celery -> graylog	[style=dotted];
+      celery -> mt [style=dotted];
+      celery -> sentry [style=dotted];
+      celery -> graylog [style=dotted];
       celery -> mail;
       celery -> redis;
       celery -> db;
       celery -> fs;
-      wsgi -> mt	[style=dotted];
-      wsgi -> sentry	[style=dotted];
-      wsgi -> graylog	[style=dotted];
-      wsgi -> auth	[style=dotted];
+      wsgi -> mt [style=dotted];
+      wsgi -> sentry [style=dotted];
+      wsgi -> graylog [style=dotted];
+      wsgi -> auth [style=dotted];
       wsgi -> redis;
       wsgi -> db;
       wsgi -> fs;
@@ -205,8 +205,8 @@ Django REST Framework
 .. list-table:: Optional dependencies
      :header-rows: 1
 
-     * - pip extra
-       - Python Packages
+     * - Optional dependency specifier
+       - Python packages
        - Weblate feature
 
      * - ``alibaba``
@@ -231,8 +231,8 @@ Django REST Framework
        - :ref:`vcs-gerrit`
 
      * - ``google``
-       - | `google-cloud-translate <https://pypi.org/project/google-cloud-translate>`_
-         | `google-cloud-storage <https://pypi.org/project/google-cloud-storage>`_
+       - | `google-cloud-storage <https://pypi.org/project/google-cloud-storage>`_
+         | `google-cloud-translate <https://pypi.org/project/google-cloud-translate>`_
        - :ref:`mt-google-translate-api-v3` with glossary support
 
      * - ``ldap``
@@ -276,7 +276,7 @@ Django REST Framework
        - wsgi server for Weblate
 
      * - ``zxcvbn``
-       - | `django-zxcvbn-password <https://pypi.org/project/django-zxcvbn-password>`_
+       - | `django-zxcvbn-password-validator <https://pypi.org/project/django-zxcvbn-password-validator>`_
        - :ref:`password-authentication`
 
 When installing using pip, you can directly specify desired features when installing:
@@ -296,6 +296,46 @@ Or you can install Weblate without any optional features:
 .. code-block:: sh
 
    uv pip install weblate
+
+.. _troubleshoot-pip-install:
+
+Troubleshooting pip install
++++++++++++++++++++++++++++
+
+``ERROR: Dependency 'gobject-introspection-2.0' is required but not found.``
+   The installed ``PyGobject`` package cannot find a matching GObject
+   Introspection library. Before the 3.52 release, it required
+   ``gobject-introspection-1.0`` and since then, it requires
+   ``gobject-introspection-2.0``.
+
+   In case your operating system provides both, it is recommended to install
+   the newer version and retry the installation.
+
+   When the newer version is not available, please install the older release of
+   PyGobject before installing Weblate:
+
+   .. code-block:: sh
+
+      uv pip install 'PyGobject<3.52'
+
+``ffi_prep_closure(): bad user_data (it seems that the version of the libffi library seen at runtime is different from the 'ffi.h' file seen at compile-time)``
+   This is caused by incompatibility of binary packages distributed via PyPI
+   with the distribution. To address this, you need to rebuild the package
+   on your system:
+
+   .. code-block:: sh
+
+      uv pip install --force-reinstall --no-binary :all: cffi
+
+``error: ‘xmlSecKeyDataFormatEngine’ undeclared (first use in this function); did you mean ‘xmlSecKeyDataFormat’?``
+   This is a known issue of the xmlsec package, please see https://github.com/xmlsec/python-xmlsec/issues/314.
+
+``lxml & xmlsec libxml2 library version mismatch``
+   The ``lxml`` and ``xmlsec`` packages have to be built against one ``libxml2``. You should build them locally to avoid this issue:
+
+   .. code-block:: sh
+
+      uv pip install --force-reinstall --no-binary xmlsec --no-binary lxml lxml xmlsec
 
 Other system requirements
 +++++++++++++++++++++++++
@@ -397,7 +437,7 @@ Database setup for Weblate
 
 It is recommended to run Weblate with a PostgreSQL database server.
 
-PostgreSQL 12 and higher is supported. PostgreSQL 15 or newer is recommended.
+PostgreSQL 13 and higher is supported. PostgreSQL 15 or newer is recommended.
 
 :ref:`mysql` is supported, but not recommended for new installs.
 
@@ -557,7 +597,7 @@ Weblate can be also used with MySQL or MariaDB, please see
 Django with those. Because of the limitations it is recommended to use
 :ref:`postgresql` for new installations.
 
-Weblate requires MySQL at least 8 or MariaDB at least 10.4.
+Weblate requires MySQL at least 8 or MariaDB at least 10.5.
 
 Following configuration is recommended for Weblate:
 
@@ -674,7 +714,7 @@ Django documentation.
 .. hint::
 
     In case you get error about not supported authentication (for example
-    ``SMTP AUTH extension not supported by server``), it is most likely caused
+    :samp:`SMTP AUTH extension not supported by server`), it is most likely caused
     by using insecure connection and server refuses to authenticate this way.
     Try enabling :setting:`django:EMAIL_USE_TLS` in such case.
 
@@ -688,34 +728,56 @@ Django documentation.
 Running behind reverse proxy
 ++++++++++++++++++++++++++++
 
-Several features in Weblate rely on being able to get client IP address. This
-includes :ref:`rate-limit`, :ref:`spam-protection` or :ref:`audit-log`.
+Several features in Weblate rely on correct HTTP headers being passed to
+Weblate. When using reverse proxy, please make sure that the needed information
+is correctly passed.
 
-In default configuration Weblate parses IP address from ``REMOTE_ADDR`` which
-is set by the WSGI handler.
+Client IP address
+   This is needed for :ref:`rate-limit`, :ref:`spam-protection` or :ref:`audit-log`.
 
-In case you are running a reverse proxy, this field will most likely contain
-its address. You need to configure Weblate to trust additional HTTP headers and
-parse the IP address from these. This can not be enabled by default as it would
-allow IP address spoofing for installations not using a reverse proxy. Enabling
-:setting:`IP_BEHIND_REVERSE_PROXY` might be enough for the most usual setups,
-but you might need to adjust :setting:`IP_PROXY_HEADER` and
-:setting:`IP_PROXY_OFFSET` as well.
+   Weblate parses IP address from the ``REMOTE_ADDR``, which is set by the WSGI
+   handler. This might be empty (when using socket for WSGI) or contain a
+   reverse proxy address, so Weblate needs an additional HTTP header with
+   a client IP address.
 
-Another thing to take care of is the :http:header:`Host` header. It should match
-to whatever is configured as :setting:`SITE_DOMAIN`. Additional configuration
-might be needed in your reverse proxy (for example use ``ProxyPreserveHost On``
-for Apache or ``proxy_set_header Host $host;`` with nginx).
+   Enabling :setting:`IP_BEHIND_REVERSE_PROXY` should be sufficient for the most
+   usual setups, but you might need to adjust :setting:`IP_PROXY_HEADER` and
+   :setting:`IP_PROXY_OFFSET` as well (use :envvar:`WEBLATE_IP_PROXY_HEADER`
+   and :envvar:`WEBLATE_IP_PROXY_OFFSET` in the Docker container).
+
+   .. hint::
+
+      This configuration cannot be turned on by default, because it would allow IP
+      address spoofing on installations that don't have a properly configured
+      reverse proxy.
+
+Server host name
+   The :http:header:`Host` header should match to whatever is configured as
+   :setting:`SITE_DOMAIN`. Additional configuration might be needed in your
+   reverse proxy (for example use ``ProxyPreserveHost On`` for Apache or
+   ``proxy_set_header Host $host;`` with nginx).
+
+Client protocol
+   Not passing correct protocol may cause Weblate to end up in redirection
+   loop trying to upgrade client to HTTPS. Make sure it is correctly exposed by
+   the reverse proxy as :http:header:`X-Forwarded-Proto`.
 
 .. seealso::
 
+    :ref:`docker-ssl-proxy`,
     :ref:`spam-protection`,
     :ref:`rate-limit`,
     :ref:`audit-log`,
+    :ref:`uwsgi`,
+    :ref:`nginx-gunicorn`,
+    :ref:`apache`,
+    :ref:`apache-gunicorn`,
     :setting:`IP_BEHIND_REVERSE_PROXY`,
     :setting:`IP_PROXY_HEADER`,
     :setting:`IP_PROXY_OFFSET`,
-    :setting:`django:SECURE_PROXY_SSL_HEADER`
+    :setting:`django:SECURE_PROXY_SSL_HEADER`,
+    :envvar:`WEBLATE_IP_PROXY_HEADER`,
+    :envvar:`WEBLATE_IP_PROXY_OFFSET`
 
 HTTP proxy
 ++++++++++
@@ -1386,8 +1448,8 @@ Content security policy
 +++++++++++++++++++++++
 
 The default Weblate configuration enables ``weblate.middleware.SecurityMiddleware``
-middleware which sets security related HTTP headers like ``Content-Security-Policy``
-or ``X-XSS-Protection``. These are by default set up to work with Weblate and its
+middleware which sets security related HTTP headers like :http:header:`Content-Security-Policy`
+or :http:header:`X-XSS-Protection`. These are by default set up to work with Weblate and its
 configuration, but this might need customization for your environment.
 
 .. seealso::
@@ -1398,6 +1460,23 @@ configuration, but this might need customization for your environment.
     :setting:`CSP_STYLE_SRC`,
     :setting:`CSP_FONT_SRC`
     :setting:`CSP_FORM_SRC`
+
+.. _nginx-gunicorn:
+
+Sample configuration for NGINX and Gunicorn
++++++++++++++++++++++++++++++++++++++++++++
+
+The following configuration runs Weblate using Gunicorn under the NGINX webserver
+(also available as :file:`weblate/examples/weblate.nginx.gunicorn.conf`):
+
+.. literalinclude:: ../../weblate/examples/weblate.nginx.gunicorn.conf
+    :language: nginx
+
+
+.. seealso::
+
+    :ref:`running-gunicorn`,
+    :doc:`django:howto/deployment/wsgi/gunicorn`
 
 .. _uwsgi:
 
@@ -1466,7 +1545,38 @@ The following configuration runs Weblate in Gunicorn and Apache 2.4
 
 .. seealso::
 
+    :ref:`running-gunicorn`,
     :doc:`django:howto/deployment/wsgi/gunicorn`
+
+
+.. _running-gunicorn:
+
+Sample configuration to start Gunicorn
+++++++++++++++++++++++++++++++++++++++
+
+Weblate has `wsgi` optional dependency (see :ref:`python-deps`) that will
+install everything you need to run Gunicorn. When installing Weblate you can specify it as:
+
+.. code-block:: shell
+
+   uv pip install Weblate[all,wsgi]
+
+
+Once you have Gunicorn installed, you can run it. This is usually done at the
+system level. The following examples show starting via systemd:
+
+.. literalinclude:: ../../weblate/examples/gunicorn.socket
+   :caption: /etc/systemd/system/gunicorn.socket
+   :language: ini
+
+.. literalinclude:: ../../weblate/examples/gunicorn.service
+   :caption: /etc/systemd/system/gunicorn.service
+   :language: ini
+
+.. seealso::
+
+    :doc:`django:howto/deployment/wsgi/gunicorn`
+
 
 
 Running Weblate under path
@@ -1577,12 +1687,13 @@ placed as :file:`/etc/logrotate.d/celery`:
 Periodic tasks using Celery beat
 ++++++++++++++++++++++++++++++++
 
-Weblate comes with built-in setup for scheduled tasks. You can however define
-additional tasks in :file:`settings.py`, for example see :ref:`lazy-commit`.
+Weblate comes with built-in setup for scheduled tasks. The task schedule is
+stored in the database and tasks are executed by the Celery beat daemon.
 
-The tasks are supposed to be executed by Celery beats daemon. In case it is not
-working properly, it might not be running or its database was corrupted. Check
-the Celery startup logs in such case to figure out root cause.
+.. hint::
+
+   You can define additional tasks in :file:`settings.py`, for example see
+   :ref:`lazy-commit`.
 
 .. _monitoring-celery:
 
@@ -1671,7 +1782,7 @@ and profiles for defined percentage of operations. This can be configured using
 
 .. seealso::
 
-   `Sentry Performance Monitoring <https://docs.sentry.io/product/performance/>`_,
+   `Sentry Performance Monitoring <https://docs.sentry.io/product/sentry-basics/performance-monitoring/>`_,
    `Sentry Profiling <https://docs.sentry.io/product/explore/profiling/>`_
 
 .. _rollbar-errors:

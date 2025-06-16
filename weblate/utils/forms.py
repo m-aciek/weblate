@@ -12,6 +12,7 @@ from django.core.exceptions import ValidationError
 from django.db.models import Q
 from django.forms.models import ModelChoiceIterator
 from django.template.loader import render_to_string
+from django.utils.text import normalize_newlines
 from django.utils.translation import gettext, gettext_lazy
 from pyparsing import ParseException
 
@@ -137,7 +138,7 @@ class EmailField(forms.EmailField):
     """
     Slightly restricted EmailField.
 
-    We blacklist some additional local parts and customize error messages.
+    We block some additional local parts and customize error messages.
     """
 
     default_validators = [validate_email]
@@ -147,12 +148,16 @@ class EmailField(forms.EmailField):
         super().__init__(*args, **kwargs)
 
 
-class SortedSelect(forms.Select):
+class SortedChoiceWidget(forms.widgets.ChoiceWidget):
     """Wrapper class to sort choices alphabetically."""
 
     def optgroups(self, name, value, attrs=None):
         groups = super().optgroups(name, value, attrs)
         return sort_unicode(groups, lambda val: str(val[1][0]["label"]))
+
+
+class SortedSelect(SortedChoiceWidget, forms.Select):
+    """Wrapper class to sort choices alphabetically."""
 
 
 class ColorWidget(forms.RadioSelect):
@@ -249,3 +254,8 @@ class CachedModelMultipleChoiceField(
 
 class WeblateServiceURLField(forms.URLField):
     default_validators = [WeblateServiceURLValidator()]
+
+
+class NormalizedNewlineCharField(forms.CharField):
+    def to_python(self, value):
+        return normalize_newlines(super().to_python(value))

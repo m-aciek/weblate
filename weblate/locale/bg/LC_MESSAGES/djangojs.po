@@ -1,13 +1,13 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Любомир Василев <lyubomirv@gmx.com>, 2024.
+# Любомир Василев <lyubomirv@gmx.com>, 2024, 2025.
 msgid ""
 msgstr ""
-"Project-Id-Version: Weblate 5.9\n"
+"Project-Id-Version: Weblate 5.12\n"
 "Report-Msgid-Bugs-To: https://github.com/WeblateOrg/weblate/issues\n"
-"POT-Creation-Date: 2024-12-13 14:50+0000\n"
-"PO-Revision-Date: 2024-11-27 07:58+0000\n"
+"POT-Creation-Date: 2025-06-12 08:17+0000\n"
+"PO-Revision-Date: 2025-04-12 10:14+0000\n"
 "Last-Translator: Любомир Василев <lyubomirv@gmx.com>\n"
 "Language-Team: Bulgarian <https://hosted.weblate.org/projects/weblate/"
 "javascript/bg/>\n"
@@ -16,22 +16,26 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=n != 1;\n"
-"X-Generator: Weblate 5.9-dev\n"
+"X-Generator: Weblate 5.11-dev\n"
 
-#: weblate/static/editor/base.js:91
+#: weblate/static/editor/base.js:43
+msgid "Unsaved changes!"
+msgstr "Незапазени промени!"
+
+#: weblate/static/editor/base.js:121
 msgid "Please select target plural by clicking."
-msgstr "Изберете желаната форма за множествено число."
+msgstr "Изберете множествено число чрез щракване."
 
-#: weblate/static/editor/base.js:145
+#: weblate/static/editor/base.js:202
 msgid "You have unsaved changes. Are you sure you want to skip?"
 msgstr "Има незапазени промени. Наистина ли искате да продължите нататък?"
 
-#: weblate/static/editor/base.js:180
+#: weblate/static/editor/base.js:246
 #, javascript-format
 msgid "Cmd+%s"
 msgstr "Cmd+%s"
 
-#: weblate/static/editor/base.js:182
+#: weblate/static/editor/base.js:248
 #, javascript-format
 msgid "Ctrl+%s"
 msgstr "Ctrl+%s"
@@ -69,23 +73,23 @@ msgstr "Натиснете Cmd + I, а след това %s за затваря�
 msgid "Press Ctrl+I then %s to dismiss this."
 msgstr "Натиснете Cmd + I, а след това %s за затваряне."
 
-#: weblate/static/editor/full.js:592
+#: weblate/static/editor/full.js:590
 msgid "Clone to translation"
 msgstr "Копиране в превода"
 
-#: weblate/static/editor/full.js:594
+#: weblate/static/editor/full.js:592
 msgid "Accept"
 msgstr "Приемане"
 
-#: weblate/static/editor/full.js:603
+#: weblate/static/editor/full.js:601
 msgid "Delete entry"
 msgstr "Изтриване на записа"
 
-#: weblate/static/editor/tools/search.js:49
+#: weblate/static/editor/tools/search.js:50
 msgid "No results found"
 msgstr "Няма намерени резултати"
 
-#: weblate/static/editor/tools/search.js:102
+#: weblate/static/editor/tools/search.js:103
 #, javascript-format
 msgid "%s matching string"
 msgid_plural "%s matching strings"
@@ -96,16 +100,16 @@ msgstr[1] "%s съвпадащи низа"
 msgid "There are some unsaved changes, are you sure you want to leave?"
 msgstr "Има незапазени промени, наистина ли искате да напуснете?"
 
-#: weblate/static/js/screenshots/clipboard-paste.js:38
+#: weblate/static/js/screenshots/clipboard-paste.js:39
 msgid "Image Pasted!"
 msgstr "Изображението е поставено!"
 
-#: weblate/static/js/screenshots/clipboard-paste.js:40
-#: weblate/static/js/screenshots/clipboard-paste.js:56
+#: weblate/static/js/screenshots/clipboard-paste.js:41
+#: weblate/static/js/screenshots/clipboard-paste.js:57
 msgid "Something went wrong!"
 msgstr "Нещо се обърка!"
 
-#: weblate/static/js/screenshots/clipboard-paste.js:53
+#: weblate/static/js/screenshots/clipboard-paste.js:54
 msgid "No image found in clipboard"
 msgstr "В буфера няма изображение"
 
@@ -121,181 +125,181 @@ msgstr "Не са открити нови съответстващи изход�
 msgid "Sort this column"
 msgstr "Сортиране на колоната"
 
-#: weblate/static/loader-bootstrap.js:571
+#: weblate/static/loader-bootstrap.js:576
 msgid "Error while loading page:"
 msgstr "Грешка при зареждане на страницата:"
 
-#: weblate/static/loader-bootstrap.js:844
+#: weblate/static/loader-bootstrap.js:842
 msgid "Text copied to clipboard."
 msgstr "Текстът е копиран."
 
-#: weblate/static/loader-bootstrap.js:848
+#: weblate/static/loader-bootstrap.js:846
 msgid "Please press Ctrl+C to copy."
 msgstr "За да копирате натиснете Ctrl + C."
 
-#: weblate/static/loader-bootstrap.js:873
+#: weblate/static/loader-bootstrap.js:871
 msgid "Search…"
 msgstr "Търсене…"
 
-#: weblate/static/loader-bootstrap.js:875
+#: weblate/static/loader-bootstrap.js:873
 msgid "Available:"
 msgstr "Налични:"
 
-#: weblate/static/loader-bootstrap.js:877
+#: weblate/static/loader-bootstrap.js:875
 msgid "Chosen:"
 msgstr "Избрани:"
 
-#: weblate/static/loader-bootstrap.js:1181
+#: weblate/static/loader-bootstrap.js:1212
 msgid "Weblate is now scanning the repository, please be patient."
 msgstr "Weblate в момента обхожда хранилището. Имайте търпение."
 
-#: weblate/static/loader-bootstrap.js:1296
+#: weblate/static/loader-bootstrap.js:1327
 msgid ""
 "Notification settings removed, please do not forget to save the changes."
 msgstr ""
 "Настройките за известията са премахнати. Не забравяйте да запазите промените."
 
-#: weblate/static/loader-bootstrap.js:1458
+#: weblate/static/loader-bootstrap.js:1489
 msgid "Custom range"
 msgstr "Персонализиран интервал"
 
-#: weblate/static/loader-bootstrap.js:1459
+#: weblate/static/loader-bootstrap.js:1490
 msgid "Clear"
 msgstr "Изчистване"
 
-#: weblate/static/loader-bootstrap.js:1461
+#: weblate/static/loader-bootstrap.js:1492
 msgctxt "Short name of day"
 msgid "Su"
 msgstr "нд"
 
-#: weblate/static/loader-bootstrap.js:1462
+#: weblate/static/loader-bootstrap.js:1493
 msgctxt "Short name of day"
 msgid "Mo"
 msgstr "пн"
 
-#: weblate/static/loader-bootstrap.js:1463
+#: weblate/static/loader-bootstrap.js:1494
 msgctxt "Short name of day"
 msgid "Tu"
 msgstr "вт"
 
-#: weblate/static/loader-bootstrap.js:1464
+#: weblate/static/loader-bootstrap.js:1495
 msgctxt "Short name of day"
 msgid "We"
 msgstr "ср"
 
-#: weblate/static/loader-bootstrap.js:1465
+#: weblate/static/loader-bootstrap.js:1496
 msgctxt "Short name of day"
 msgid "Th"
 msgstr "чт"
 
-#: weblate/static/loader-bootstrap.js:1466
+#: weblate/static/loader-bootstrap.js:1497
 msgctxt "Short name of day"
 msgid "Fr"
 msgstr "пт"
 
-#: weblate/static/loader-bootstrap.js:1467
+#: weblate/static/loader-bootstrap.js:1498
 msgctxt "Short name of day"
 msgid "Sa"
 msgstr "сб"
 
-#: weblate/static/loader-bootstrap.js:1470
+#: weblate/static/loader-bootstrap.js:1501
 msgctxt "Short name of month"
 msgid "Jan"
 msgstr "яну"
 
-#: weblate/static/loader-bootstrap.js:1471
+#: weblate/static/loader-bootstrap.js:1502
 msgctxt "Short name of month"
 msgid "Feb"
 msgstr "фев"
 
-#: weblate/static/loader-bootstrap.js:1472
+#: weblate/static/loader-bootstrap.js:1503
 msgctxt "Short name of month"
 msgid "Mar"
 msgstr "мар"
 
-#: weblate/static/loader-bootstrap.js:1473
+#: weblate/static/loader-bootstrap.js:1504
 msgctxt "Short name of month"
 msgid "Apr"
 msgstr "апр"
 
-#: weblate/static/loader-bootstrap.js:1474
+#: weblate/static/loader-bootstrap.js:1505
 msgctxt "Short name of month"
 msgid "May"
 msgstr "май"
 
-#: weblate/static/loader-bootstrap.js:1475
+#: weblate/static/loader-bootstrap.js:1506
 msgctxt "Short name of month"
 msgid "Jun"
 msgstr "юни"
 
-#: weblate/static/loader-bootstrap.js:1476
+#: weblate/static/loader-bootstrap.js:1507
 msgctxt "Short name of month"
 msgid "Jul"
 msgstr "юли"
 
-#: weblate/static/loader-bootstrap.js:1477
+#: weblate/static/loader-bootstrap.js:1508
 msgctxt "Short name of month"
 msgid "Aug"
 msgstr "авг"
 
-#: weblate/static/loader-bootstrap.js:1478
+#: weblate/static/loader-bootstrap.js:1509
 msgctxt "Short name of month"
 msgid "Sep"
 msgstr "сеп"
 
-#: weblate/static/loader-bootstrap.js:1479
+#: weblate/static/loader-bootstrap.js:1510
 msgctxt "Short name of month"
 msgid "Oct"
 msgstr "окт"
 
-#: weblate/static/loader-bootstrap.js:1480
+#: weblate/static/loader-bootstrap.js:1511
 msgctxt "Short name of month"
 msgid "Nov"
 msgstr "ное"
 
-#: weblate/static/loader-bootstrap.js:1481
+#: weblate/static/loader-bootstrap.js:1512
 msgctxt "Short name of month"
 msgid "Dec"
 msgstr "дек"
 
-#: weblate/static/loader-bootstrap.js:1485
+#: weblate/static/loader-bootstrap.js:1516
 msgid "Today"
 msgstr "Днес"
 
-#: weblate/static/loader-bootstrap.js:1486
+#: weblate/static/loader-bootstrap.js:1517
 msgid "Yesterday"
 msgstr "Вчера"
 
-#: weblate/static/loader-bootstrap.js:1490
+#: weblate/static/loader-bootstrap.js:1521
 msgid "Last 7 days"
 msgstr "Последните 7 дни"
 
-#: weblate/static/loader-bootstrap.js:1491
+#: weblate/static/loader-bootstrap.js:1522
 msgid "Last 30 days"
 msgstr "Последните 30 дни"
 
-#: weblate/static/loader-bootstrap.js:1492
+#: weblate/static/loader-bootstrap.js:1523
 msgid "This month"
 msgstr "Този месец"
 
-#: weblate/static/loader-bootstrap.js:1496
+#: weblate/static/loader-bootstrap.js:1527
 msgid "Last month"
 msgstr "Миналия месец"
 
-#: weblate/static/loader-bootstrap.js:1500
+#: weblate/static/loader-bootstrap.js:1531
 msgid "This year"
 msgstr "Тази година"
 
-#: weblate/static/loader-bootstrap.js:1504
+#: weblate/static/loader-bootstrap.js:1535
 msgid "Last year"
 msgstr "Миналата година"
 
-#: weblate/static/loader-bootstrap.js:1586
+#: weblate/static/loader-bootstrap.js:1617
 msgctxt "Alert to user when opening browser developer console"
 msgid "Stop!"
 msgstr "Спрете!"
 
-#: weblate/static/loader-bootstrap.js:1593
+#: weblate/static/loader-bootstrap.js:1624
 msgid ""
 "This is a browser feature intended for developers. If someone told you to "
 "copy-paste something here, they are likely trying to compromise your Weblate "
@@ -305,7 +309,7 @@ msgstr ""
 "да копирате или поставите някакъв текст тук, то най-вероятно иска да навреди "
 "на регистрацията ви в Weblate."
 
-#: weblate/static/loader-bootstrap.js:1600
+#: weblate/static/loader-bootstrap.js:1631
 msgid "See https://en.wikipedia.org/wiki/Self-XSS for more information."
 msgstr "Прочетете https://en.wikipedia.org/wiki/Self-XSS за повече информация."
 

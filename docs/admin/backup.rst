@@ -32,7 +32,7 @@ The generated backups are kept on the server as configured by
 :setting:`PROJECT_BACKUP_KEEP_DAYS` and :setting:`PROJECT_BACKUP_KEEP_COUNT`
 (it defaults to keep at most 3 backups for 30 days).
 
-Use the generated file to import project when :ref:`adding-projects`.
+Use the generated file to import project when :ref:`adding-projects` or in :wladmin:`import_projectbackup`.
 
 .. note::
 
@@ -41,6 +41,8 @@ Use the generated file to import project when :ref:`adding-projects`.
    :setting:`SIMPLIFY_LANGUAGES`. The restore will tell you which language
    codes could not be processed and you can then add missing language
    definitions manually.
+
+.. _automated-backup:
 
 Automated backup using BorgBackup
 ---------------------------------
@@ -170,6 +172,8 @@ via SSH using the Weblate SSH key:
 .. seealso::
 
    :ref:`weblate-ssh-key`, :doc:`borg:usage/general`
+
+.. _restore-borg:
 
 Restoring from BorgBackup
 -------------------------

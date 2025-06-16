@@ -26,11 +26,15 @@ it add errors.
 Trailing ellipsis replacer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+:Class name: ``weblate.trans.autofixes.chars.ReplaceTrailingDotsWithEllipsis``
+
 Replace trailing dots (``...``) with an ellipsis (``…``) to make it consistent with the source string.
 
 
 Zero-width space removal
 ~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Class name: ``weblate.trans.autofixes.chars.RemoveZeroSpace``
 
 Zero width space is typically not desired in the translation. This fix will
 remove it unless it is present in the source string as well.
@@ -38,21 +42,27 @@ remove it unless it is present in the source string as well.
 Control characters removal
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Removes any control characters from the translation.
+:Class name: ``weblate.trans.autofixes.chars.RemoveControlChars``
+
+Removes control characters if the source does not contain any.
 
 Devanagari danda
 ~~~~~~~~~~~~~~~~
 
-Replaces wrong full stop in Devanagari by Devanagari danda (``।``).
+:Class name: ``weblate.trans.autofixes.chars.DevanagariDanda``
+
+Replaces sentence full stop in Bangla by the Devanagari danda character (``।``).
 
 .. _autofix-punctuation-spacing:
 
 Punctuation spacing
 ~~~~~~~~~~~~~~~~~~~
 
+:Class name: ``weblate.trans.autofixes.chars.PunctuationSpacing``
+
 .. versionadded:: 5.3
 
-Ensures French and Breton use correct punctuation spacing.
+Ensures French uses correct punctuation spacing.
 
 This fixup can be disabled via ``ignore-punctuation-spacing`` flag (which also
 disables :ref:`check-punctuation-spacing`).
@@ -62,7 +72,9 @@ disables :ref:`check-punctuation-spacing`).
 Unsafe HTML cleanup
 ~~~~~~~~~~~~~~~~~~~
 
-When turned on using a ``safe-html`` flag it sanitizes HTML markup.
+:Class name: ``weblate.trans.autofixes.html.BleachHTML``
+
+Removes unsafe HTML markup from strings flagged as ``safe-html``.
 
 .. seealso::
 
@@ -70,6 +82,8 @@ When turned on using a ``safe-html`` flag it sanitizes HTML markup.
 
 Trailing and leading whitespace fixer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Class name: ``weblate.trans.autofixes.whitespace.SameBookendingWhitespace``
 
 Makes leading and trailing whitespace consistent with the source string. The
 behavior can be fine-tuned using ``ignore-begin-space`` and
@@ -99,11 +113,17 @@ good quality translations.
 BBCode markup
 ~~~~~~~~~~~~~
 
-:Summary: BBCode in translation does not match source
+:Summary: BBCode in translation does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.markup.BBCodeCheck``
 :Check identifier: ``bbcode``
+:Flag to enable: ``bbcode-text``
 :Flag to ignore: ``ignore-bbcode``
+
+.. versionchanged:: 5.10
+
+This checks no longer relies on unreliable automatic detection, it now needs to be turned on using the ``bbcode-text`` flag.
+
 
 BBCode represents simple markup, like for example highlighting important parts of a
 message in bold font, or italics.
@@ -122,7 +142,7 @@ Consecutive duplicated words
 
 .. versionadded:: 4.1
 
-:Summary: Text contains the same word twice in a row:
+:Summary: Text contains the same word twice in a row.
 :Scope: translated strings
 :Check class: ``weblate.checks.duplicate.DuplicateCheck``
 :Check identifier: ``duplicate``
@@ -168,7 +188,7 @@ This check has to be turned on using ``check-glossary`` flag (see
 Double space
 ~~~~~~~~~~~~
 
-:Summary: Translation contains double space
+:Summary: Translation contains double space.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.DoubleSpaceCheck``
 :Check identifier: ``double_space``
@@ -185,7 +205,7 @@ Fluent parts
 
 .. versionadded:: 5.0
 
-:Summary: Fluent parts should match
+:Summary: Fluent parts should match.
 :Scope: translated strings
 :Check class: ``weblate.checks.fluent.parts.FluentPartsCheck``
 :Check identifier: ``fluent-parts``
@@ -225,7 +245,7 @@ Fluent references
 
 .. versionadded:: 5.0
 
-:Summary: Fluent references should match
+:Summary: Fluent references should match.
 :Scope: translated strings
 :Check class: ``weblate.checks.fluent.references.FluentReferencesCheck``
 :Check identifier: ``fluent-references``
@@ -296,7 +316,7 @@ Fluent translation inner HTML
 
 .. versionadded:: 5.0
 
-:Summary: Fluent target should be valid inner HTML that matches
+:Summary: Fluent target should be valid inner HTML that matches.
 :Scope: translated strings
 :Check class: ``weblate.checks.fluent.inner_html.FluentTargetInnerHTMLCheck``
 :Check identifier: ``fluent-target-inner-html``
@@ -364,7 +384,7 @@ Fluent translation syntax
 
 .. versionadded:: 5.0
 
-:Summary: Fluent syntax error in translation
+:Summary: Fluent syntax error in the translation.
 :Scope: translated strings
 :Check class: ``weblate.checks.fluent.syntax.FluentTargetSyntaxCheck``
 :Check identifier: ``fluent-target-syntax``
@@ -421,7 +441,7 @@ insert them into translated strings:
 AngularJS interpolation string
 ******************************
 
-:Summary: AngularJS interpolation strings do not match source
+:Summary: AngularJS interpolation strings do not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.angularjs.AngularJSInterpolationCheck``
 :Check identifier: ``angularjs_format``
@@ -434,12 +454,30 @@ AngularJS interpolation string
    :ref:`check-formats`,
    `AngularJS text interpolation <https://angular.io/guide/interpolation>`_
 
+.. _check-automattic-components-format:
+
+Automattic components formatting
+********************************
+
+:Summary: The Automattic components' placeholders do not match the source.
+:Scope: translated strings
+:Check class: ``weblate.checks.format.AutomatticComponentsCheck``
+:Check identifier: ``automattic_components_format``
+:Flag to enable: ``automattic-components-format``
+:Flag to ignore: ``ignore-automattic-components-format``
+:Simple format string example: ``They bought {{strong}}apples{{/strong}}.``
+
+.. seealso::
+
+   :ref:`check-formats`,
+   `Interpolate Components <https://github.com/Automattic/wp-calypso/tree/trunk/packages/interpolate-components>`_
+
 .. _check-c-format:
 
 C format
 ********
 
-:Summary: C format string does not match source
+:Summary: C format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.CFormatCheck``
 :Check identifier: ``c_format``
@@ -459,11 +497,11 @@ C format
 C# format
 *********
 
-:Summary: C# format string does not match source
+:Summary: C# format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.CSharpFormatCheck``
 :Check identifier: ``c_sharp_format``
-:Flag to enable: ``c-sharp-format``
+:Flag to enable: ``c-sharp-format``, ``csharp-format``
 :Flag to ignore: ``ignore-c-sharp-format``
 :Position format string example: ``There are {0} apples``
 
@@ -477,7 +515,7 @@ C# format
 ECMAScript template literals
 ****************************
 
-:Summary: ECMAScript template literals do not match source
+:Summary: ECMAScript template literals do not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.ESTemplateLiteralsCheck``
 :Check identifier: ``es_format``
@@ -497,7 +535,7 @@ i18next interpolation
 
 .. versionadded:: 4.0
 
-:Summary: The i18next interpolation does not match source
+:Summary: The i18next interpolation does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.I18NextInterpolationCheck``
 :Check identifier: ``i18next_interpolation``
@@ -584,7 +622,7 @@ This would match ``<x:link>click here</x:link>`` but not ``<strong>this</strong>
 Java format
 ***********
 
-:Summary: Java format string does not match source
+:Summary: Java format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.JavaFormatCheck``
 :Check identifier: ``java_printf_format``
@@ -608,12 +646,11 @@ Java format
 Java MessageFormat
 ******************
 
-:Summary: Java MessageFormat string does not match source
+:Summary: Java MessageFormat string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.JavaMessageFormatCheck``
 :Check identifier: ``java_format``
-:Flag to enable unconditionally: ``java-format``
-:Flag to enable autodetection: ``auto-java-messageformat`` enables check only if there is a format string in the source
+:Flag to enable: ``java-format``, ``auto-java-messageformat`` enables check only if there is a format string in the source
 :Flag to ignore: ``ignore-java-format``
 :Position format string example: ``There are {0} apples``
 
@@ -637,7 +674,7 @@ quoting and will not be shown when rendering the string.
 JavaScript format
 *****************
 
-:Summary: JavaScript format string does not match source
+:Summary: JavaScript format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.JavaScriptFormatCheck``
 :Check identifier: ``javascript_format``
@@ -655,7 +692,7 @@ JavaScript format
 Lua format
 **********
 
-:Summary: Lua format string does not match source
+:Summary: Lua format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.LuaFormatCheck``
 :Check identifier: ``lua_format``
@@ -673,7 +710,7 @@ Lua format
 Object Pascal format
 ********************
 
-:Summary: Object Pascal format string does not match source
+:Summary: Object Pascal format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.ObjectPascalFormatCheck``
 :Check identifier: ``object_pascal_format``
@@ -695,7 +732,7 @@ Percent placeholders
 
 .. versionadded:: 4.0
 
-:Summary: The percent placeholders do not match source
+:Summary: The percent placeholders do not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.PercentPlaceholdersCheck``
 :Check identifier: ``percent_placeholders``
@@ -712,7 +749,7 @@ Percent placeholders
 Perl brace format
 *****************
 
-:Summary: Perl brace format string does not match source
+:Summary: Perl brace format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.PerlBraceFormatCheck``
 :Check identifier: ``perl_brace_format``
@@ -730,7 +767,7 @@ Perl brace format
 Perl format
 ***********
 
-:Summary: Perl format string does not match source
+:Summary: Perl format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.PerlFormatCheck``
 :Check identifier: ``perl_format``
@@ -750,7 +787,7 @@ Perl format
 PHP format
 **********
 
-:Summary: PHP format string does not match source
+:Summary: PHP format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.PHPFormatCheck``
 :Check identifier: ``php_format``
@@ -770,7 +807,7 @@ PHP format
 Python brace format
 *******************
 
-:Summary: Python brace format string does not match source
+:Summary: Python brace format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.PythonBraceFormatCheck``
 :Check identifier: ``python_brace_format``
@@ -790,7 +827,7 @@ Python brace format
 Python format
 *************
 
-:Summary: Python format string does not match source
+:Summary: Python format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.PythonFormatCheck``
 :Check identifier: ``python_format``
@@ -810,7 +847,7 @@ Python format
 Qt format
 *********
 
-:Summary: Qt format string does not match source
+:Summary: Qt format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.qt.QtFormatCheck``
 :Check identifier: ``qt_format``
@@ -828,7 +865,7 @@ Qt format
 Qt plural format
 ****************
 
-:Summary: Qt plural format string does not match source
+:Summary: Qt plural format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.qt.QtPluralCheck``
 :Check identifier: ``qt_plural_format``
@@ -846,7 +883,7 @@ Qt plural format
 Ruby format
 ***********
 
-:Summary: Ruby format string does not match source
+:Summary: Ruby format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.ruby.RubyFormatCheck``
 :Check identifier: ``ruby_format``
@@ -867,7 +904,7 @@ Ruby format
 Scheme format
 *************
 
-:Summary: Scheme format string does not match source
+:Summary: Scheme format string does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.SchemeFormatCheck``
 :Check identifier: ``scheme_format``
@@ -887,7 +924,7 @@ Scheme format
 Vue I18n formatting
 *******************
 
-:Summary: The Vue I18n formatting does not match source
+:Summary: The Vue I18n formatting does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.format.VueFormattingCheck``
 :Check identifier: ``vue_format``
@@ -908,7 +945,7 @@ Vue I18n formatting
 Has been translated
 ~~~~~~~~~~~~~~~~~~~
 
-:Summary: This string has been translated in the past
+:Summary: This string has been translated in the past.
 :Scope: all strings
 :Check class: ``weblate.checks.consistency.TranslatedCheck``
 :Check identifier: ``translated``
@@ -959,13 +996,39 @@ This check applies to all components in a project that have
 
    :ref:`translation-consistency`
 
+.. _check-rst-references:
+
+Inconsistent reStructuredText references
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 5.10
+
+:Summary: Inconsistent reStructuredText term references in the translated message.
+:Scope: translated strings
+:Check class: ``weblate.checks.markup.RSTReferencesCheck``
+:Check identifier: ``rst-references``
+:Flag to enable: ``rst-text``
+:Flag to ignore: ``ignore-rst-references``
+
+reStructuredText term references do not match source, the typical causes for these errors are:
+
+* Mismatched or missing backticks.
+* Missing spaces or interpunction around the reference. The reStructuredText inline blocks need to be separated by non-word characters.
+* Space between inline tag and backticks.
+* The reference name is not being translated.
+* Using quotes instead of backticks.
+
+.. seealso::
+
+   `reStructuredText Primer`_,
+   :ref:`check-rst-syntax`
 
 .. _check-kashida:
 
 Kashida letter used
 ~~~~~~~~~~~~~~~~~~~
 
-:Summary: The decorative kashida letters should not be used
+:Summary: The decorative kashida letters should not be used.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.KashidaCheck``
 :Check identifier: ``kashida``
@@ -984,7 +1047,7 @@ also known as Tatweel.
 Markdown links
 ~~~~~~~~~~~~~~
 
-:Summary: Markdown links do not match source
+:Summary: Markdown links do not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.markup.MarkdownLinkCheck``
 :Check identifier: ``md-link``
@@ -1003,7 +1066,7 @@ Markdown links do not match source.
 Markdown references
 ~~~~~~~~~~~~~~~~~~~
 
-:Summary: Markdown link references do not match source
+:Summary: Markdown link references do not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.markup.MarkdownRefLinkCheck``
 :Check identifier: ``md-reflink``
@@ -1021,7 +1084,7 @@ Markdown link references do not match source.
 Markdown syntax
 ~~~~~~~~~~~~~~~
 
-:Summary: Markdown syntax does not match source
+:Summary: Markdown syntax does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.markup.MarkdownSyntaxCheck``
 :Check identifier: ``md-syntax``
@@ -1039,7 +1102,7 @@ Markdown syntax does not match source
 Maximum length of translation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Summary: Translation should not exceed given length
+:Summary: Translation should not exceed given length.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.MaxLengthCheck``
 :Check identifier: ``max-length``
@@ -1068,7 +1131,7 @@ Unlike the other checks, the flag should be set as a ``key:value`` pair like
 Maximum size of translation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Summary: Translation rendered text should not exceed given size
+:Summary: Translation rendered text should not exceed given size.
 :Scope: translated strings
 :Check class: ``weblate.checks.render.MaxSizeCheck``
 :Check identifier: ``max-size``
@@ -1111,7 +1174,7 @@ pixels:
 Mismatched \\n
 ~~~~~~~~~~~~~~
 
-:Summary: Number of \\n literals in translation does not match source
+:Summary: Number of \\n literals in translation does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EscapedNewlineCountingCheck``
 :Check identifier: ``escaped_newline``
@@ -1125,7 +1188,7 @@ Check fails if the number of ``\n`` literals in translation does not match the s
 Mismatched colon
 ~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both end with a colon
+:Summary: Source and translation do not both end with a colon.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EndColonCheck``
 :Check identifier: ``end_colon``
@@ -1144,7 +1207,7 @@ belong (Chinese or Japanese).
 Mismatched ellipsis
 ~~~~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both end with an ellipsis
+:Summary: Source and translation do not both end with an ellipsis.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EndEllipsisCheck``
 :Check identifier: ``end_ellipsis``
@@ -1165,7 +1228,7 @@ An ellipsis is usually rendered nicer than three dots in print, and sounds bette
 Mismatched exclamation mark
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both end with an exclamation mark
+:Summary: Source and translation do not both end with an exclamation mark.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EndExclamationCheck``
 :Check identifier: ``end_exclamation``
@@ -1185,7 +1248,7 @@ Nko).
 Mismatched full stop
 ~~~~~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both end with a full stop
+:Summary: Source and translation do not both end with a full stop.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EndStopCheck``
 :Check identifier: ``end_stop``
@@ -1199,12 +1262,29 @@ The presence of full stops is checked for various languages where they do not be
 
    `Full stop on Wikipedia <https://en.wikipedia.org/wiki/Full_stop>`_
 
+.. _check-end-interrobang:
+
+Mismatched interrobang
+~~~~~~~~~~~~~~~~~~~~~~
+
+:Summary: Source and translation do not both end with an interrobang expression.
+:Scope: translated strings
+:Check class: ``weblate.checks.chars.EndInterrobangCheck``
+:Check identifier: ``end_interrobang``
+:Flag to ignore: ``ignore-end-interrobang``
+
+Checks that interrobang marks are replicated between both source and translation.
+It allows the swap between "!?" and "?!".
+
+.. seealso::
+
+   `Interrobang mark on Wikipedia <https://en.wikipedia.org/wiki/Interrobang>`_
 .. _check-end-question:
 
 Mismatched question mark
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both end with a question mark
+:Summary: Source and translation do not both end with a question mark.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EndQuestionCheck``
 :Check identifier: ``end_question``
@@ -1219,30 +1299,13 @@ Coptic).
 
    `Question mark on Wikipedia <https://en.wikipedia.org/wiki/Question_mark>`_
 
-.. _check-end-interrobang:
-
-Mismatched interrobang mark
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-:Summary: Source and translation do not both end with a interrobang mark
-:Scope: translated strings
-:Check class: ``weblate.checks.chars.EndInterrobangCheck``
-:Check identifier: ``end_Interrobang``
-:Flag to ignore: ``ignore-end-Interrobang``
-
-Checks that interrobang marks are replicated between both source and translation.
-It allows the swap between "!?" and "?!".
-
-.. seealso::
-
-   `Interrobang mark on Wikipedia <https://en.wikipedia.org/wiki/Interrobang>`_
 
 .. _check-end-semicolon:
 
 Mismatched semicolon
 ~~~~~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both end with a semicolon
+:Summary: Source and translation do not both end with a semicolon.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EndSemicolonCheck``
 :Check identifier: ``end_semicolon``
@@ -1259,7 +1322,7 @@ Checks that semicolons at the end of sentences are replicated between both sourc
 Mismatching line breaks
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-:Summary: Number of new lines in translation does not match source
+:Summary: Number of new lines in translation does not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.NewLineCountCheck``
 :Check identifier: ``newline-count``
@@ -1274,7 +1337,7 @@ Check fails if the number of new lines in translation does not match the source.
 Missing plurals
 ~~~~~~~~~~~~~~~
 
-:Summary: Some plural forms are untranslated
+:Summary: Some plural forms are untranslated.
 :Scope: translated strings
 :Check class: ``weblate.checks.consistency.PluralsCheck``
 :Check identifier: ``plurals``
@@ -1286,12 +1349,31 @@ Specifics on how each plural form is used can be found in the string definition.
 Failing to fill in plural forms will in some cases lead to displaying nothing when
 the plural form is in use.
 
+.. _check-kabyle-characters:
+
+
+Non‑standard characters in Kabyle
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 5.12
+
+:Summary: Use standardized Latin Kabyle characters (e.g. ɣ instead of Greek γ; ɛ instead of ε).
+:Scope: translated strings
+:Check class: ``weblate.checks.chars.KabyleCharactersCheck``
+:Check identifier: ``kabyle-characters``
+:Flag to ignore: ``ignore-kabyle-characters``
+
+Checks that Kabyle translations use correct Kabyle letters and not similar
+Greek ones, which were often used before Kabyle characters were standardized in
+Unicode.
+
+
 .. _check-placeholders:
 
 Placeholders
 ~~~~~~~~~~~~
 
-:Summary: Translation is missing some placeholders
+:Summary: Translation is missing some placeholders.
 :Scope: translated strings
 :Check class: ``weblate.checks.placeholders.PlaceholderCheck``
 :Check identifier: ``placeholders``
@@ -1330,20 +1412,43 @@ You can also have case insensitive placeholders:
 
    :ref:`custom-checks`
 
+.. _check-prohibited-initial-character:
+
+Prohibited initial character
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 5.9
+
+:Summary: The string starts with a prohibited character in CSV.
+:Scope: glossary strings
+:Check class: ``weblate.checks.glossary.ProhibitedInitialCharacterCheck``
+:Check identifier: ``prohibited_initial_character``
+:Flag to ignore: ``ignore-prohibited-initial-character``
+
+The glossary is often shared as CSV and using some characters at the beginning is
+restricted by many applications as these can cause the text being evaluated as
+an expression. This also affects :ref:`glossary-mt` where many services use CSV
+for synchronizing glossaries and reject such strings.
+
 .. _check-punctuation-spacing:
 
 Punctuation spacing
 ~~~~~~~~~~~~~~~~~~~
 
-:Summary: Missing non breakable space before double punctuation sign
+:Summary: Missing non breakable space before double punctuation sign.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.PunctuationSpacingCheck``
 :Check identifier: ``punctuation_spacing``
 :Flag to ignore: ``ignore-punctuation-spacing``
 
+.. versionchanged:: 5.10
+
+   This check used to apply to Breton language as well, but it was limited to
+   French only.
+
 Checks that there is non breakable space before double punctuation sign
 (exclamation mark, question mark, semicolon and colon). This rule is used only
-in a few selected languages like French or Breton, where space before double
+in a few selected languages like French, where space before double
 punctuation sign is a typographic rule.
 
 .. seealso::
@@ -1356,12 +1461,16 @@ punctuation sign is a typographic rule.
 Regular expression
 ~~~~~~~~~~~~~~~~~~
 
-:Summary: Translation does not match regular expression
+:Summary: Translation does not match regular expression.
 :Scope: translated strings
 :Check class: ``weblate.checks.placeholders.RegexCheck``
 :Check identifier: ``regex``
 :Flag to enable: ``regex``
 :Flag to ignore: ``ignore-regex``
+
+.. versionchanged:: 5.10
+
+   Extended support for advanced regular expressions including Unicode codepoint properties.
 
 Translation does not match regular expression. The expression is either extracted from the
 translation file or defined manually using ``regex`` flag:
@@ -1370,6 +1479,40 @@ translation file or defined manually using ``regex`` flag:
 
    regex:^foo|bar$
 
+The matching also supports Unicode codepoint properties, including scripts and blocks:
+
+.. code-block:: text
+
+   regex:^[-_\p{L}\p{N}\p{sc=Deva}\p{sc=Thai}]{1,32}$
+
+.. seealso::
+
+   `regex documentation <https://github.com/mrabarnett/mrab-regex>`_
+
+.. _check-rst-syntax:
+
+reStructuredText syntax error
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 5.10
+
+:Summary: reStructuredText syntax error in the translation.
+:Scope: translated strings
+:Check class: ``weblate.checks.markup.RSTSyntaxCheck``
+:Check identifier: ``rst-syntax``
+:Flag to enable: ``rst-text``
+:Flag to ignore: ``ignore-rst-syntax``
+
+reStructuredText syntax error in the translation. Issues to look for:
+
+* Mismatched closing/opening tags.
+* Missing spaces or interpunction around the reference. The reStructuredText inline blocks need to be separated by non-word characters.
+* Using quotes instead of backticks.
+
+.. seealso::
+
+   `reStructuredText Primer`_,
+   :ref:`check-rst-references`
 
 .. _check-reused:
 
@@ -1392,7 +1535,7 @@ Such translations can be intentional, but can also confuse users.
 Same plurals
 ~~~~~~~~~~~~
 
-:Summary: Some plural forms are translated in the same way
+:Summary: Some plural forms are translated in the same way.
 :Scope: translated strings
 :Check class: ``weblate.checks.consistency.SamePluralsCheck``
 :Check identifier: ``same-plurals``
@@ -1406,7 +1549,7 @@ In most languages they have to be different.
 Starting newline
 ~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both start with a newline
+:Summary: Source and translation do not both start with a newline.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.BeginNewlineCheck``
 :Check identifier: ``begin_newline``
@@ -1424,7 +1567,7 @@ can lead to formatting problems when the translated text is put to use.
 Starting spaces
 ~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both start with same number of spaces
+:Summary: Source and translation do not both start with same number of spaces.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.BeginSpaceCheck``
 :Check identifier: ``begin_space``
@@ -1438,7 +1581,7 @@ important to keep.
 Trailing newline
 ~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both end with a newline
+:Summary: Source and translation do not both end with a newline.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EndNewlineCheck``
 :Check identifier: ``end_newline``
@@ -1456,7 +1599,7 @@ can lead to formatting problems when the translated text is put to use.
 Trailing space
 ~~~~~~~~~~~~~~
 
-:Summary: Source and translation do not both end with a space
+:Summary: Source and translation do not both end with a space.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.EndSpaceCheck``
 :Check identifier: ``end_space``
@@ -1472,24 +1615,24 @@ removing it might break layout.
 Unchanged translation
 ~~~~~~~~~~~~~~~~~~~~~
 
-:Summary: Source and translation are identical
+:Summary: Source and translation are identical.
 :Scope: translated strings
 :Check class: ``weblate.checks.same.SameCheck``
 :Check identifier: ``same``
 :Flag to ignore: ``ignore-same``
 
-Happens if the source and corresponding translation strings is identical, down to
-at least one of the plural forms. Some strings commonly found across all
-languages are ignored, and various markup is stripped. This reduces
-the number of false positives.
+Happens if the source and corresponding translation strings are identical, down
+to at least one of the plural forms. Some strings commonly found across all
+languages are ignored, and various markups are stripped. This reduces the
+number of false positives.
 
 This check can help find strings mistakenly untranslated.
 
-The default behavior of this check is to exclude words from the built-in
-blacklist from the checking. These are words which are frequently not being
+The default behavior of this check is to exclude words from the built-in terms
+list from the checking. These are words which are frequently not being
 translated. This is useful to avoid false positives on short strings, which
-consist only of single word which is same in several languages. This blacklist
-can be disabled by adding ``strict-same`` flag to string or component.
+consist only of a single word which is the same in several languages. This list
+can be disabled by adding ``strict-same`` flag to a string or component.
 
 .. versionchanged:: 4.17
 
@@ -1507,7 +1650,7 @@ can be disabled by adding ``strict-same`` flag to string or component.
 Unsafe HTML
 ~~~~~~~~~~~
 
-:Summary: The translation uses unsafe HTML markup
+:Summary: The translation uses unsafe HTML markup.
 :Scope: translated strings
 :Check class: ``weblate.checks.markup.SafeHTMLCheck``
 :Check identifier: ``safe-html``
@@ -1534,7 +1677,7 @@ autofixer which can automatically sanitize the markup.
 URL
 ~~~
 
-:Summary: The translation does not contain an URL
+:Summary: The translation does not contain an URL.
 :Scope: translated strings
 :Check class: ``weblate.checks.markup.URLCheck``
 :Check identifier: ``url``
@@ -1550,7 +1693,7 @@ valid URL.
 XML markup
 ~~~~~~~~~~
 
-:Summary: XML tags in translation do not match source
+:Summary: XML tags in translation do not match source.
 :Scope: translated strings
 :Check class: ``weblate.checks.markup.XMLTagsCheck``
 :Check identifier: ``xml-tags``
@@ -1574,7 +1717,7 @@ The check is automatically enabled for XML like strings. You might need to add
 XML syntax
 ~~~~~~~~~~
 
-:Summary: The translation is not valid XML
+:Summary: The translation is not valid XML.
 :Scope: translated strings
 :Check class: ``weblate.checks.markup.XMLValidityCheck``
 :Check identifier: ``xml-invalid``
@@ -1595,7 +1738,7 @@ The check is automatically enabled for XML like strings. You might need to add
 Zero-width space
 ~~~~~~~~~~~~~~~~
 
-:Summary: Translation contains extra zero-width space character
+:Summary: Translation contains extra zero-width space character.
 :Scope: translated strings
 :Check class: ``weblate.checks.chars.ZeroWidthSpaceCheck``
 :Check identifier: ``zero-width-space``
@@ -1622,7 +1765,7 @@ Source checks can help developers improve the quality of source strings.
 Ellipsis
 ~~~~~~~~
 
-:Summary: The string uses three dots (...) instead of an ellipsis character (…)
+:Summary: The string uses three dots (``...``) instead of an ellipsis character (``…``).
 :Scope: source strings
 :Check class: ``weblate.checks.source.EllipsisCheck``
 :Check identifier: ``ellipsis``
@@ -1644,7 +1787,7 @@ Fluent source inner HTML
 
 .. versionadded:: 5.0
 
-:Summary: Fluent source should be valid inner HTML
+:Summary: Fluent source should be valid inner HTML.
 :Scope: source strings
 :Check class: ``weblate.checks.fluent.inner_html.FluentSourceInnerHTMLCheck``
 :Check identifier: ``fluent-source-inner-html``
@@ -1777,7 +1920,7 @@ Fluent source syntax
 
 .. versionadded:: 5.0
 
-:Summary: Fluent syntax error in source
+:Summary: Fluent syntax error in the source.
 :Scope: source strings
 :Check class: ``weblate.checks.fluent.syntax.FluentSourceSyntaxCheck``
 :Check identifier: ``fluent-source-syntax``
@@ -1818,7 +1961,7 @@ Long untranslated
 
 .. versionadded:: 4.1
 
-:Summary: The string has not been translated for a long time
+:Summary: The string has not been translated for a long time.
 :Scope: source strings
 :Check class: ``weblate.checks.source.LongUntranslatedCheck``
 :Check identifier: ``long_untranslated``
@@ -1833,7 +1976,7 @@ source string making it hard to translate.
 Multiple failing checks
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-:Summary: The translations in several languages have failing checks
+:Summary: The translations in several languages have failing checks.
 :Scope: source strings
 :Check class: ``weblate.checks.source.MultipleFailingCheck``
 :Check identifier: ``multiple_failures``
@@ -1854,7 +1997,7 @@ Multiple unnamed variables
 
 .. versionadded:: 4.1
 
-:Summary: There are multiple unnamed variables in the string, making it impossible for translators to reorder them
+:Summary: There are multiple unnamed variables in the string, making it impossible for translators to reorder them.
 :Scope: source strings
 :Check class: ``weblate.checks.format.MultipleUnnamedFormatsCheck``
 :Check identifier: ``unnamed_format``
@@ -1865,25 +2008,12 @@ translators to reorder them.
 
 Consider using named variables instead to allow translators to reorder them.
 
-.. _check-prohibited-initial-character:
-
-Prohibited initial character
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. versionadded:: 5.9
-
-:Summary: The string starts with a prohibited character in CSV
-:Scope: source strings
-:Check class: ``weblate.checks.glossary.ProhibitedInitialCharacterCheck``
-:Check identifier: ``prohibited_initial_character``
-:Flag to ignore: ``ignore-prohibited-initial-character``
-
 .. _check-optional-plural:
 
 Unpluralised
 ~~~~~~~~~~~~
 
-:Summary: The string is used as plural, but not using plural forms
+:Summary: The string is used as plural, but not using plural forms.
 :Scope: source strings
 :Check class: ``weblate.checks.source.OptionalPluralCheck``
 :Check identifier: ``optional_plural``
@@ -1900,3 +2030,6 @@ For example with Gettext in Python it could be:
     from gettext import ngettext
 
     print(ngettext("Selected %d file", "Selected %d files", files) % files)
+
+
+.. _reStructuredText Primer: https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html

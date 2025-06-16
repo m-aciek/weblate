@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import timedelta
 from email.mime.image import MIMEImage
 from smtplib import SMTP, SMTPConnectError
@@ -17,12 +16,14 @@ from celery.schedules import crontab
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives, get_connection
 from django.core.mail.backends.smtp import EmailBackend as DjangoSMTPEmailBackend
+from django.db import transaction
 from django.utils.timezone import now
 from social_django.models import Code, Partial
 
 from weblate.utils.celery import app
 from weblate.utils.errors import report_error
 from weblate.utils.html import HTML2Text
+from weblate.utils.icons import load_icon
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -78,7 +79,7 @@ def cleanup_auditlog() -> None:
 
 
 class NotificationFactory:
-    def __init__(self):
+    def __init__(self) -> None:
         self.perm_cache: dict[int, set[int]] = {}
         self.outgoing: list[OutgoingEmail] = []
         self.instances: dict[str, Notification] = {}
@@ -105,18 +106,20 @@ class NotificationFactory:
 
 
 @app.task(trail=False)
+@transaction.atomic
 def notify_changes(change_ids: list[int]) -> None:
     from weblate.trans.models import Change
 
-    changes = Change.objects.prefetch_for_get().filter(pk__in=change_ids)
+    changes = Change.objects.prefetch_for_render().filter(pk__in=change_ids)
     factory = NotificationFactory()
 
-    for change in changes:
+    for change in changes.iterator(chunk_size=200):
         for notification in factory.for_action(change.action):
             notification.notify_immediate(change)
         factory.send_queued()
 
 
+@transaction.atomic
 def notify_digest(method) -> None:
     from weblate.accounts.notifications import NOTIFICATIONS
 
@@ -144,7 +147,7 @@ def notify_monthly() -> None:
 
 
 @app.task(trail=False)
-def notify_auditlog(log_id, email) -> None:
+def notify_auditlog(log_id: int, email: str) -> None:
     from weblate.accounts.models import AuditLog
     from weblate.accounts.notifications import send_notification_email
 
@@ -156,7 +159,7 @@ def notify_auditlog(log_id, email) -> None:
         context={
             "message": audit.get_message,
             "extra_message": audit.get_extra_message,
-            "address": audit.address,
+            "address": audit.shortened_address,
             "user_agent": audit.user_agent,
         },
         info=f"{audit.activity} from {audit.address}",
@@ -200,9 +203,7 @@ def send_mails(mails: list[OutgoingEmail]) -> None:
     images = []
     with sentry_sdk.start_span(op="email.images"):
         for name in ("email-logo.png", "email-logo-footer.png"):
-            filename = os.path.join(settings.STATIC_ROOT, name)
-            with open(filename, "rb") as handle:
-                image = MIMEImage(handle.read())
+            image = MIMEImage(load_icon(name, auto_prefix=False))
             image.add_header("Content-ID", f"<{name}@cid.weblate.org>")
             image.add_header("Content-Disposition", "inline", filename=name)
             images.append(image)

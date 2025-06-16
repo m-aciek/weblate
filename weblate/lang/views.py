@@ -25,6 +25,7 @@ from weblate.utils.stats import (
     ProjectLanguageStats,
     prefetch_stats,
 )
+from weblate.utils.views import get_paginator
 
 if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest
@@ -78,13 +79,18 @@ def show_language(request: AuthenticatedHttpRequest, lang):
             return redirect("languages")
 
     last_changes = Change.objects.last_changes(user, language=obj).recent()
-    projects = user.allowed_projects
     projects = prefetch_project_flags(
-        prefetch_stats(projects.filter(component__translation__language=obj).distinct())
+        get_paginator(
+            request,
+            user.allowed_projects.filter(
+                component__translation__language=obj
+            ).distinct(),
+            stats=True,
+        )
     )
-    projects = [ProjectLanguage(project, obj) for project in projects]
+    project_languages = [ProjectLanguage(project, obj) for project in projects]
 
-    ProjectLanguageStats.prefetch_many([project.stats for project in projects])
+    ProjectLanguageStats.prefetch_many([project.stats for project in project_languages])
 
     return render(
         request,
@@ -93,8 +99,9 @@ def show_language(request: AuthenticatedHttpRequest, lang):
             "allow_index": True,
             "object": obj,
             "last_changes": last_changes,
-            "search_form": SearchForm(user, language=obj),
+            "search_form": SearchForm(request=request, language=obj, obj=obj),
             "projects": projects,
+            "project_languages": project_languages,
         },
     )
 

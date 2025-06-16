@@ -75,8 +75,8 @@ Username of users that are not signed in.
 AUDITLOG_EXPIRY
 ---------------
 
-How many days Weblate should keep audit logs (which contain info about account
-activity).
+The maximum number of days Weblate will keep audit logs containing information
+about the account activity.
 
 Defaults to 180 days.
 
@@ -183,20 +183,7 @@ List of automatic fixes to apply when saving a string.
     Provide a fully-qualified path to the Python class that implements the
     autofixer interface.
 
-Available fixes:
-
-``weblate.trans.autofixes.whitespace.SameBookendingWhitespace``
-    Matches whitespace at the start and end of the string to the source.
-``weblate.trans.autofixes.chars.ReplaceTrailingDotsWithEllipsis``
-    Replaces trailing dots (...) if the source string has a corresponding ellipsis (…).
-``weblate.trans.autofixes.chars.RemoveZeroSpace``
-    Removes zero-width space characters if the source does not contain any.
-``weblate.trans.autofixes.chars.RemoveControlChars``
-    Removes control characters if the source does not contain any.
-``weblate.trans.autofixes.chars.DevanagariDanda``
-    Replaces sentence full stop in Bangla by the devanagari danda character.
-``weblate.trans.autofixes.html.BleachHTML``
-    Removes unsafe HTML markup from strings flagged as ``safe-html`` (see :ref:`check-safe-html`).
+Available fixes are described at :ref:`autofix`.
 
 You can select which ones to use:
 
@@ -339,7 +326,7 @@ All these default to empty list.
 .. seealso::
 
     :ref:`csp`,
-    `Content Security Policy (CSP) <https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP>`_
+    `Content Security Policy (CSP) <https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP>`_
 
 .. setting:: CHECK_LIST
 
@@ -824,7 +811,7 @@ List for credentials for GitLab servers.
 .. seealso::
 
    :ref:`vcs-gitlab`,
-   `GitLab: Personal access token <https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html>`_
+   `GitLab: Personal access token <https://docs.gitlab.com/user/profile/personal_access_tokens/>`_
 
 .. setting:: GITHUB_CREDENTIALS
 
@@ -887,7 +874,7 @@ List for credentials for Bitbucket Data Center.
 
 .. seealso::
 
-   :ref:`vcs-bitbucket-server`,
+   :ref:`vcs-bitbucket-data-center`,
    `Bitbucket: HTTP access token <https://confluence.atlassian.com/bitbucketserver/http-access-tokens-939515499.html>`_
 
 .. setting:: BITBUCKETCLOUD_CREDENTIALS
@@ -927,7 +914,7 @@ Additional settings not described here can be found at :ref:`settings-credential
 .. seealso::
 
    :ref:`vcs-bitbucket-cloud`,
-   `Create an App password <https://support.atlassian.com/bitbucket-cloud/docs/create-an-app-password/>`,
+   `Create an App password <https://support.atlassian.com/bitbucket-cloud/docs/create-an-app-password/>`_,
    `App password permissions <https://support.atlassian.com/bitbucket-cloud/docs/app-password-permissions/>`_
 
 .. setting:: AZURE_DEVOPS_CREDENTIALS
@@ -977,7 +964,12 @@ Additional settings not described here can be found at :ref:`settings-credential
 GOOGLE_ANALYTICS_ID
 -------------------
 
-Google Analytics ID to turn on monitoring of Weblate using Google Analytics.
+Google Analytics ID to turn on monitoring of Weblate using Google Universal Analytics.
+
+.. note::
+
+   Google Analytics 4 integration is currently not available for Weblate,
+   please see https://github.com/WeblateOrg/weblate/issues/14015.
 
 .. setting:: HIDE_REPO_CREDENTIALS
 
@@ -1014,6 +1006,20 @@ does not prevent an attacker from figuring out version by probing behavior.
 
     This is turned off by default.
 
+.. setting:: INTERLEDGER_PAYMENT_BUILTIN
+
+INTERLEDGER_PAYMENT_BUILTIN
+---------------------------
+
+.. versionadded:: 5.11
+
+Toggles built-in Interledger Payment Pointer for funding Weblate.
+
+.. seealso::
+
+   :setting:`INTERLEDGER_PAYMENT_POINTERS`
+
+
 .. setting:: INTERLEDGER_PAYMENT_POINTERS
 
 INTERLEDGER_PAYMENT_POINTERS
@@ -1030,7 +1036,13 @@ Please check <https://webmonetization.org/> for more details.
 
 .. hint::
 
-   The default value lets users fund Weblate itself.
+   A pointer to fund Weblate itself is automatically added unless turned off
+   by :setting:`INTERLEDGER_PAYMENT_BUILTIN`.
+
+
+.. seealso::
+
+   :setting:`INTERLEDGER_PAYMENT_BUILTIN`
 
 .. setting:: IP_BEHIND_REVERSE_PROXY
 
@@ -1096,7 +1108,7 @@ which address from the header is used as client IP address here.
 
    Setting this affects the security of your installation. You should only
    configure it to use trusted proxies for determining the IP address.
-   Please check <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For#security_and_privacy_concerns> for more details.
+   Please check <https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For#security_and_privacy_concerns> for more details.
 
 Defaults to -1.
 
@@ -1370,6 +1382,23 @@ List for credentials for Pagure servers.
    :ref:`vcs-pagure`,
    `Pagure API <https://pagure.io/api/0/>`_
 
+.. setting:: PASSWORD_MINIMAL_STRENGTH
+
+PASSWORD_MINIMAL_STRENGTH
+-------------------------
+
+.. versionadded:: 5.10.2
+
+Minimal password score as evaluated by the `zxcvbn
+<https://github.com/dwolfhub/zxcvbn-python>`_ password strength estimator.
+
+Defaults to 0, which means strength checking is disabled.
+
+.. seealso::
+
+   :ref:`password-authentication`,
+   :envvar:`WEBLATE_MIN_PASSWORD_SCORE`
+
 
 .. setting:: PRIVACY_URL
 
@@ -1516,7 +1545,7 @@ PROJECT_WEB_RESTRICT_RE
 
 .. versionadded:: 4.15
 
-Defines a regular expression to restrict project websites. Any matching URLs will be rejected.
+Defines a regular expression to limit what can be entered as :ref:`project-web`. Any matching URLs will be rejected.
 
 .. seealso::
 
@@ -1642,7 +1671,7 @@ Whether registration of new accounts is currently permitted.
 Defaults to enabled.
 
 This setting affects built-in authentication by e-mail address or through the
-Python Social Auth (you can whitelist certain back-ends using
+Python Social Auth (you can allow certain back-ends using
 :setting:`REGISTRATION_ALLOW_BACKENDS`).
 
 .. note::
@@ -1729,7 +1758,7 @@ Configure sampling rate for performance monitoring. Set to 1 to trace all events
 
 .. seealso::
 
-   `Sentry Performance Monitoring <https://docs.sentry.io/product/performance/>`_
+   `Sentry Performance Monitoring <https://docs.sentry.io/product/sentry-basics/performance-monitoring/>`_
 
 .. setting:: SENTRY_SEND_PII
 

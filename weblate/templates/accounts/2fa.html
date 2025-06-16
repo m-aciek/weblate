@@ -1,39 +1,37 @@
 {% extends "base.html" %}
 
-{% load i18n %}
-{% load translations %}
-{% load authnames %}
-{% load crispy_forms_tags %}
+{% load authnames crispy_forms_tags i18n translations %}
 
 {% block breadcrumbs %}
   <li>
-    <a href="{% url 'login' %}">{% trans "Sign in" %}</a>
+    <a href="{% url 'login' %}">{% translate "Sign in" %}</a>
   </li>
-{% endblock %}
-
+{% endblock breadcrumbs %}
 
 {% block content %}
 
   <div class="container">
 
-    <h2>{{ site_title }}</h2>
+    <h2>{% include "accounts/snippets/login-title.html" %}</h2>
     <div class="row">
 
       <div class="col-sm-6 col-sm-push-6">
 
-        <h4>{% trans "Second factor sign-in" %}</h4>
+        <h4>{% translate "Second factor sign-in" %}</h4>
         <div class="panel panel-default">
           <div class="panel-body">
             <form method="post">
 
-              <p class="help-block">{% trans "Please complete your sign-in using second factor credential." %}</p>
+              <p class="help-block">{% translate "Please complete your sign-in using second factor credential." %}</p>
 
               {% crispy form %}
 
               <input type="hidden" name="next" value="{{ next }}" />
 
               {% if form.show_submit %}
-                <input type="submit" value="{% trans "Sign in" %}" class="btn btn-primary btn-full" />
+                <input type="submit"
+                       value="{% translate "Sign in" %}"
+                       class="btn btn-primary btn-full" />
               {% endif %}
             </form>
 
@@ -52,8 +50,8 @@
         </div>
       </div>
 
-      <div class="col-sm-6 col-sm-pull-6">{% include "snippets/login-info.html" %}</div>
+      <div class="col-sm-6 col-sm-pull-6">{% include "accounts/snippets/login-info.html" %}</div>
     </div>
   </div>
 
-{% endblock %}
+{% endblock content %}

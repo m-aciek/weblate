@@ -7,7 +7,11 @@ import operator
 
 from django.utils.functional import cached_property
 
-from .base import DownloadTranslations, GlossaryMachineTranslationMixin
+from .base import (
+    DownloadTranslations,
+    GlossaryDoesNotExistError,
+    GlossaryMachineTranslationMixin,
+)
 from .forms import AWSMachineryForm
 
 
@@ -56,8 +60,8 @@ class AWSTranslation(GlossaryMachineTranslationMixin):
 
     def download_translations(
         self,
-        source,
-        language,
+        source_language,
+        target_language,
         text: str,
         unit,
         user,
@@ -65,11 +69,13 @@ class AWSTranslation(GlossaryMachineTranslationMixin):
     ) -> DownloadTranslations:
         params = {
             "Text": text,
-            "SourceLanguageCode": source,
-            "TargetLanguageCode": language,
+            "SourceLanguageCode": source_language,
+            "TargetLanguageCode": target_language,
         }
 
-        glossary_name: str | None = self.get_glossary_id(source, language, unit)
+        glossary_name: str | None = self.get_glossary_id(
+            source_language, target_language, unit
+        )
         if glossary_name:
             params["TerminologyNames"] = [glossary_name]
 
@@ -87,6 +93,8 @@ class AWSTranslation(GlossaryMachineTranslationMixin):
         """Create glossary in the service."""
         # add header with source and target languages
         tsv = f"{source_language}\t{target_language}\n{tsv}"
+
+        # AWS gracefully handles duplicate entries by merging them
         self.client.import_terminology(
             Name=name,
             MergeStrategy="OVERWRITE",
@@ -115,7 +123,10 @@ class AWSTranslation(GlossaryMachineTranslationMixin):
 
     def delete_glossary(self, glossary_id: str) -> None:
         """Delete a single glossary from service."""
-        self.client.delete_terminology(Name=glossary_id)
+        try:
+            self.client.delete_terminology(Name=glossary_id)
+        except self.client.exceptions.ResourceNotFoundException as error:
+            raise GlossaryDoesNotExistError from error
 
     def delete_oldest_glossary(self) -> None:
         """Delete oldest glossary if any."""

@@ -13,10 +13,10 @@ from django.db.models import Q, Sum
 from django.utils.translation import gettext
 
 from weblate.checks.models import CHECKS, Check
+from weblate.trans.actions import ActionEvents
 from weblate.trans.autofixes import fix_target
 from weblate.trans.exceptions import SuggestionSimilarToTranslationError
 from weblate.trans.mixins import UserDisplayMixin
-from weblate.trans.models.change import Change
 from weblate.trans.util import join_plural, split_plural
 from weblate.utils import messages
 from weblate.utils.antispam import report_spam
@@ -25,40 +25,41 @@ from weblate.utils.state import STATE_TRANSLATED
 
 if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest, User
+    from weblate.trans.models.unit import Unit
 
 
 class SuggestionManager(models.Manager["Suggestion"]):
     def add(
         self,
-        unit,
+        unit: Unit,
         target: list[str],
-        request,
+        request: AuthenticatedHttpRequest | None,
         vote: bool = False,
-        user=None,
+        user: User | None = None,
         raise_exception: bool = True,
     ):
         """Create new suggestion for this unit."""
         from weblate.auth.models import get_anonymous
 
         # Apply fixups
-        fixups = []
+        fixups: list[str] = []
         if not unit.translation.is_template:
             target, fixups = fix_target(target, unit)
 
-        target = join_plural(target)
+        target_merged = join_plural(target)
 
         if user is None:
             user = request.user if request else get_anonymous()
 
-        if unit.translated and unit.target == target:
+        if unit.translated and unit.target == target_merged:
             if raise_exception:
                 raise SuggestionSimilarToTranslationError
             return False
 
-        same_suggestions = self.filter(target=target, unit=unit)
+        same_suggestions = self.filter(target=target_merged, unit=unit)
         # Do not rely on the SQL as MySQL compares strings case insensitive
         for same in same_suggestions:
-            if same.target == target:
+            if same.target == target_merged:
                 if same.user == user or not vote:
                     return False
                 same.add_vote(request, Vote.POSITIVE)
@@ -66,7 +67,7 @@ class SuggestionManager(models.Manager["Suggestion"]):
 
         # Create the suggestion
         suggestion = self.create(
-            target=target,
+            target=target_merged,
             unit=unit,
             user=user,
             userdetails={
@@ -78,10 +79,10 @@ class SuggestionManager(models.Manager["Suggestion"]):
 
         # Record in change
         change = unit.generate_change(
-            user, user, Change.ACTION_SUGGESTION, check_new=False, save=False
+            user, user, ActionEvents.SUGGESTION, check_new=False, save=False
         )
         change.suggestion = suggestion
-        change.target = target
+        change.target = target_merged
         change.save()
 
         # Add unit vote
@@ -149,7 +150,10 @@ class Suggestion(models.Model, UserDisplayMixin):
 
     @transaction.atomic
     def accept(
-        self, request, permission="suggestion.accept", state=STATE_TRANSLATED
+        self,
+        request: AuthenticatedHttpRequest,
+        permission: str = "suggestion.accept",
+        state=STATE_TRANSLATED,
     ) -> None:
         if not request.user.has_perm(permission, self.unit):
             messages.error(request, gettext("Could not accept suggestion!"))
@@ -166,7 +170,7 @@ class Suggestion(models.Model, UserDisplayMixin):
                 split_plural(self.target),
                 state,
                 author=author,
-                change_action=Change.ACTION_ACCEPT,
+                change_action=ActionEvents.ACCEPT,
             )
 
         # Delete the suggestion
@@ -174,8 +178,8 @@ class Suggestion(models.Model, UserDisplayMixin):
 
     def delete_log(
         self,
-        user,
-        change=Change.ACTION_SUGGESTION_DELETE,
+        user: User,
+        change=ActionEvents.SUGGESTION_DELETE,
         is_spam: bool = False,
         rejection_reason: str = "",
         old: str = "",
@@ -204,7 +208,7 @@ class Suggestion(models.Model, UserDisplayMixin):
         """Return number of votes."""
         return self.vote_set.aggregate(Sum("value"))["value__sum"] or 0
 
-    def add_vote(self, request: AuthenticatedHttpRequest, value) -> None:
+    def add_vote(self, request: AuthenticatedHttpRequest | None, value: int) -> None:
         """Add (or updates) vote for a suggestion."""
         if request is None or not request.user.is_authenticated:
             return

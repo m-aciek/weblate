@@ -17,12 +17,12 @@ The authentication attempts are subject to :ref:`rate-limit`.
 Authentication backends
 -----------------------
 
-The built-in solution of Django is used for authentication,
-including various social options to do so.
-Using it means you can import the user database of other Django-based projects
-(see :ref:`pootle-migration`).
+Weblate relies on Django for the authentication. This includes built-in
+password-based authentication, social authentication, and third-party
+authentication backends for Django.
 
-Django can additionally be set up to authenticate against other means too.
+Using Django's built-in authentication means you can import the user database
+of other Django-based projects (see :ref:`pootle-migration`).
 
 .. seealso::
 
@@ -315,7 +315,7 @@ The redirect URL is ``https://WEBLATE SERVER/accounts/complete/gitea/``.
 
    The configuration above also works with Forgejo;
    for an example of production deployment with Forgejo,
-   see `Codeberg Translate <http://translate.codeberg.org>`_
+   see `Codeberg Translate <https://translate.codeberg.org>`_.
 
 .. seealso::
 
@@ -455,25 +455,20 @@ Password authentication
 -----------------------
 
 The default :file:`settings.py` comes with a reasonable set of
-:setting:`django:AUTH_PASSWORD_VALIDATORS`:
-
-* Passwords can't be too similar to your other personal info.
-* Passwords must contain at least 10 characters.
-* Passwords can't be a commonly used password.
-* Passwords can't be entirely numeric.
-* Passwords can't consist of a single character or only whitespace.
-* Passwords can't match a password you have used in the past.
-
-You can customize this setting to match your password policy.
+:setting:`django:AUTH_PASSWORD_VALIDATORS` that ensures that weak passwords are
+not allowed. You can customize this setting to match your password policy.
 
 Additionally you can also install
-`django-zxcvbn-password <https://pypi.org/project/django-zxcvbn-password/>`_
+`django-zxcvbn-password-validator <https://github.com/Pierre-Sassoulas/django-zxcvbn-password-validator>`_
 which gives quite realistic estimates of password difficulty and allows rejecting
 passwords below a certain threshold.
 
 .. seealso::
 
-   :envvar:`WEBLATE_MIN_PASSWORD_SCORE`
+   :setting:`PASSWORD_MINIMAL_STRENGTH`,
+   :envvar:`WEBLATE_MIN_PASSWORD_SCORE`,
+   :doc:`/security/passwords`
+
 
 .. _saml-auth:
 
@@ -481,6 +476,12 @@ SAML authentication
 -------------------
 
 .. versionadded:: 4.1.1
+
+.. versionchanged:: 5.12
+
+   The dependencies for SAML authentication are no longer included in the
+   default ``all`` extras. You need to include ``saml`` while installing the
+   Weblate package using pip (``uv pip install Weblate[all,saml]``).
 
 Please follow the Python Social Auth instructions for configuration. Notable differences:
 
@@ -692,7 +693,7 @@ Active Directory integration
 CAS authentication
 ------------------
 
-CAS authentication can be achieved using a package such as `django-cas-ng`.
+CAS authentication can be achieved using a package such as `Django CAS NG`_.
 
 Step one is disclosing the e-mail field of the user via CAS. This has to be
 configured on the CAS server itself, and requires you run at least CAS v2 since
@@ -700,7 +701,7 @@ CAS v1 doesn't support attributes at all.
 
 Step two is updating Weblate to use your CAS server and attributes.
 
-To install `django-cas-ng`:
+To install `Django CAS NG`_:
 
 .. code-block:: sh
 
@@ -745,9 +746,7 @@ cause problems, therefore it's suggested to put it:
         user.email = attributes["email"]
         user.save()
 
-.. seealso::
-
-    `Django CAS NG <https://github.com/django-cas-ng/django-cas-ng>`_
+.. _Django CAS NG: https://github.com/django-cas-ng/django-cas-ng
 
 Configuring third party Django authentication
 ---------------------------------------------
@@ -797,9 +796,9 @@ Security keys (WebAuthn)
 
    Security keys are WebAuthn credentials that can only be used as a second factor of authentication, and these only validate user presence.
 
-Authenticator app (TOTP)
+Authenticator apps (TOTP)
    Authenticator apps and browser extensions like Aegis, Bitwarden, Google Authenticator,
-   1Password, Authy, Microsoft Authenticator, etc. generate one-time passwords
+   1Password, Authy, Microsoft Authenticator, etc. generate time-based one-time passwords
    that are used as a second factor to verify your identity when prompted
    during sign-in.
 

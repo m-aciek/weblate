@@ -8,6 +8,7 @@ import warnings
 from gettext import c2py
 from io import StringIO
 from itertools import chain
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.test import TestCase
@@ -16,15 +17,17 @@ from django.urls import reverse
 from django.utils.translation import activate
 from weblate_language_data.aliases import ALIASES
 from weblate_language_data.languages import LANGUAGES
-from weblate_language_data.plurals import CLDRPLURALS, EXTRAPLURALS
+from weblate_language_data.plurals import CLDRPLURALS, EXTRAPLURALS, QTPLURALS
+from weblate_language_data.population import POPULATION
 
 from weblate.lang import data
 from weblate.lang.models import Language, Plural, PluralMapper, get_plural_type
 from weblate.trans.models import Unit
 from weblate.trans.tests.test_models import BaseTestCase
-from weblate.trans.tests.test_views import FixtureTestCase
+from weblate.trans.tests.test_views import FixtureTestCase, ViewTestCase
 from weblate.trans.util import join_plural
 from weblate.utils.db import using_postgresql
+from weblate.utils.state import STATE_TRANSLATED
 
 TEST_LANGUAGES = (
     ("cs_CZ", "cs", "ltr", "(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2", "Czech", False),
@@ -292,7 +295,7 @@ class BasicLanguagesTest(TestCase):
 
 
 class LanguageTestSequenceMeta(type):
-    def __new__(mcs, name, bases, dict):  # noqa: N804, A002
+    def __new__(mcs, name, bases, dict):  # noqa: A002
         def gen_test(original, expected, direction, plural, name, create):
             def test(self) -> None:
                 self.run_create(original, expected, direction, plural, name, create)
@@ -362,6 +365,11 @@ class LanguagesTest(BaseTestCase, metaclass=LanguageTestSequenceMeta):
         self.run_create(
             "czech", "cs", "ltr", "(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2", "Czech", False
         )
+
+    def test_dan(self) -> None:
+        """Test that aliases have higher priority than language names."""
+        language = Language.objects.auto_get_or_create("dan")
+        self.assertEqual(language.code, "da")
 
     def test_chinese_fuzzy_get(self) -> None:
         """Test handling of manually created zh_CN language."""
@@ -711,6 +719,26 @@ class PluralMapperTestCase(FixtureTestCase):
             ["Orangutan has %d banana.\n", "", "Orangutan has %d bananas.\n"],
         )
 
+    def test_czech_german(self) -> None:
+        german = Language.objects.get(code="de")
+        czech = Language.objects.get(code="cs")
+        mapper = PluralMapper(czech.plural, german.plural)
+        self.assertEqual(mapper.target_map, ((0, None), (-1, None)))
+        unit = Unit.objects.get(
+            translation__language=czech, id_hash=2097404709965985808
+        )
+        unit.translate(None, ["one\n", "few\n", "other\n"], STATE_TRANSLATED)
+        unit = Unit.objects.get(
+            translation__language=german, id_hash=2097404709965985808
+        )
+        others = mapper.get_other_units([unit], czech)
+        self.assertIn(2097404709965985808, others)
+        other = others[2097404709965985808]
+        self.assertEqual(
+            mapper.map(unit, other),
+            ["one\n", "other\n"],
+        )
+
     def test_russian_english(self) -> None:
         russian = Language.objects.get(code="ru")
         english = Language.objects.get(code="en")
@@ -784,3 +812,104 @@ class PluralMapperTestCase(FixtureTestCase):
             )
         with override_settings(SIMPLIFY_LANGUAGES=False):
             self.assertEqual(arabic.get_aliases_names(), ["ar_ar", "ara", "arb"])
+
+
+class LanguageAliasesChangeTest(ViewTestCase):
+    """Simulate language aliases change in weblate_language_data and test results."""
+
+    old_code = "it"
+    new_code = "it_XX"
+
+    def setUp(self) -> None:
+        """Set up test environment."""
+        super().setUp()
+
+        def update_codes_in_dict(data: dict) -> dict:
+            """Replace old_code key with new_code in a language dict."""
+            copy = data.copy()
+            value = copy.pop(self.old_code)
+            copy[self.new_code] = value
+            return copy
+
+        def update_code_in_tuple(data: tuple) -> tuple:
+            """Replace old_code with new_code in a language tuple."""
+            new_data = []
+            for item in data:
+                if item[0] == self.old_code:
+                    item = (self.new_code, *item[1:])
+                new_data.append(item)
+            return tuple(new_data)
+
+        updated_aliases = ALIASES | {self.old_code: self.new_code}
+
+        patch_values = [
+            (
+                "weblate_language_data.languages.LANGUAGES",
+                update_code_in_tuple(LANGUAGES),
+            ),
+            (
+                "weblate_language_data.population.POPULATION",
+                update_codes_in_dict(POPULATION),
+            ),
+            ("weblate.lang.models.EXTRAPLURALS", update_code_in_tuple(EXTRAPLURALS)),
+            ("weblate.lang.models.QTPLURALS", update_code_in_tuple(QTPLURALS)),
+            ("weblate.lang.models.CLDRPLURALS", update_code_in_tuple(CLDRPLURALS)),
+            ("weblate_language_data.aliases.ALIASES", updated_aliases),
+            ("weblate.lang.data.ALIASES", updated_aliases),
+            ("weblate.lang.models.ALIASES", updated_aliases),
+        ]
+
+        for target, new_value in patch_values:
+            patcher = patch(target, new_value)
+            patcher.start()
+
+    def tearDown(self) -> None:
+        """Tear down after tests."""
+        super().tearDown()
+        patch.stopall()
+
+    def do_alias_language_update_and_check(
+        self, new_language_created: bool = True, old_language_deleted: bool = True
+    ) -> None:
+        """Test alias language update."""
+
+        def component_language_codes():
+            """Get current language codes for component translations."""
+            return [
+                translation.language.code
+                for translation in self.component.translation_set.all()
+            ]
+
+        self.assertIn(self.old_code, component_language_codes())
+        logs: list[str] = []
+        Language.objects.setup(update=True, logger=logs.append)
+        if new_language_created:
+            self.assertIn(f"Created language {self.new_code}", logs)
+        else:
+            self.assertNotIn(f"Created language {self.new_code}", logs)
+
+        self.assertIn(self.new_code, component_language_codes())
+        if old_language_deleted:
+            # alias language should be deleted if blank
+            self.assertFalse(Language.objects.filter(code=self.old_code).exists())
+        else:
+            self.assertIn(self.old_code, component_language_codes())
+            self.assertTrue(Language.objects.filter(code=self.old_code).exists())
+
+    def test_update_language_alias(self) -> None:
+        """Test simple alias change."""
+        self.do_alias_language_update_and_check()
+
+    def test_update_language_alias_no_deletion(self) -> None:
+        """Test alias change with no deletion of old language."""
+        self.component.new_lang = "add"
+        self.component.new_base = "po/hello.pot"
+        self.component.save()
+        it_xx = Language.objects.create(code="it_XX", name="New Italian")
+        it_xx.plural_set.create(
+            number=0,
+            formula="0",
+            source=Plural.SOURCE_DEFAULT,
+        )
+        self.component.add_new_language(it_xx, None)
+        self.do_alias_language_update_and_check(False, False)

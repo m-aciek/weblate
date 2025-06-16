@@ -167,7 +167,7 @@ class BillingTest(BaseTestCase):
         # Validation of existing
         self.invoice.clean()
 
-    @override_settings(INVOICE_PATH=TEST_DATA)
+    @override_settings(INVOICE_PATH_LEGACY=TEST_DATA)
     def test_download(self) -> None:
         self.add_project()
         # Unauthenticated
@@ -426,9 +426,7 @@ class HostingTest(RepoTestCase):
 
         # Verify message
         self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(
-            mail.outbox[0].subject, "[Weblate] Hosting request for Test (Libre, trial)"
-        )
+        self.assertEqual(mail.outbox[0].subject, "[Weblate] Hosting request for Test")
         self.assertIn("testuser", mail.outbox[0].body)
         self.assertEqual(mail.outbox[0].to, ["noreply@example.com"])
 

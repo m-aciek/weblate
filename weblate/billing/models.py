@@ -8,6 +8,7 @@ import os.path
 from contextlib import suppress
 from datetime import timedelta
 from functools import partial
+from pathlib import Path
 
 from appconf import AppConf
 from django.conf import settings
@@ -27,6 +28,7 @@ from django.utils.translation import gettext, gettext_lazy, ngettext
 from weblate.auth.models import User
 from weblate.trans.models import Alert, Component, Project, Translation
 from weblate.utils.decorators import disable_for_loaddata
+from weblate.utils.html import format_html_join_comma, list_to_tuples
 from weblate.utils.stats import prefetch_stats
 
 
@@ -126,6 +128,16 @@ class BillingQuerySet(models.QuerySet["Billing"]):
             .order_by("state")
         )
 
+    def for_user_within_limits(self, user: User):
+        """Return billings for the given user which are valid and within project creation limits."""
+        billings = self.get_valid().for_user(user).prefetch()
+        pks = set()
+        for billing in billings:
+            limit = billing.plan.display_limit_projects
+            if limit == 0 or billing.count_projects < limit:
+                pks.add(billing.pk)
+        return Billing.objects.filter(pk__in=pks).prefetch()
+
     def prefetch(self):
         return self.prefetch_related(
             "owners",
@@ -205,7 +217,9 @@ class Billing(models.Model):
         if projects:
             base = projects
         elif owners:
-            base = ", ".join(x.get_visible_name() for x in owners)
+            base = format_html_join_comma(
+                "{}", list_to_tuples(x.get_visible_name() for x in owners)
+            )
         else:
             base = "Unassigned"
         trial = ", trial" if self.is_trial else ""
@@ -248,7 +262,7 @@ class Billing(models.Model):
 
     @cached_property
     def projects_display(self):
-        return ", ".join(str(x) for x in self.all_projects)
+        return format_html_join_comma("{}", list_to_tuples(self.all_projects))
 
     @property
     def is_trial(self):
@@ -560,6 +574,7 @@ class Invoice(models.Model):
     # Payment detailed information, used for integration
     # with payment processor
     payment = models.JSONField(editable=False, default=dict)
+    created = models.DateTimeField(auto_now_add=True)
 
     objects = InvoiceQuerySet.as_manager()
 
@@ -571,18 +586,35 @@ class Invoice(models.Model):
         return f"{self.start} - {self.end}: {self.billing if self.billing_id else None}"
 
     @cached_property
+    def is_legacy(self):
+        return len(self.ref) <= 6
+
+    @cached_property
     def filename(self) -> str | None:
-        if self.ref:
+        if not self.ref:
+            return None
+        if self.is_legacy:
             return f"{self.ref}.pdf"
-        return None
+        return f"Weblate_Invoice_{self.ref}.pdf"
 
     @cached_property
-    def full_filename(self) -> str:
-        return os.path.join(settings.INVOICE_PATH, self.filename or "")
+    def full_filename(self) -> str | None:
+        if not self.ref:
+            return None
+        if self.is_legacy:
+            invoice_path = Path(settings.INVOICE_PATH_LEGACY)
+        else:
+            invoice_path = (
+                Path(settings.INVOICE_PATH)
+                / f"{self.created.year}"
+                / f"{self.created.month:02d}"
+            )
+        full_path = invoice_path / (self.filename or "")
+        return full_path.as_posix()
 
     @cached_property
-    def filename_valid(self):
-        return os.path.exists(self.full_filename)
+    def filename_valid(self) -> bool:
+        return self.full_filename and os.path.exists(self.full_filename)
 
     def clean(self) -> None:
         if self.end is None or self.start is None:
@@ -605,7 +637,7 @@ class Invoice(models.Model):
 
         if overlapping.exists():
             msg = "Overlapping invoices exist: {}".format(
-                ", ".join(str(x) for x in overlapping)
+                format_html_join_comma("{}", list_to_tuples(overlapping))
             )
             raise ValidationError(msg)
 
@@ -652,7 +684,11 @@ def delete_project_bill(
     from weblate.billing.tasks import billing_check
 
     if isinstance(instance, Translation):
-        instance = instance.component
+        try:
+            instance = instance.component
+        except Component.DoesNotExist:
+            # Happens during component removal
+            return
     if isinstance(instance, Component):
         instance = instance.project
     # This is collected in record_project_bill

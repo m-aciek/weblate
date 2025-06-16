@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from django.core.exceptions import PermissionDenied
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
-from django.utils.translation import gettext, ngettext
+from django.utils.translation import gettext
 from django.views.decorators.http import require_POST
 
 from weblate.formats.models import EXPORTERS
@@ -25,6 +25,7 @@ from weblate.trans.models import (
 from weblate.utils import messages
 from weblate.utils.data import data_dir
 from weblate.utils.errors import report_error
+from weblate.utils.files import get_upload_message
 from weblate.utils.stats import CategoryLanguage, ProjectLanguage
 from weblate.utils.views import (
     download_translation_file,
@@ -46,7 +47,7 @@ def download_multi(
 ):
     filenames = set()
     components = set()
-    extra = {}
+    extra: dict[str, str | bytes] = {}
 
     for obj in commit_objs:
         try:
@@ -138,7 +139,9 @@ def download(request: AuthenticatedHttpRequest, path):
         components = obj.project.component_set.filter_access(request.user)
         return download_multi(
             request,
-            Translation.objects.filter(component__in=components, language=obj.language),
+            Translation.objects.filter(
+                component__in=components, language=obj.language
+            ).prefetch(),
             [obj.project],
             request.GET.get("format"),
             name=f"{obj.project.slug}-{obj.language.code}",
@@ -147,7 +150,7 @@ def download(request: AuthenticatedHttpRequest, path):
         components = obj.component_set.filter_access(request.user)
         return download_multi(
             request,
-            Translation.objects.filter(component__in=components),
+            Translation.objects.filter(component__in=components).prefetch(),
             [obj],
             request.GET.get("format"),
             name=obj.slug,
@@ -158,7 +161,9 @@ def download(request: AuthenticatedHttpRequest, path):
         ).filter(pk__in=obj.category.all_component_ids)
         return download_multi(
             request,
-            Translation.objects.filter(component__in=components, language=obj.language),
+            Translation.objects.filter(
+                component__in=components, language=obj.language
+            ).prefetch(),
             [obj.category.project],
             request.GET.get("format"),
             name=f"{obj.category.slug}-{obj.language.code}",
@@ -169,7 +174,7 @@ def download(request: AuthenticatedHttpRequest, path):
         )
         return download_multi(
             request,
-            Translation.objects.filter(component__in=components),
+            Translation.objects.filter(component__in=components).prefetch(),
             [obj.project],
             request.GET.get("format"),
             name=obj.slug,
@@ -177,7 +182,7 @@ def download(request: AuthenticatedHttpRequest, path):
     if isinstance(obj, Component):
         return download_multi(
             request,
-            obj.translation_set.all(),
+            obj.translation_set.prefetch_meta(),
             [obj],
             request.GET.get("format"),
             name=obj.full_slug.replace("/", "-"),
@@ -231,16 +236,7 @@ def upload(request: AuthenticatedHttpRequest, path):
             method=form.cleaned_data["method"],
             fuzzy=form.cleaned_data["fuzzy"],
         )
-        if total == 0:
-            message = gettext("No strings were imported from the uploaded file.")
-        else:
-            message = ngettext(
-                "Processed {0} string from the uploaded files "
-                "(skipped: {1}, not found: {2}, updated: {3}).",
-                "Processed {0} strings from the uploaded files "
-                "(skipped: {1}, not found: {2}, updated: {3}).",
-                total,
-            ).format(total, skipped, not_found, accepted)
+        message = get_upload_message(not_found, skipped, accepted, total)
         if accepted == 0:
             messages.warning(request, message)
         else:

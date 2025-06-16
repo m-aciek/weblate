@@ -9,8 +9,10 @@ functionality, and verify that it works.
 Continuous integration
 ++++++++++++++++++++++
 
-Current test results can be found on `GitHub Actions`_ and coverage is reported
-on `Codecov`_.
+Weblate relies on `GitHub Actions`_ to run tests, build documentation, code
+linting, and other tasks to ensure code quality.
+
+`Codecov`_ collects the code coverage information from the tests that were run.
 
 .. _GitHub Actions: https://github.com/WeblateOrg/weblate/actions
 .. _Codecov: https://app.codecov.io/gh/WeblateOrg/weblate/
@@ -43,13 +45,14 @@ The simple execution can look like:
 
 .. _local-tests:
 
-Local testing
-+++++++++++++
+Local testing of Weblate
++++++++++++++++++++++++++
 
 Before running test, please ensure test dependencies are installed. This can be done by ``pip install -e .[test]``.
 
 Testing using pytest
 ~~~~~~~~~~~~~~~~~~~~
+
 Prior to running tests you should collect static files as some tests rely on them being present:
 
 .. code-block:: sh
@@ -67,15 +70,6 @@ Running an individual test file:
 .. code-block:: sh
 
    pytest weblate/utils/tests/test_search.py
-
-Testing using Django
-~~~~~~~~~~~~~~~~~~~~
-
-Alternatively, Django built-in tests should also work:
-
-.. code-block:: sh
-
-    DJANGO_SETTINGS_MODULE=weblate.settings_test ./manage.py test
 
 .. hint::
 
@@ -97,18 +91,6 @@ The :file:`weblate/settings_test.py` is used in CI environment as well (see
    export CI_DB_PORT=60000
    export DJANGO_SETTINGS_MODULE=weblate.settings_test
 
-Prior to running tests you should collect static files as some tests rely on them being present:
-
-.. code-block:: sh
-
-    DJANGO_SETTINGS_MODULE=weblate.settings_test ./manage.py collectstatic
-
-You can also specify individual tests to run:
-
-.. code-block:: sh
-
-    DJANGO_SETTINGS_MODULE=weblate.settings_test ./manage.py test weblate.gitexport
-
 .. hint::
 
    The tests can also be executed inside developer docker container, see :ref:`dev-docker`.
@@ -117,3 +99,19 @@ You can also specify individual tests to run:
 
     See :doc:`django:topics/testing/index` for more info on running and
     writing tests for Django.
+
+
+Local testing of Weblate modules
+--------------------------------
+
+The tests are executed using :program:`py.test`. First you need to install test requirements:
+
+.. code-block:: sh
+
+   uv pip install -e '.[dev]'
+
+You can then execute the testsuite in the repository checkout:
+
+.. code-block:: sh
+
+   py.test

@@ -11,6 +11,7 @@ from weblate.utils.html import (
     HTML2Text,
     HTMLSanitizer,
     extract_html_tags,
+    list_to_tuples,
     mail_quote_value,
 )
 
@@ -112,20 +113,34 @@ text text text text text
 
 
 class MailQuoteTestCase(SimpleTestCase):
-    def test_plain(self):
+    def test_plain(self) -> None:
         self.assertEqual(
             mail_quote_value("text"),
             "text",
         )
 
-    def test_dot(self):
+    def test_dot(self) -> None:
         self.assertEqual(
             mail_quote_value("example.com"),
             "example<span>.</span>com",
         )
 
-    def test_url(self):
+    def test_url(self) -> None:
         self.assertEqual(
             mail_quote_value("https://test.example.com"),
             "https<span>:</span>//test<span>.</span>example<span>.</span>com",
         )
+
+
+class TypeConversionTestCase(SimpleTestCase):
+    def test_list_to_tuples(self) -> None:
+        self.assertEqual(
+            list_to_tuples(["string1", "string2", "string3"]),
+            [("string1",), ("string2",), ("string3",)],
+        )
+
+    def test_empty_list(self) -> None:
+        self.assertEqual(list_to_tuples([]), [])
+
+    def test_single_element_list(self) -> None:
+        self.assertEqual(list_to_tuples(["only_one"]), [("only_one",)])

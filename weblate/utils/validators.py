@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 import sys
@@ -15,6 +17,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
 
+from disposable_email_domains import blocklist
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import EmailValidator as EmailValidatorDjango
@@ -111,7 +114,7 @@ def validate_bitmap(value) -> None:
     except Exception as exc:
         # Pillow doesn't recognize it as an image.
         raise ValidationError(
-            gettext("Invalid image!"), code="invalid_image"
+            gettext("The uploaded image was invalid."), code="invalid_image"
         ).with_traceback(sys.exc_info()[2]) from exc
     if hasattr(value.file, "seek") and callable(value.file.seek):
         value.file.seek(0)
@@ -189,11 +192,14 @@ class EmailValidator(EmailValidatorDjango):
         if not re.match(settings.REGISTRATION_EMAIL_MATCH, value):
             raise ValidationError(gettext("This e-mail address is disallowed."))
         try:
-            Address(addr_spec=value)
+            address = Address(addr_spec=value)
         except HeaderDefect as error:
             raise ValidationError(
                 gettext("Invalid e-mail address: {}").format(error)
             ) from error
+
+        if address.domain in blocklist:
+            raise ValidationError(gettext("Disposable e-mail domains are disallowed."))
 
 
 validate_email = EmailValidator()
@@ -303,6 +309,14 @@ def validate_project_web(value) -> None:
             pass
         else:
             raise ValidationError(gettext("This URL is prohibited"))
+
+
+def validate_base64_encoded_string(value: str) -> None:
+    """Validate that the given string is a valid base64 encoded string."""
+    try:
+        base64.b64decode(value)
+    except binascii.Error as error:
+        raise ValidationError(gettext("Invalid base64 encoded string")) from error
 
 
 class WeblateURLValidator(URLValidator):

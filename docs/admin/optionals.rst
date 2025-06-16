@@ -121,8 +121,8 @@ for the project in case he has access to more of them.
 
 .. _legal:
 
-Legal
------
+Legal module
+------------
 
 This is used on `Hosted Weblate <https://weblate.org/hosting/>`_ to provide required
 legal documents. It comes provided with blank documents, and you are expected to fill out the
@@ -236,18 +236,18 @@ Signing Git commits with GnuPG
 
 All commits can be signed by the GnuPG key of the Weblate instance.
 
-1. Turn on :setting:`WEBLATE_GPG_IDENTITY`. (Weblate will generate a GnuPG
-key when needed and will use it to sign all translation commits.)
+* Turn on :setting:`WEBLATE_GPG_IDENTITY`. (Weblate will generate a GnuPG
+  key when needed and will use it to sign all translation commits.)
 
-This feature needs GnuPG 2.1 or newer installed.
+  This feature needs GnuPG 2.1 or newer installed.
 
-You can find the key in the :setting:`DATA_DIR` and the public key is shown on
-the "About" page:
+  You can find the key in the :setting:`DATA_DIR` and the public key is shown
+  on the "About" page:
 
-.. image:: /screenshots/about-gpg.webp
+  .. image:: /screenshots/about-gpg.webp
 
-2. Alternatively you can also import existing keys into Weblate, just set
-``HOME=$DATA_DIR/home`` when invoking gpg.
+* Alternatively you can also import existing keys into Weblate, just set
+  ``HOME=$DATA_DIR/home`` when invoking gpg.
 
 .. hint::
 
@@ -288,7 +288,9 @@ The following operations are subject to rate limiting:
 +-----------------------------------+--------------------+------------------+------------------+----------------+
 | Sending message to admins         | ``MESSAGE``        | 2                | 300              | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
-| Password authentication on sign in| ``LOGIN``          | 5                | 300              | 600            |
+| Password authentication on sign-in| ``LOGIN``          | 5                | 300              | 600            |
++-----------------------------------+--------------------+------------------+------------------+----------------+
+| Second-factor authentication      | ``SECOND_FACTOR``  | 5                | 300              | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
 | Sitewide search                   | ``SEARCH``         | 6                | 60               | 60             |
 +-----------------------------------+--------------------+------------------+------------------+----------------+

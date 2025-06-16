@@ -32,7 +32,7 @@ class Command(BaseCommand):
     help = "List installed checks"
 
     def flush_lines(self, lines: list[str]) -> None:
-        self.stdout.writelines(lines)
+        self.stdout.write("\n".join(lines))
         lines.clear()
 
     def handle(self, *args, **options) -> None:
@@ -54,12 +54,14 @@ class Command(BaseCommand):
             else:
                 lines.append("~" * len(name))
             lines.extend(("\n", f":Summary: {escape(check.description)}"))
-            if check.target:
+            if check.glossary:
+                lines.append(":Scope: glossary strings")
+            elif check.target:
                 if check.ignore_untranslated:
                     lines.append(":Scope: translated strings")
                 else:
                     lines.append(":Scope: all strings")
-            if check.source:
+            elif check.source:
                 lines.append(":Scope: source strings")
             lines.extend(
                 (
@@ -68,7 +70,11 @@ class Command(BaseCommand):
                 )
             )
             if check.default_disabled:
-                lines.append(f":Flag to enable: ``{check.enable_string}``")
+                flags = ", ".join(
+                    f"``{flag}``"
+                    for flag in [check.enable_string, *check.extra_enable_strings]
+                )
+                lines.append(f":Flag to enable: {flags}")
             lines.extend((f":Flag to ignore: ``{check.ignore_string}``", "\n"))
 
             self.flush_lines(lines)
@@ -88,5 +94,5 @@ class Command(BaseCommand):
                 )
 
         self.stdout.write("\n")
-        self.stdout.writelines(enables)
-        self.stdout.writelines(ignores)
+        self.stdout.write("\n".join(enables))
+        self.stdout.write("\n".join(ignores))

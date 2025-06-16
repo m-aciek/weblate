@@ -22,7 +22,8 @@ from weblate.auth.models import AuthenticatedHttpRequest
 from weblate.logger import LOGGER
 from weblate.screenshots.forms import ScreenshotEditForm, ScreenshotForm, SearchForm
 from weblate.screenshots.models import Screenshot
-from weblate.trans.models import Change, Component, Unit
+from weblate.trans.actions import ActionEvents
+from weblate.trans.models import Component, Unit
 from weblate.utils import messages
 from weblate.utils.data import data_dir
 from weblate.utils.lock import WeblateLock
@@ -156,10 +157,10 @@ def ensure_tesseract_language(lang: str) -> None:
     # Operate with a lock held to avoid concurrent downloads
     with (
         WeblateLock(
-            data_dir("home"),
-            "screenshots:tesseract-download",
-            0,
-            "screenshots:tesseract-download",
+            lock_path=data_dir("home"),
+            scope="screenshots:tesseract-download",
+            key=0,
+            slug="screenshots:tesseract-download",
             timeout=600,
         ),
         sentry_sdk.start_span(op="ocr.models"),
@@ -231,7 +232,7 @@ class ScreenshotList(PathViewMixin, ListView):
             )
             request.user.profile.increase_count("uploaded")
             obj.change_set.create(
-                action=Change.ACTION_SCREENSHOT_ADDED,
+                action=ActionEvents.SCREENSHOT_ADDED,
                 user=request.user,
                 target=obj.name,
             )
@@ -285,7 +286,7 @@ class ScreenshotDetail(DetailView):
                     obj.user = request.user
                     request.user.profile.increase_count("uploaded")
                     obj.change_set.create(
-                        action=Change.ACTION_SCREENSHOT_UPLOADED,
+                        action=ActionEvents.SCREENSHOT_UPLOADED,
                         user=request.user,
                         target=obj.name,
                     )

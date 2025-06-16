@@ -73,10 +73,10 @@ The user profile contains your preferences. Name and e-mail address is used in V
     them available too.
 
 Languages
-+++++++++
+---------
 
 Interface language
-------------------
+++++++++++++++++++
 
 Choose the language you want to display the UI in.
 
@@ -101,6 +101,13 @@ An example can be seen in the following image, where
 the Hebrew language is shown as secondarily:
 
 .. image:: /screenshots/secondary-language.webp
+
+.. hint::
+
+   This can be also configured in the project
+   (:ref:`project-secondary_language`) or component
+   (:ref:`component-secondary_language`). In that case it can be used for
+   :ref:`secondary-language-workflow`.
 
 .. _profile-preferences:
 

@@ -25,6 +25,7 @@ from social_django.utils import load_strategy
 from weblate.auth.models import AuthenticatedHttpRequest, get_auth_backends
 from weblate.lang.models import Language
 from weblate.logger import LOGGER
+from weblate.trans.actions import ActionEvents
 from weblate.trans.models import Change, Component, Project
 from weblate.utils.errors import report_error
 from weblate.utils.site import get_site_url
@@ -182,7 +183,7 @@ class RedirectMiddleware:
                     # Look for renamed components in a project
                     component = (
                         project.change_set.filter(
-                            action=Change.ACTION_RENAME_COMPONENT, old=slug
+                            action=ActionEvents.RENAME_COMPONENT, old=slug
                         )
                         .order()[0]
                         .component
@@ -415,7 +416,7 @@ class CSPBuilder:
         # Third-party login flow extensions
         if self.request.resolver_match and (
             self.request.resolver_match.view_name.startswith("social:")
-            or self.request.resolver_match.view_name in {"login", "profile"}
+            or self.request.resolver_match.view_name in {"login", "profile", "register"}
         ):
             social_strategy: WeblateStrategy
             if hasattr(self.request, "social_strategy"):
@@ -449,7 +450,9 @@ class CSPBuilder:
                     ]
 
                 for url in urls:
-                    self.add_csp_host(url, "form-action")
+                    domain = self.add_csp_host(url, "form-action")
+                    if domain.endswith(".amazonaws.com"):
+                        self.directives["form-action"].add("*.awsapps.com")
 
 
 class SecurityMiddleware:

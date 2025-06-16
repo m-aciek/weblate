@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 import sentry_sdk
 from appconf import AppConf
@@ -17,8 +17,11 @@ from django.dispatch import receiver
 from django.urls import reverse
 from django.utils.functional import cached_property
 
+from weblate.logger import LOGGER
+from weblate.trans.actions import ActionEvents
 from weblate.trans.models import Alert, Change, Component, Project, Translation, Unit
 from weblate.trans.signals import (
+    change_bulk_create,
     component_post_update,
     store_post_load,
     translation_post_add,
@@ -39,6 +42,8 @@ from .events import AddonEvent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+
+    from django_stubs_ext import StrOrPromise
 
     from weblate.auth.models import User
 
@@ -92,6 +97,10 @@ class Addon(models.Model):
     def __str__(self) -> str:
         return f"{self.addon.verbose}: {self.project or self.component or 'site-wide'}"
 
+    def __init__(self, *args, acting_user: User | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.acting_user = acting_user
+
     def save(
         self, force_insert=False, force_update=False, using=None, update_fields=None
     ):
@@ -110,19 +119,19 @@ class Addon(models.Model):
             original_component = self.component
             self.component = self.component.linked_component
 
-        # Clear add-on cache
+        # Store history (if not updating state only)
+        if update_fields != ["state"]:
+            self.store_change(
+                ActionEvents.ADDON_CREATE
+                if not self.pk or force_insert
+                else ActionEvents.ADDON_CHANGE
+            )
+
+        # Clear add-on cache, needs to be after creating Change
         if self.component:
             self.component.drop_addons_cache()
         if original_component:
             original_component.drop_addons_cache()
-
-        # Store history (if not updating state only)
-        if update_fields != ["state"]:
-            self.store_change(
-                Change.ACTION_ADDON_CREATE
-                if not self.pk or force_insert
-                else Change.ACTION_ADDON_CHANGE
-            )
 
         return super().save(
             force_insert=force_insert,
@@ -133,10 +142,6 @@ class Addon(models.Model):
 
     def get_absolute_url(self) -> str:
         return reverse("addon-detail", kwargs={"pk": self.pk})
-
-    def __init__(self, *args, acting_user: User | None = None, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.acting_user = acting_user
 
     def store_change(self, action) -> None:
         Change.objects.create(
@@ -163,7 +168,7 @@ class Addon(models.Model):
 
     def delete(self, using=None, keep_parents=False):
         # Store history
-        self.store_change(Change.ACTION_ADDON_REMOVE)
+        self.store_change(ActionEvents.ADDON_REMOVE)
         # Delete any addon alerts
         if self.addon.alert:
             if self.component:
@@ -177,6 +182,8 @@ class Addon(models.Model):
                 Alert.objects.filter(name=self.addon.alert).delete()
 
         result = super().delete(using=using, keep_parents=keep_parents)
+        if self.component:
+            self.component.drop_addons_cache()
         # Trigger post uninstall action
         self.addon.post_uninstall()
         return result
@@ -253,6 +260,8 @@ class AddonsConf(AppConf):
         "weblate.addons.resx.ResxUpdateAddon",
         "weblate.addons.yaml.YAMLCustomizeAddon",
         "weblate.addons.cdn.CDNJSAddon",
+        "weblate.addons.webhooks.WebhookAddon",
+        "weblate.addons.webhooks.SlackWebhookAddon",
     )
 
     LOCALIZE_CDN_URL = None
@@ -265,34 +274,67 @@ class AddonsConf(AppConf):
         prefix = ""
 
 
+# Events to exclude from logging
+NO_LOG_EVENTS = {
+    AddonEvent.EVENT_UNIT_PRE_CREATE,
+    AddonEvent.EVENT_UNIT_POST_SAVE,
+    AddonEvent.EVENT_STORE_POST_LOAD,
+}
+
+# Repository scoped events
+REPO_EVENTS = {
+    AddonEvent.EVENT_PRE_UPDATE,
+    AddonEvent.EVENT_POST_UPDATE,
+    AddonEvent.EVENT_PRE_PUSH,
+    AddonEvent.EVENT_POST_PUSH,
+    AddonEvent.EVENT_COMPONENT_UPDATE,
+}
+
+
 def execute_addon_event(
     addon: Addon,
-    component: Component,
-    scope: Translation | Component,
+    component: Component | None,
+    scope: Translation | Component | Project | None,
     event: AddonEvent,
     method: str | Callable[[Addon, Component], None],
     args: tuple | None = None,
 ) -> None:
     # Trigger repository scoped add-ons only on the main component
-    if addon.repo_scope and component.linked_component:
+    if (
+        addon.repo_scope
+        and component
+        and component.linked_component
+        and event in REPO_EVENTS
+    ):
         return
+
+    def addon_logger(
+        level: Literal["debug", "error"], message: str, *args: StrOrPromise
+    ):
+        if scope is None:
+            if level == "debug":
+                LOGGER.debug(message, *args)
+            else:
+                LOGGER.error(message, *args)
+        elif level == "debug":
+            scope.log_debug(message, *args)
+        else:
+            scope.log_error(message, *args)
 
     # Log logging result and error flag for add-on activity log
     log_result = None
     error_occurred = False
 
-    # Events to exclude from logging
-    exclude_from_logging = {
-        AddonEvent.EVENT_UNIT_PRE_CREATE,
-        AddonEvent.EVENT_UNIT_POST_SAVE,
-        AddonEvent.EVENT_STORE_POST_LOAD,
-    }
-
     with transaction.atomic():
-        scope.log_debug("running %s add-on: %s", event.label, addon.name)
+        addon_logger("debug", "running %s add-on: %s", event.label, addon.name)
         # Skip unsupported components silently
-        if not addon.component and not addon.addon.can_install(component, None):
-            scope.log_debug(
+        if (
+            component
+            and not addon.component
+            and not addon.addon.can_install(component, None)
+        ):
+            addon_logger(
+                "debug",
                 "Skipping incompatible %s add-on: %s for component: %s",
                 event.label,
                 addon.name,
@@ -305,6 +347,9 @@ def execute_addon_event(
             with sentry_sdk.start_span(op=f"addon.{event.name}", name=addon.name):
                 if isinstance(method, str):
                     log_result = getattr(addon.addon, method)(*args)
+                elif component is None:
+                    log_result = "Missing component parameter!"
+                    error_occurred = True
                 else:
                     # Callback is used in tasks
                     log_result = method(addon, component)
@@ -314,16 +359,22 @@ def execute_addon_event(
             # Log failure
             error_occurred = True
             log_result = str(error)
-            scope.log_error("failed %s add-on: %s: %s", event.label, addon.name, error)
-            report_error(f"add-on {addon.name} failed", project=component.project)
+            addon_logger(
+                "error", "failed %s add-on: %s: %s", event.label, addon.name, str(error)
+            )
+            report_error(
+                f"add-on {addon.name} failed",
+                project=component.project if component else None,
+            )
             # Uninstall no longer compatible add-ons
-            if not addon.addon.can_install(component, None):
+            if component and not addon.addon.can_install(component, None):
                 addon.disable()
+                component.drop_addons_cache()
         else:
-            scope.log_debug("completed %s add-on: %s", event.label, addon.name)
+            addon_logger("debug", "completed %s add-on: %s", event.label, addon.name)
         finally:
             # Check if add-on is still installed and log activity
-            if event not in exclude_from_logging and addon.pk is not None:
+            if event not in NO_LOG_EVENTS and addon.pk is not None:
                 AddonActivityLog.objects.create(
                     addon=addon,
                     component=component,
@@ -338,22 +389,10 @@ def handle_addon_event(
     method: str,
     args: tuple,
     *,
-    component: Component,
-    translation: None = None,
-    addon_queryset: AddonQuerySet | None = None,
-    auto_scope: bool = False,
-) -> None: ...
-
-
-@overload
-def handle_addon_event(
-    event: AddonEvent,
-    method: str,
-    args: tuple,
-    *,
-    component: None = None,
-    translation: Translation,
-    addon_queryset: AddonQuerySet | None = None,
+    project: Project | None = None,
+    component: Component | None = None,
+    translation: Translation | None = None,
+    addon_queryset: AddonQuerySet | list[Addon] | None = None,
     auto_scope: bool = False,
 ) -> None: ...
 
@@ -364,6 +403,7 @@ def handle_addon_event(
     method: Callable[[Addon, Component], None],
     args: None = None,
     *,
+    project: None = None,
     component: None = None,
     translation: None = None,
     addon_queryset: AddonQuerySet | None,
@@ -371,34 +411,34 @@ def handle_addon_event(
 ) -> None: ...
 
 
+@transaction.atomic
 def handle_addon_event(
     event,
     method,
     args=None,
     *,
+    project=None,
     component=None,
     translation=None,
     addon_queryset=None,
     auto_scope=False,
 ) -> None:
     # Scope is used for logging
-    scope = translation or component
+    scope: Translation | Component | Project | None = (
+        translation or component or project
+    )
 
     # Shortcuts for frequently used variables
     if component is None and translation is not None:
         component = translation.component
 
-    if component is None and not auto_scope:
-        msg = "Missing event scope!"
-        raise ValueError(msg)
-
-    # EVENT_DAILY uses custom queryset because it is not triggered from the
-    # object scope
+    # EVENT_DAILY and EVENT_CHANGE use custom queryset because it is not
+    # triggered from the object scope
     if addon_queryset is None:
         addon_queryset = Addon.objects.filter_event(component, event)
 
     for addon in addon_queryset:
-        if scope is not None:
+        if not auto_scope:
             execute_addon_event(addon, component, scope, event, method, args)
         else:
             components: Iterable[Component]
@@ -534,9 +574,39 @@ def store_post_load_handler(sender, translation: Translation, store, **kwargs) -
     )
 
 
+@receiver(post_save, sender=Change)
+@disable_for_loaddata
+def change_post_save_handler(sender, instance: Change, created, **kwargs) -> None:
+    """Handle Change post save signal."""
+    if created:  # ignore Change updates, they should not be updated anyway
+        bulk_change_create_handler(sender, [instance])
+
+
+@receiver(change_bulk_create)
+@disable_for_loaddata
+def bulk_change_create_handler(sender, instances: list[Change], **kwargs) -> None:
+    """Handle Change bulk create signal."""
+    from weblate.addons.tasks import addon_change
+
+    # Filter out events that have a subscriber
+    # It currently also includes all project and site-wide events as there is currently
+    # no effective way to filter and these are not that frequent.
+    filtered = [
+        change.pk
+        for change in instances
+        if change.component is None
+        or AddonEvent.EVENT_CHANGE in change.component.addons_cache
+    ]
+
+    if filtered:
+        addon_change.delay_on_commit(filtered)
+
+
 class AddonActivityLog(models.Model):
     addon = models.ForeignKey(Addon, on_delete=models.deletion.CASCADE)
-    component = models.ForeignKey(Component, on_delete=models.deletion.CASCADE)
+    component = models.ForeignKey(
+        Component, on_delete=models.deletion.CASCADE, null=True
+    )
     event = models.IntegerField(choices=AddonEvent.choices)
     created = models.DateTimeField(auto_now_add=True)
     details = models.JSONField(default=dict)
@@ -548,3 +618,6 @@ class AddonActivityLog(models.Model):
 
     def __str__(self) -> str:
         return f"{self.addon}: {self.get_event_display()} at {self.created}"
+
+    def get_details_display(self) -> str:
+        return self.addon.addon.render_activity_log(self)

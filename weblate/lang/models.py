@@ -8,12 +8,13 @@ import re
 from collections import defaultdict
 from gettext import c2py
 from itertools import chain
-from operator import itemgetter
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
 from appconf import AppConf
 from django.conf import settings
+from django.contrib.admin.utils import NestedObjects
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import models, transaction
 from django.db.models import Exists, OuterRef, Q
 from django.db.utils import OperationalError
@@ -23,6 +24,7 @@ from django.utils.html import format_html
 from django.utils.translation import gettext, gettext_lazy, pgettext_lazy
 from django.utils.translation.trans_real import parse_accept_lang_header
 from weblate_language_data.aliases import ALIASES
+from weblate_language_data.case_insensitive import CASE_INSENSITIVE_LANGS
 from weblate_language_data.countries import DEFAULT_LANGS
 from weblate_language_data.plurals import CLDRPLURALS, EXTRAPLURALS, QTPLURALS
 from weblate_language_data.rtl import RTL_LANGS
@@ -35,13 +37,17 @@ from weblate.logger import LOGGER
 from weblate.trans.defines import LANGUAGE_CODE_LENGTH, LANGUAGE_NAME_LENGTH
 from weblate.trans.mixins import CacheKeyMixin
 from weblate.trans.util import sort_objects, sort_unicode
+from weblate.utils.html import format_html_join_comma, list_to_tuples
+from weblate.utils.state import STATE_TRANSLATED
 from weblate.utils.validators import validate_plural_formula
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
 
-    from weblate.auth.models import AuthenticatedHttpRequest
-    from weblate.trans.models import Unit
+    from django_stubs_ext import StrOrPromise
+
+    from weblate.auth.models import AuthenticatedHttpRequest, User
+    from weblate.trans.models.unit import Unit, UnitQuerySet
 
 PLURAL_RE = re.compile(
     r"\s*nplurals\s*=\s*([0-9]+)\s*;\s*plural\s*=\s*([()n0-9!=|&<>+*/%\s?:-]+)"
@@ -51,6 +57,7 @@ PLURAL_TITLE = """
 """
 COPY_RE = re.compile(r"\([0-9]+\)")
 KNOWN_SUFFIXES = {"hant", "hans", "latn", "cyrl", "shaw"}
+GENERATED_SUFFIX = "(generated)"
 
 
 def get_plural_type(base_code, plural_formula):
@@ -248,8 +255,6 @@ class LanguageQuerySet(models.QuerySet):
             Q(code__iexact=code.replace("-", "_")),
             # Replace plus with underscore (for things as zh+Hant+HK on Android)
             Q(code__iexact=code.replace("+", "_")),
-            # Try using name
-            Q(name__iexact=code) & Q(code__in=data.NO_CODE_LANGUAGES),
         ]
 
         # Country codes used without underscore (ptbr insteat of pt_BR)
@@ -304,6 +309,11 @@ class LanguageQuerySet(models.QuerySet):
             if ret is not None:
                 return ret
 
+        # Try using name
+        ret = self.try_get(Q(name__iexact=code) & Q(code__in=data.NO_CODE_LANGUAGES))
+        if ret is not None:
+            return ret
+
         return newcode
 
     def auto_get_or_create(
@@ -335,7 +345,7 @@ class LanguageQuerySet(models.QuerySet):
         It is based on code and best guess of parameters.
         """
         # Create standard language
-        name = f"{code} (generated)"
+        name = f"{code} {GENERATED_SUFFIX}"
         if create:
             lang = self.get_or_create(code=code, defaults={"name": name})[0]
         else:
@@ -400,16 +410,19 @@ class LanguageQuerySet(models.QuerySet):
         cache[code] = language
         return language
 
-    def as_choices(self, use_code: bool = True):
+    def as_choices(self, use_code: bool = True, user: User | None = None):
+        if user is not None:
+            key = user.profile.get_translation_orderer(request=None)
+        else:
+            key = str
+
+        languages = sort_unicode(self, key)
         return (
-            item[:2]
-            for item in sort_unicode(
-                (
-                    (code if use_code else pk, f"{gettext(name)} ({code})", name)
-                    for pk, name, code in self.values_list("pk", "name", "code")
-                ),
-                itemgetter(2),
+            (
+                language.code if use_code else language.pk,
+                f"{gettext(language.name)} ({language.code})",
             )
+            for language in languages
         )
 
     def get(self, *args, **kwargs):
@@ -449,6 +462,10 @@ class LanguageQuerySet(models.QuerySet):
         return self.prefetch_related("plural_set")
 
 
+def dummy_logger(message: str) -> None:
+    return
+
+
 class LanguageManager(models.Manager.from_queryset(LanguageQuerySet)):
     use_in_migrations = True
 
@@ -461,7 +478,12 @@ class LanguageManager(models.Manager.from_queryset(LanguageQuerySet)):
         """Return English language object."""
         return self.get(code=settings.DEFAULT_LANGUAGE, skip_cache=True)
 
-    def setup(self, update, logger=lambda x: x) -> None:  # noqa: C901
+    def setup(  # noqa: C901
+        self,
+        *,
+        update: bool,
+        logger: Callable[[str], None] | None = None,
+    ) -> None:
         """
         Create basic set of languages.
 
@@ -469,6 +491,9 @@ class LanguageManager(models.Manager.from_queryset(LanguageQuerySet)):
         """
         from weblate_language_data.languages import LANGUAGES
         from weblate_language_data.population import POPULATION
+
+        if logger is None:
+            logger = dummy_logger
 
         # Invalidate cache, we might change languages
         self.flush_object_cache()
@@ -588,7 +613,79 @@ class LanguageManager(models.Manager.from_queryset(LanguageQuerySet)):
                     zero_plural.number = cldr_plural.number + 1
                     zero_plural.save(update_fields=["formula", "number"])
 
+        # Migrate content from aliased language to alias target
+        weblate_data_lang_codes = {lang[0] for lang in LANGUAGES}
+        for code, language in languages.items():
+            if (code in ALIASES) and (code not in weblate_data_lang_codes):
+                alias_target = Language.objects.get(code=ALIASES[code])
+                self.move_language(language, alias_target, logger)
+
+                # delete alias language if blank
+                if language.has_no_children():
+                    logger(f"Removing {language}")
+                    language.delete()
+                else:
+                    logger(
+                        f"Skipping removal of {language} due to existing child objects"
+                    )
+
         self._fixup_plural_types(logger)
+
+    def move_language(
+        self,
+        source: Language,
+        target: Language,
+        logger: Callable[[str], None] | None = None,
+    ) -> None:
+        """Migrate all content from one language to anoother."""
+        if logger is None:
+            logger = dummy_logger
+        for translation in source.translation_set.iterator():
+            other = translation.component.translation_set.filter(language=target)
+            if other.exists():
+                logger(f"Already exists: {translation}")
+                continue
+            translation.language = target
+            translation.save()
+        source.announcement_set.update(language=target)
+
+        for profile in source.profile_set.iterator():
+            profile.languages.remove(source)
+            profile.languages.add(target)
+
+        for profile in source.secondary_profile_set.iterator():
+            profile.secondary_languages.remove(source)
+            profile.secondary_languages.add(target)
+
+        source.change_set.update(language=target)
+
+        source.component_set.update(source_language=target)
+        for group in source.group_set.iterator():
+            group.languages.remove(source)
+            group.languages.add(target)
+
+        for plural in source.plural_set.iterator():
+            formulas = target.plural_set.filter(
+                source=plural.source, formula=plural.formula
+            )
+            try:
+                # Use matching plural if it exists
+                new_plural = formulas[0]
+            except IndexError:
+                # Create new plural based on current one
+                new_plural = target.plural_set.create(
+                    source=plural.source,
+                    number=plural.number,
+                    formula=plural.formula,
+                    type=plural.type,
+                )
+                plural.save()
+
+            # Migrate all moved translations to the new plural
+            plural.translation_set.filter(language=target).update(plural=new_plural)
+
+        source.memory_source_set.update(source_language=target)
+        source.memory_target_set.update(target_language=target)
 
     def _fixup_plural_types(self, logger) -> None:
         """Fix plural types as they were changed in Weblate codebase."""
@@ -613,7 +710,7 @@ def setup_lang(sender, **kwargs) -> None:
     """Create basic set of languages on database migration."""
     if settings.UPDATE_LANGUAGES:
         with transaction.atomic():
-            Language.objects.setup(True)
+            Language.objects.setup(update=True)
 
 
 class Language(models.Model, CacheKeyMixin):
@@ -650,9 +747,13 @@ class Language(models.Model, CacheKeyMixin):
         base_manager_name = "objects"
 
     def __str__(self) -> str:
-        if self.show_language_code:
-            return f"{gettext(self.name)} ({self.code})"
-        return gettext(self.name)
+        return self.format_full_name(self.get_localized_name())
+
+    def __init__(self, *args, **kwargs) -> None:
+        from weblate.utils.stats import LanguageStats
+
+        super().__init__(*args, **kwargs)
+        self.stats = LanguageStats(self)
 
     def save(self, *args, **kwargs):
         """Set default direction for language."""
@@ -666,17 +767,20 @@ class Language(models.Model, CacheKeyMixin):
     def get_url_path(self):
         return ("-", "-", self.code)
 
-    def __init__(self, *args, **kwargs) -> None:
-        from weblate.utils.stats import LanguageStats
-
-        super().__init__(*args, **kwargs)
-        self.stats = LanguageStats(self)
-
     def get_name(self):
         """Not localized version of __str__."""
+        return self.format_full_name(self.name)
+
+    def format_full_name(self, name: str):
         if self.show_language_code:
-            return f"{self.name} ({self.code})"
-        return self.name
+            return f"{name} ({self.code})"
+        return name
+
+    def get_localized_name(self):
+        if self.name.endswith(GENERATED_SUFFIX):
+            return self.name
+        name = gettext(self.name)
+        return f"{name[0].title()}{name[1:]}"
 
     def guess_direction(self) -> str:
         if self.base_code in RTL_LANGS or self.code in RTL_LANGS:
@@ -704,6 +808,9 @@ class Language(models.Model, CacheKeyMixin):
 
     @cached_property
     def plural(self):
+        if not self.pk:
+            # Not yet saved, used in tests
+            return Plural(language=self)
         # Filter in Python if query is cached
         if self.plural_set.all()._result_cache is not None:  # noqa: SLF001
             for plural in self.plural_set.all():
@@ -723,9 +830,49 @@ class Language(models.Model, CacheKeyMixin):
             )
         return sorted(aliases)
 
-    def is_base(self, vals: tuple[str, ...]) -> bool:
+    def is_base(self, vals: set[str]) -> bool:
         """Detect whether language is in given list, ignores variants."""
         return self.base_code in vals
+
+    def is_cjk(self) -> bool:
+        """Detect whether language is CJK, ignores variants."""
+        return self.is_base({"ja", "zh", "ko"})
+
+    def is_case_sensitive(self) -> bool:
+        """Detect whether language is case sensitive."""
+        return (
+            self.code not in CASE_INSENSITIVE_LANGS
+            and self.base_code not in CASE_INSENSITIVE_LANGS
+        )
+
+    def get_case_sensitivity_display(self) -> StrOrPromise:
+        if self.is_case_sensitive():
+            return gettext("Case-sensitive")
+        return gettext("Case-insensitive")
+
+    def has_no_children(self) -> bool:
+        """
+        Check if language has no child objects.
+
+        Can be used to determine if language can be safely deleted.
+        """
+        # translations are most likely objects to exist for a language
+        if self.translation_set.exists():
+            return False
+
+        # Collect all objects that will be deleted along with the current instance.
+        # This can be expensive as it fetches all the objects from the database.
+        collector = NestedObjects(self.__class__.objects.db)
+        collector.collect([self])
+
+        for nodes in collector.edges.values():
+            for node in nodes:
+                if isinstance(node, Language) and node == self:
+                    continue
+                if isinstance(node, Plural) and node.language == self:
+                    continue
+                return False
+        return True
 
 
 class PluralQuerySet(models.QuerySet):
@@ -959,7 +1106,9 @@ class Plural(models.Model):
         return format_html(
             PLURAL_TITLE,
             name=self.get_plural_name(idx),
-            examples=", ".join(self.examples.get(idx, [])),
+            examples=format_html_join_comma(
+                "{}", list_to_tuples(self.examples.get(idx, []))
+            ),
             title=gettext("Example counts for this plural form."),
         )
 
@@ -979,7 +1128,9 @@ class Plural(models.Model):
             yield {
                 "index": i,
                 "name": self.get_plural_name(i),
-                "examples": ", ".join(self.examples.get(i, [])),
+                "examples": format_html_join_comma(
+                    "{}", list_to_tuples(self.examples.get(i, []))
+                ),
             }
 
 
@@ -1034,8 +1185,11 @@ class PluralMapper:
                 result.append((None, None))
         return tuple(result)
 
-    def map(self, unit: Unit) -> list[str]:
-        source_strings = unit.get_source_plurals()
+    def map(self, unit: Unit, other_unit: Unit | None = None) -> list[str]:
+        if other_unit is not None:
+            source_strings = other_unit.get_target_plurals()
+        else:
+            source_strings = unit.get_source_plurals()
         if self.same_plurals or len(source_strings) == 1:
             strings_to_translate = source_strings
         elif self.target_plural.number == 1:
@@ -1061,9 +1215,39 @@ class PluralMapper:
                 strings_to_translate.append(s)
         return strings_to_translate
 
-    def map_units(self, units: Iterable[Unit]) -> None:
+    @staticmethod
+    def get_other_units(
+        units: list[Unit] | UnitQuerySet, language: Language
+    ) -> dict[int, Unit]:
+        if not units:
+            return {}
+        component = units[0].translation.component
+        try:
+            translation = component.translation_set.get(language=language)
+        except ObjectDoesNotExist:
+            return {}
+        return {
+            other.id_hash: other
+            for other in translation.unit_set.filter(
+                state__gte=STATE_TRANSLATED,
+                id_hash__in={unit.id_hash for unit in units},
+            )
+        }
+
+    def map_units(
+        self, units: list[Unit] | UnitQuerySet, other_units: dict[int, Unit] | None
+    ) -> None:
+        other: Unit | None
         for unit in units:
-            unit.plural_map = self.map(unit)
+            if other_units is None:
+                other = None
+            elif unit.id_hash not in other_units:
+                # Unit strings not available
+                unit.plural_map = []
+                continue
+            else:
+                other = other_units[unit.id_hash]
+            unit.plural_map = self.map(unit, other)
 
     def zip(self, sources: list[str], targets: list[str], unit: Unit):
         if len(sources) != self.source_plural.number:

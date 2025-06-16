@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 import json
 import re
 
@@ -11,8 +13,19 @@ from django.utils.translation import gettext, gettext_lazy, pgettext_lazy
 
 from weblate.utils.forms import WeblateServiceURLField
 
+from .types import SourceLanguageChoices
+
 
 class BaseMachineryForm(forms.Form):
+    source_language = forms.ChoiceField(
+        label=pgettext_lazy(
+            "Automatic suggestion service configuration", "Source language selection"
+        ),
+        choices=SourceLanguageChoices,
+        initial=SourceLanguageChoices.AUTO,
+        required=False,
+    )
+
     def __init__(self, machinery, *args, **kwargs) -> None:
         self.machinery = machinery
         super().__init__(*args, **kwargs)
@@ -354,10 +367,13 @@ class OpenAIMachineryForm(BaseOpenAIMachineryForm):
     # Ordering choices here defines priority for automatic selection
     MODEL_CHOICES = (
         ("auto", pgettext_lazy("OpenAI model selection", "Automatic selection")),
-        ("o1-mini", "OpenAI o1-mini"),
-        ("o1-preview", "OpenAI o1-preview"),
         ("gpt-4o-mini", "GPT-4o mini"),
         ("gpt-4o", "GPT-4o"),
+        ("o3-mini", "OpenAI o3-mini"),
+        ("o3", "OpenAI o3"),
+        ("o1-mini", "OpenAI o1-mini"),
+        ("o1", "OpenAI o1"),
+        ("gpt-4.5-preview", "GPT-4.5"),
         ("gpt-4-turbo", "GPT-4 Turbo"),
         ("gpt-4", "GPT-4"),
         ("gpt-3.5-turbo", "GPT-3.5 Turbo"),

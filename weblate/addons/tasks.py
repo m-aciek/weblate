@@ -9,7 +9,8 @@ from datetime import timedelta
 
 from celery.schedules import crontab
 from django.conf import settings
-from django.db.models import F, Q
+from django.db import transaction
+from django.db.models import Count, F, Q
 from django.http import HttpRequest
 from django.utils import timezone
 from django.utils.timezone import now
@@ -19,7 +20,7 @@ from weblate.addons.events import AddonEvent
 from weblate.addons.models import Addon, handle_addon_event
 from weblate.lang.models import Language
 from weblate.trans.exceptions import FileParseError
-from weblate.trans.models import Component, Project
+from weblate.trans.models import Change, Component, Project
 from weblate.utils.celery import app
 from weblate.utils.hash import calculate_checksum
 from weblate.utils.lock import WeblateLockTimeoutError
@@ -29,14 +30,19 @@ IGNORED_TAGS = {"script", "style"}
 
 
 @app.task(trail=False)
-def cdn_parse_html(files: str, selector: str, component_id: int) -> None:
+def cdn_parse_html(addon_id: int, component_id: int) -> None:
+    try:
+        addon = Addon.objects.get(pk=addon_id)
+    except Addon.DoesNotExist:
+        return
+
     component = Component.objects.get(pk=component_id)
     source_translation = component.source_translation
     source_units = set(source_translation.unit_set.values_list("source", flat=True))
     units = []
     errors = []
 
-    for filename in files.splitlines():
+    for filename in addon.configuration["files"].splitlines():
         filename = filename.strip()
         try:
             if filename.startswith(("http://", "https://")):
@@ -51,7 +57,7 @@ def cdn_parse_html(files: str, selector: str, component_id: int) -> None:
 
         document = html.fromstring(content)
 
-        for element in document.cssselect(selector):
+        for element in document.cssselect(addon.configuration["css_selector"]):
             text = element.text
             if (
                 element.getchildren()
@@ -66,7 +72,13 @@ def cdn_parse_html(files: str, selector: str, component_id: int) -> None:
 
     # Actually create units
     for text in units:
-        source_translation.add_unit(None, calculate_checksum(text), text, None)
+        source_translation.add_unit(
+            request=None,
+            context=calculate_checksum(text),
+            source=text,
+            target=None,
+            author=addon.addon.user,
+        )
 
     if errors:
         component.add_alert("CDNAddonError", occurrences=errors)
@@ -80,16 +92,27 @@ def cdn_parse_html(files: str, selector: str, component_id: int) -> None:
     retry_backoff=600,
     retry_backoff_max=3600,
 )
+@transaction.atomic
 def language_consistency(
     addon_id: int, language_ids: list[int], project_id: int
 ) -> None:
-    addon = Addon.objects.get(pk=addon_id)
+    try:
+        addon = Addon.objects.get(pk=addon_id)
+    except Addon.DoesNotExist:
+        return
     project = Project.objects.get(pk=project_id)
     languages = Language.objects.filter(id__in=language_ids)
     request = HttpRequest()
     request.user = addon.addon.user
 
-    for component in project.component_set.iterator():
+    # Filter components with missing translation
+    components = project.component_set.annotate(
+        translation_count=Count(
+            "translation", filter=Q(translation__language__in=languages)
+        )
+    ).exclude(translation_count=languages.count())
+
+    for component in components.iterator():
         missing = languages.exclude(
             Q(translation__component=component) | Q(component=component)
         )
@@ -112,7 +135,7 @@ def language_consistency(
             else:
                 new_lang.log_info("added for language consistency")
         try:
-            component.create_translations_task()
+            component.create_translations_immediate()
         except FileParseError as error:
             component.log_error("could not parse translation files: %s", error)
 
@@ -149,6 +172,7 @@ def cleanup_addon_activity_log() -> None:
     autoretry_for=(WeblateLockTimeoutError,),
     retry_backoff=60,
 )
+@transaction.atomic
 def postconfigure_addon(addon_id: int, addon=None) -> None:
     if addon is None:
         addon = Addon.objects.get(pk=addon_id)
@@ -163,3 +187,35 @@ def setup_periodic_tasks(sender, **kwargs) -> None:
         cleanup_addon_activity_log.s(),
         name="cleanup-addon-activity-log",
     )
+
+
+@app.task(trail=True)
+def addon_change(change_ids: list[int], **kwargs) -> None:
+    """
+    Process add-on change events for a list of changes.
+
+    This task retrieves add-ons that are subscribed to change events and
+    applies the change event to each relevant add-on.
+    """
+    addons = Addon.objects.filter(event__event=AddonEvent.EVENT_CHANGE).select_related(
+        "component", "project"
+    )
+
+    for change in Change.objects.filter(pk__in=change_ids).prefetch_for_render():
+        # Filter addons for this change
+        change_addons = [
+            addon
+            for addon in addons
+            if (not addon.component or addon.component == change.component)
+            and (not addon.project or addon.project == change.project)
+        ]
+        if change_addons:
+            handle_addon_event(
+                AddonEvent.EVENT_CHANGE,
+                "change_event",
+                (change,),
+                addon_queryset=change_addons,
+                project=change.project,
+                component=change.component,
+                translation=change.translation,
+            )
