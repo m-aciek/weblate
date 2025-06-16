@@ -761,6 +761,7 @@ class Repository:
         branch: str | None = None,
         component: Component | None = None,
         local: bool = False,
+        repo: str | None = None,
     ) -> None:
         self.path: str = path
         if not branch:
