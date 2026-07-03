@@ -257,6 +257,35 @@ class MultipleRepositoriesTest(TestCase):
                 FakeRepository.instances["fr"].update_remote_locked_states, [True]
             )
 
+    def test_nested_lock_contexts_keep_outer_locks_active(self) -> None:
+        with TemporaryDirectory() as tempdir, patch(
+            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        ):
+            multi = MultipleRepositories(
+                tempdir, branch="main", local=True, repo=self.create_repositories()
+            )
+
+            with multi.lock:
+                with multi.lock:
+                    self.assertTrue(
+                        all(
+                            repository.lock.is_locked
+                            for repository in FakeRepository.instances.values()
+                        )
+                    )
+                self.assertTrue(
+                    all(
+                        repository.lock.is_locked
+                        for repository in FakeRepository.instances.values()
+                    )
+                )
+            self.assertTrue(
+                all(
+                    not repository.lock.is_locked
+                    for repository in FakeRepository.instances.values()
+                )
+            )
+
     def test_prefixes_changed_files(self) -> None:
         with TemporaryDirectory() as tempdir, patch(
             "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}

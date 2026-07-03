@@ -350,16 +350,16 @@ class MultipleRepositories(Repository):
 class MultiContextManager:
     def __init__(self, *managers):
         self.managers = managers
-        self.stack = ExitStack()
+        self._stacks: list[ExitStack] = []
 
     def __enter__(self):
-        # Enter each context manager and store them in the stack
-        self.entered = [self.stack.enter_context(manager) for manager in self.managers]
-        return self.entered
+        stack = ExitStack()
+        self._stacks.append(stack)
+        return [stack.enter_context(manager) for manager in self.managers]
 
     def __exit__(self, exc_type, exc_value, traceback):
-        # Exit all context managers
-        return self.stack.__exit__(exc_type, exc_value, traceback)
+        stack = self._stacks.pop()
+        return stack.__exit__(exc_type, exc_value, traceback)
 
     @contextmanager
     def without_recovery(self):
