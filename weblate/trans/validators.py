@@ -50,7 +50,10 @@ def validate_translation_text_length(unit: Unit, target: list[str]) -> None:
 def validate_filemask(val: str) -> None:
     """Validate that the filemask contains *."""
     if "*" not in val:
-        raise ValidationError(FILEMASK_LANGUAGE_PLACEHOLDER_ERROR)
+        raise ValidationError(
+            FILEMASK_LANGUAGE_PLACEHOLDER_ERROR,
+            code="missing-language-placeholder",
+        )
 
 
 def validate_autoaccept(val: int) -> None:
