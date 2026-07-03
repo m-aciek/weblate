@@ -24,7 +24,10 @@ FILEMASK_LANGUAGE_PLACEHOLDER_ERROR = gettext(
 def validate_filemask(val) -> None:
     """Validate that the filemask contains *."""
     if "*" not in val:
-        raise ValidationError(FILEMASK_LANGUAGE_PLACEHOLDER_ERROR)
+        raise ValidationError(
+            FILEMASK_LANGUAGE_PLACEHOLDER_ERROR,
+            code="missing-language-placeholder",
+        )
 
 
 def validate_autoaccept(val) -> None:
