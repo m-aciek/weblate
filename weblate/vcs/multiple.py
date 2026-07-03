@@ -80,10 +80,17 @@ class MultipleRepositories(Repository):
 
     @classmethod
     def get_remote_branch(cls, repo: str) -> str:
-        branches = {
-            VCS_REGISTRY[config["vcs"]].get_remote_branch(config["repo"])
-            for config in cls.parse_repo_config(repo).values()
-        }
+        branches = set()
+        for key, config in cls.parse_repo_config(repo).items():
+            try:
+                branch = VCS_REGISTRY[config["vcs"]].get_remote_branch(config["repo"])
+            except RepositoryError as error:
+                raise RepositoryError(
+                    error.retcode,
+                    gettext("Could not determine the default branch for repository %(key)s: %(error)s")
+                    % {"key": key, "error": error},
+                ) from error
+            branches.add(branch)
         branches.discard("")
         if not branches:
             return super().get_remote_branch(repo)
