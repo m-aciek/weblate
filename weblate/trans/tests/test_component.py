@@ -1312,6 +1312,15 @@ class ComponentValidationTest(RepoTestCase):
         ):
             self.component.full_clean()
 
+    def test_filemask_without_language_placeholder_many_repositories_match(self) -> None:
+        """Allow fixed masks when the repository key provides language code."""
+        repo = self.format_local_path(self.git_repo_path)
+        self.component.vcs = "many-repositories"
+        self.component.repo = json.dumps({"cs": repo})
+        self.component.push = ""
+        self.component.filemask = "cs/po/cs.po"
+        self.assertIsNone(self.component.full_clean())
+
     def test_fileformat(self) -> None:
         """Unknown file format."""
         self.component.file_format = "i18next"

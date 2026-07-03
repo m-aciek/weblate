@@ -4591,6 +4591,8 @@ class Component(  # ruff: ignore[too-many-public-methods]
         if not matches or not matches.lastindex:
             if path == self.template:
                 return self.source_language.code
+            if self.vcs == "many-repositories" and "*" not in self.filemask:
+                return path.partition("/")[0]
             return ""
 
         # Use longest matched code
