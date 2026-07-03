@@ -1068,15 +1068,14 @@ class GitRepository(Repository):
 
     def list_remote_branches(self) -> list[str]:
         """Return a list of remote branch names by querying the remote repository using 'git ls-remote --heads origin'."""
-        if self.repo:
-            self.validate_pull_url(self.repo)
-        command = [*self.get_auth_args(), "ls-remote", "--heads"]
-        if self.repo:
-            command.extend(("--", self.repo))
+        repo = self.repo
+        if repo:
+            self.validate_pull_url(repo)
+            target = ["--", repo]
         else:
-            command.append("origin")
+            target = ["origin"]
         branches = self.execute(
-            command,
+            [*self.get_auth_args(), "ls-remote", "--heads", *target],
             remote_op="pull",
             needs_lock=False,
             environment=self.get_auth_environment(),
