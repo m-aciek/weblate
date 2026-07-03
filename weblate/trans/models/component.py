@@ -5117,13 +5117,16 @@ class Component(  # ruff: ignore[too-many-public-methods]
         try:
             super().clean_fields(exclude=exclude)
         except ValidationError as error:
-            if self.vcs != "many-repositories" or "filemask" not in error.error_dict:
+            if self.vcs != "many-repositories":
+                raise
+            if "filemask" not in error.error_dict:
                 raise
 
             filtered = [
                 item
                 for item in error.error_dict["filemask"]
-                if FILEMASK_LANGUAGE_PLACEHOLDER_ERROR not in item.messages
+                if FILEMASK_LANGUAGE_PLACEHOLDER_ERROR
+                not in getattr(item, "messages", ())
             ]
 
             if filtered:
