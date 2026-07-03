@@ -953,6 +953,8 @@ class GitRepository(Repository):
                 yield "http.proactiveAuth=auto"
 
     def get_auth_args(self) -> list[str]:
+        if self.repo:
+            return list(self._get_auth_args(self.repo))
         if self.component:
             return list(self._get_auth_args(self.component.repo))
         return []
@@ -961,6 +963,8 @@ class GitRepository(Repository):
         return {}
 
     def get_auth_environment(self) -> dict[str, str]:
+        if self.repo:
+            return self._get_auth_environment(self.repo)
         if self.component:
             return self._get_auth_environment(self.component.repo)
         return {}
@@ -1619,8 +1623,14 @@ class GitRepository(Repository):
 
     def list_remote_branches(self) -> list[str]:
         """Return a list of remote branch names by querying the remote repository using 'git ls-remote --heads origin'."""
+        command = [*self.get_auth_args(), "ls-remote", "--heads"]
+        if self.repo:
+            self.validate_pull_url(self.repo)
+            command.extend(("--", self.repo))
+        else:
+            command.append("origin")
         branches = self.execute(
-            [*self.get_auth_args(), "ls-remote", "--heads", "origin"],
+            command,
             remote_op="pull",
             needs_lock=False,
             environment=self.get_auth_environment(),
@@ -1839,8 +1849,11 @@ class SubversionRepository(GitRepository):
         branch: str | None = None,
         component: Component | None = None,
         local: bool = False,
+        repo: str | None = None,
     ) -> None:
-        super().__init__(path, branch=branch, component=component, local=local)
+        super().__init__(
+            path, branch=branch, component=component, local=local, repo=repo
+        )
         self._fetch_revision: str | None = None
 
     @classmethod
@@ -2143,10 +2156,13 @@ class GitMergeRequestBase(GitRepository):
         self, repo: str | None = None
     ) -> tuple[str | None, str | None, str | None, str, str, str]:
         if repo is None:
-            component = self.component
-            if component is None:
-                raise RepositoryError(0, "Repository operation requires component.")
-            repo = component.push or component.repo
+            if self.repo is not None:
+                repo = self.repo
+            else:
+                component = self.component
+                if component is None:
+                    raise RepositoryError(0, "Repository operation requires component.")
+                repo = component.push or component.repo
         parsed = urlparse(repo)
         host = parsed.hostname
         scheme: str | None = parsed.scheme
@@ -2814,10 +2830,13 @@ class AzureDevOpsRepository(GitMergeRequestBase):
         self, repo: str | None = None
     ) -> tuple[str | None, str | None, str | None, str, str, str]:
         if repo is None:
-            component = self.component
-            if component is None:
-                raise RepositoryError(0, "Repository operation requires component.")
-            repo = component.repo
+            if self.repo is not None:
+                repo = self.repo
+            else:
+                component = self.component
+                if component is None:
+                    raise RepositoryError(0, "Repository operation requires component.")
+                repo = component.repo
 
         scheme_regex = r"^[a-z]+:\/\/.*"  # matches for example ssh://* and https://*
 
@@ -4002,8 +4021,11 @@ class BitbucketServerRepository(GitMergeRequestBase):
         branch: str | None = None,
         component: Component | None = None,
         local: bool = False,
+        repo: str | None = None,
     ) -> None:
-        super().__init__(path, branch=branch, component=component, local=local)
+        super().__init__(
+            path, branch=branch, component=component, local=local, repo=repo
+        )
         self.bb_fork: dict = {}
 
     def get_headers(self, credentials: GitCredentials) -> dict[str, str]:
