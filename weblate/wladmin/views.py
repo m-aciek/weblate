@@ -4,16 +4,19 @@
 
 from __future__ import annotations
 
-import sys
-from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import quote
+from shutil import disk_usage
+
+# pylint: disable-next=unused-import
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from urllib.parse import quote, urlencode
 
 from django.conf import settings
 from django.core.cache import cache
 from django.core.checks import run_checks
 from django.core.exceptions import PermissionDenied
 from django.core.mail import send_mail
-from django.db.models import Count, QuerySet
+from django.db import transaction
+from django.db.models import Count, Max, Q
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -23,29 +26,43 @@ from django.utils.html import format_html
 from django.utils.translation import gettext, gettext_lazy
 from django.views.decorators.http import require_POST
 from django.views.generic import ListView
-from django.views.generic.edit import FormMixin
+from django.views.generic.edit import CreateView, FormMixin
 from requests.exceptions import HTTPError, Timeout
 
 from weblate.accounts.forms import AdminUserSearchForm, ContactForm
 from weblate.accounts.views import UserList, get_initial_contact
-from weblate.auth.decorators import management_access
-from weblate.auth.forms import AdminInviteUserForm, SitewideTeamForm
+from weblate.auth.decorators import (
+    management_access,
+    management_permission_required,
+)
+from weblate.auth.forms import (
+    AdminBulkInviteForm,
+    AdminInviteUserForm,
+    SitewideTeamForm,
+)
 from weblate.auth.models import (
-    AuthenticatedHttpRequest,
     Group,
-    GroupQuerySet,
     Invitation,
     User,
 )
 from weblate.configuration.models import Setting, SettingCategory
 from weblate.configuration.views import CustomCSSView
+from weblate.memory.models import Memory, MemoryScopeMigrationState
+from weblate.memory.tasks import MEMORY_SCOPE_COMPACTION_STATE
+from weblate.trans.actions import ActionEvents
+from weblate.trans.alerts.base import AlertSeverity
 from weblate.trans.forms import AnnouncementForm
-from weblate.trans.models import Alert, Announcement, Component, Project
+from weblate.trans.models import Alert, Announcement, Change, Component, Project
 from weblate.trans.util import redirect_param
 from weblate.utils import messages
 from weblate.utils.cache import measure_cache_latency
 from weblate.utils.celery import get_queue_stats
-from weblate.utils.db import measure_database_latency
+from weblate.utils.db import (
+    get_database_disk_usage,
+    get_database_size,
+    measure_database_latency,
+)
+from weblate.utils.encoding import get_encoding_list
 from weblate.utils.errors import report_error
 from weblate.utils.stats import prefetch_stats
 from weblate.utils.tasks import database_backup, settings_backup
@@ -58,22 +75,30 @@ from weblate.vcs.ssh import (
     can_generate_key,
     generate_ssh_key,
     get_all_key_data,
-    get_host_keys,
+    get_host_key_entries,
     get_key_data_raw,
+    remove_host_key,
 )
 from weblate.wladmin.forms import (
     ActivateForm,
     AppearanceForm,
     BackupForm,
+    BackupSelectionForm,
     SSHAddForm,
     TestMailForm,
+    WorkspaceCreateForm,
+    WorkspaceSearchForm,
 )
 from weblate.wladmin.models import BackupService, ConfigurationError, SupportStatus
 from weblate.wladmin.tasks import backup_service, support_status_update
+from weblate.workspaces.models import Workspace
 
 if TYPE_CHECKING:
+    from django.db.models import QuerySet
     from django.http.request import QueryDict
     from django_stubs_ext import StrOrPromise
+
+    from weblate.auth.models import AuthenticatedHttpRequest, GroupQuerySet
 
 MENU: tuple[tuple[str, str, StrOrPromise], ...] = (
     ("index", "manage", gettext_lazy("Weblate status")),
@@ -81,14 +106,16 @@ MENU: tuple[tuple[str, str, StrOrPromise], ...] = (
     ("memory", "manage-memory", gettext_lazy("Translation memory")),
     ("performance", "manage-performance", gettext_lazy("Performance report")),
     ("ssh", "manage-ssh", gettext_lazy("SSH keys")),
-    ("alerts", "manage-alerts", gettext_lazy("Alerts")),
+    ("alerts", "manage-alerts", gettext_lazy("Diagnostics")),
     ("repos", "manage-repos", gettext_lazy("Repositories")),
+    ("workspaces", "manage-workspaces", gettext_lazy("Workspaces")),
     ("users", "manage-users", gettext_lazy("Users")),
     ("teams", "manage-teams", gettext_lazy("Teams")),
     ("appearance", "manage-appearance", gettext_lazy("Appearance")),
     ("tools", "manage-tools", gettext_lazy("Tools")),
     ("machinery", "manage-machinery", gettext_lazy("Automatic suggestions")),
     ("addons", "manage-addons", gettext_lazy("Add-ons")),
+    ("github", "manage-github-accounts", gettext_lazy("VCS Installations")),
 )
 if "weblate.billing" in settings.INSTALLED_APPS:
     MENU += (("billing", "manage-billing", gettext_lazy("Billing")),)
@@ -101,9 +128,9 @@ def manage(request: AuthenticatedHttpRequest) -> HttpResponse:
     activation_code = request.GET.get("activation")
     if activation_code and len(activation_code) < 400:
         initial = {"secret": activation_code}
-    support_form = None
+    form = None
     if support.name != "community":
-        support_form = ContactForm(
+        form = ContactForm(
             request=request,
             hide_captcha=request.user.is_authenticated,
             initial=get_initial_contact(request),
@@ -117,7 +144,7 @@ def manage(request: AuthenticatedHttpRequest) -> HttpResponse:
             "menu_page": "index",
             "support": support,
             "activate_form": ActivateForm(initial=initial),
-            "support_form": support_form,
+            "support_form": form,
             "git_revision_link": GIT_LINK,
             "git_revision": GIT_REVISION,
         },
@@ -171,11 +198,17 @@ def send_test_mail(email: str) -> None:
 
 @management_access
 def tools(request: AuthenticatedHttpRequest) -> HttpResponse:
-    email_form = TestMailForm(initial={"email": request.user.email})
-    announce_form = AnnouncementForm()
+    can_configure = request.user.has_perm("management.configure")
+    email_form = (
+        TestMailForm(initial={"email": request.user.email}) if can_configure else None
+    )
+    can_post_announcement = request.user.has_perm("announcement.edit")
+    announce_form = AnnouncementForm() if can_post_announcement else None
 
     if request.method == "POST":
         if "email" in request.POST:
+            if not can_configure:
+                raise PermissionDenied
             email_form = TestMailForm(request.POST)
             if email_form.is_valid():
                 try:
@@ -189,10 +222,14 @@ def tools(request: AuthenticatedHttpRequest) -> HttpResponse:
                 return redirect("manage-tools")
 
         if "sentry" in request.POST:
+            if not can_configure:
+                raise PermissionDenied
             report_error("Test message", message=True, level="info")
             return redirect("manage-tools")
 
         if "message" in request.POST:
+            if not can_post_announcement:
+                raise PermissionDenied
             announce_form = AnnouncementForm(request.POST)
             if announce_form.is_valid():
                 Announcement.objects.create(
@@ -207,14 +244,17 @@ def tools(request: AuthenticatedHttpRequest) -> HttpResponse:
             "menu_page": "tools",
             "email_form": email_form,
             "announce_form": announce_form,
+            "can_configure": can_configure,
+            "can_post_announcement": can_post_announcement,
         },
     )
 
 
-@management_access
+@management_permission_required("management.configure")
 @require_POST
+@transaction.atomic
 def discovery(request: AuthenticatedHttpRequest) -> HttpResponse:
-    support = SupportStatus.objects.get_current()
+    support = SupportStatus.objects.get_current(for_update=True)
 
     if not support.discoverable and settings.SITE_TITLE == "Weblate":
         messages.error(
@@ -223,7 +263,7 @@ def discovery(request: AuthenticatedHttpRequest) -> HttpResponse:
                 "Please change SITE_TITLE in settings to make your Weblate easy to recognize in discover."
             ),
         )
-    elif support.secret:
+    elif support.secret and support.enabled:
         support.discoverable = not support.discoverable
         support.save(update_fields=["discoverable"])
         support_status_update.delay()
@@ -231,12 +271,17 @@ def discovery(request: AuthenticatedHttpRequest) -> HttpResponse:
     return redirect("manage")
 
 
-@management_access
+@management_permission_required("management.configure")
 @require_POST
+@transaction.atomic
 def activate(request: AuthenticatedHttpRequest) -> HttpResponse:
-    support = None
+    support: SupportStatus | None = None
     if "refresh" in request.POST:
-        support = SupportStatus.objects.get_current()
+        support = SupportStatus.objects.get_current(for_update=True)
+    elif "unlink" in request.POST:
+        SupportStatus.objects.select_for_update().filter(enabled=True).update(
+            enabled=False
+        )
     else:
         form = ActivateForm(request.POST)
         if form.is_valid():
@@ -257,7 +302,7 @@ def activate(request: AuthenticatedHttpRequest) -> HttpResponse:
             )
         except HTTPError as error:
             report_error("Activation error")
-            if error.response.status_code == 404:
+            if error.response is not None and error.response.status_code == 404:
                 messages.error(
                     request,
                     gettext(
@@ -279,6 +324,10 @@ def activate(request: AuthenticatedHttpRequest) -> HttpResponse:
                 gettext("Could not activate your installation: %s") % error,
             )
         else:
+            if not support.pk:
+                SupportStatus.objects.select_for_update().filter(enabled=True).update(
+                    enabled=False
+                )
             support.save()
             messages.success(request, gettext("Activation completed."))
     return redirect("manage")
@@ -298,7 +347,7 @@ def repos(request: AuthenticatedHttpRequest) -> HttpResponse:
     )
 
 
-@management_access
+@management_permission_required("management.configure")
 def backups(request: AuthenticatedHttpRequest) -> HttpResponse:
     form = BackupForm()
     if request.method == "POST":
@@ -307,21 +356,25 @@ def backups(request: AuthenticatedHttpRequest) -> HttpResponse:
             if form.is_valid():
                 form.save()
                 return redirect("manage-backups")
-        elif "remove" in request.POST:
-            service = BackupService.objects.get(pk=request.POST["service"])
-            service.delete()
-            return redirect("manage-backups")
-        elif "toggle" in request.POST:
-            service = BackupService.objects.get(pk=request.POST["service"])
-            service.enabled = not service.enabled
-            service.save()
-            return redirect("manage-backups")
-        elif "trigger" in request.POST:
-            settings_backup.delay()
-            database_backup.delay()
-            backup_service.delay(pk=request.POST["service"])
-            messages.success(request, gettext("Backup process triggered"))
-            return redirect("manage-backups")
+        else:
+            modelform = BackupSelectionForm(request.POST)
+            if modelform.is_valid():
+                service = cast("BackupService", modelform.cleaned_data["service"])
+                if "remove" in request.POST:
+                    service.delete()
+                    return redirect("manage-backups")
+                if "toggle" in request.POST:
+                    service.enabled = not service.enabled
+                    service.save()
+                    return redirect("manage-backups")
+                if "trigger" in request.POST:
+                    settings_backup.delay()
+                    database_backup.delay()
+                    backup_service.delay(pk=service.pk)
+                    messages.success(request, gettext("Backup process triggered"))
+                    return redirect("manage-backups")
+            else:
+                show_form_errors(request, modelform)
 
     context = {
         "services": BackupService.objects.all(),
@@ -333,16 +386,88 @@ def backups(request: AuthenticatedHttpRequest) -> HttpResponse:
     return render(request, "manage/backups.html", context)
 
 
+def get_memory_migration_status() -> dict[str, Any]:
+    # TODO(2028.1): Remove this migration status helper once Weblate no longer
+    # supports direct upgrades from 2026 releases.
+    """Return translation memory background migration status."""
+    state = MemoryScopeMigrationState.objects.filter(
+        name="memory-scope-backfill"
+    ).first()
+    compaction_state = MemoryScopeMigrationState.objects.filter(
+        name=MEMORY_SCOPE_COMPACTION_STATE
+    ).first()
+    max_memory_id = Memory.objects.aggregate(max_id=Max("id"))["max_id"] or 0
+    last_memory_id = state.last_memory_id if state is not None else 0
+    compaction_last_memory_id = (
+        compaction_state.last_memory_id if compaction_state is not None else 0
+    )
+    needs_backfill = state is not None and not state.completed
+    if state is None and max_memory_id:
+        needs_backfill = (
+            Memory.objects.alias(memory_has_scope=Memory.objects.get_has_scope_exists())
+            .filter(memory_has_scope=False)
+            .exists()
+        )
+    backfill_completed = max_memory_id == 0 or not needs_backfill
+
+    if backfill_completed:
+        backfill_percent = 100
+        processed = max_memory_id
+    else:
+        processed = last_memory_id
+        backfill_percent = (
+            min(round(processed * 100 / max_memory_id), 100) if max_memory_id else 0
+        )
+
+    compaction_completed = (
+        backfill_completed
+        and compaction_state is not None
+        and compaction_state.completed
+    )
+    compaction_active = (
+        backfill_completed and max_memory_id > 0 and not compaction_completed
+    )
+    compaction_percent = (
+        min(round(compaction_last_memory_id * 100 / max_memory_id), 100)
+        if max_memory_id and compaction_active
+        else 100
+        if compaction_completed or not max_memory_id
+        else 0
+    )
+    return {
+        "backfill_completed": backfill_completed,
+        "backfill_percent": backfill_percent,
+        "completed": backfill_completed and not compaction_active,
+        "compaction_active": compaction_active,
+        "compaction_completed": compaction_completed,
+        "compaction_last_memory_id": compaction_last_memory_id,
+        "compaction_max_memory_id": max_memory_id,
+        "compaction_percent": compaction_percent,
+        "last_memory_id": last_memory_id,
+        "processed": processed,
+        "state": state,
+        "total": max_memory_id,
+        "updated": (
+            compaction_state.updated
+            if backfill_completed and compaction_state is not None
+            else state.updated
+            if state is not None
+            else None
+        ),
+    }
+
+
 def handle_dismiss(request: AuthenticatedHttpRequest) -> HttpResponse:
     try:
         error = ConfigurationError.objects.get(pk=int(request.POST["pk"]))
+    except (ValueError, KeyError, ConfigurationError.DoesNotExist):
+        messages.error(request, gettext("Could not dismiss the configuration error!"))
+    else:
         if "ignore" in request.POST:
             error.ignored = True
             error.save(update_fields=["ignored"])
         else:
             error.delete()
-    except (ValueError, KeyError, ConfigurationError.DoesNotExist):
-        messages.error(request, gettext("Could not dismiss the configuration error!"))
     return redirect("manage-performance")
 
 
@@ -350,28 +475,62 @@ def handle_dismiss(request: AuthenticatedHttpRequest) -> HttpResponse:
 def performance(request: AuthenticatedHttpRequest) -> HttpResponse:
     """Show performance tuning tips."""
     if request.method == "POST":
+        if not request.user.has_perm("management.configure"):
+            raise PermissionDenied
         return handle_dismiss(request)
-    checks = run_checks(include_deployment_checks=True)
+    checks = sorted(
+        (
+            check
+            for check in run_checks(include_deployment_checks=True)
+            if not check.is_silenced()
+        ),
+        key=lambda check: (check.id, check.msg),
+    )
+
+    try:
+        disk_usage_bytes = disk_usage(settings.DATA_DIR)
+    except OSError:
+        disk_usage_bytes = None
+
+    if disk_usage_bytes is None:
+        disk_usage_percent = 0
+    else:
+        disk_usage_percent = round(disk_usage_bytes.used * 100 / disk_usage_bytes.total)
+
+    database_size = get_database_size()
+    database_disk_usage = get_database_disk_usage()
 
     context = {
-        "checks": [check for check in checks if not check.is_silenced()],
+        "checks": checks,
         "errors": ConfigurationError.objects.filter(ignored=False),
-        "queues": get_queue_stats().items(),
+        "queues": sorted(get_queue_stats().items()),
         "menu_items": MENU,
         "menu_page": "performance",
-        "web_encoding": [sys.getfilesystemencoding(), sys.getdefaultencoding()],
+        "web_encoding": get_encoding_list(),
         "celery_encoding": cache.get("celery_encoding"),
         "celery_latency": cache.get("celery_latency"),
         "database_latency": measure_database_latency(),
         "cache_latency": measure_cache_latency(),
+        "disk_usage": disk_usage_bytes,
+        "disk_usage_percent": disk_usage_percent,
+        "database_size": database_size,
+        "database_disk_usage": database_disk_usage,
+        "memory_migration_status": get_memory_migration_status(),
     }
 
     return render(request, "manage/performance.html", context)
 
 
-@management_access
+def get_key_type(data: QueryDict) -> KeyType:
+    value = data.get("type", "rsa")
+    if value not in get_args(KeyType):
+        raise Http404
+    return cast("KeyType", value)
+
+
+@management_permission_required("management.configure")
 def ssh_key(request: AuthenticatedHttpRequest) -> HttpResponse:
-    key_type = cast("KeyType", request.GET.get("type", "rsa"))
+    key_type = get_key_type(request.GET)
     filename, data = get_key_data_raw(key_type=key_type, kind="private")
     if data is None:
         raise Http404
@@ -382,7 +541,7 @@ def ssh_key(request: AuthenticatedHttpRequest) -> HttpResponse:
     return response
 
 
-@management_access
+@management_permission_required("management.configure")
 def ssh(request: AuthenticatedHttpRequest) -> HttpResponse:
     """Show information and manipulate with SSH key."""
     # Check whether we can generate SSH key
@@ -393,7 +552,7 @@ def ssh(request: AuthenticatedHttpRequest) -> HttpResponse:
 
     # Generate key if it does not exist yet
     if can_generate and action == "generate":
-        key_type = cast("KeyType", request.POST.get("type", "rsa"))
+        key_type = get_key_type(request.POST)
         generate_ssh_key(request, key_type=key_type)
         return redirect("manage-ssh")
 
@@ -405,7 +564,14 @@ def ssh(request: AuthenticatedHttpRequest) -> HttpResponse:
     if action == "add-host":
         form = SSHAddForm(request.POST)
         if form.is_valid():
-            add_host_key(request, **form.cleaned_data)
+            add_host_key(
+                request,
+                form.cleaned_data["host"],
+                form.cleaned_data["port"],
+                accept_fingerprint=form.cleaned_data["fingerprint"],
+            )
+    elif action == "remove-host":
+        remove_host_key(request, request.POST.get("host_key", ""))
 
     context = {
         "public_ssh_keys": keys,
@@ -413,7 +579,7 @@ def ssh(request: AuthenticatedHttpRequest) -> HttpResponse:
         "missing_ssh_keys": [
             keydata for keydata in keys.values() if keydata["key"] is None
         ],
-        "host_keys": get_host_keys(),
+        "host_keys": get_host_key_entries(),
         "menu_items": MENU,
         "menu_page": "ssh",
         "add_form": form,
@@ -426,12 +592,10 @@ def ssh(request: AuthenticatedHttpRequest) -> HttpResponse:
 def alerts(request: AuthenticatedHttpRequest) -> HttpResponse:
     """Show component alerts."""
     context = {
-        "alerts": Alert.objects.order_by(
-            "name", "component__project__name", "component__name"
-        ).select_related("component", "component__project"),
-        "no_components": Project.objects.annotate(Count("component")).filter(
-            component__count=0
-        ),
+        "alerts": Alert.objects.filter(severity__gte=AlertSeverity.ERROR)
+        .order()
+        .select_related("component", "component__project"),
+        "no_components": Project.objects.filter(component__isnull=True),
         "menu_items": MENU,
         "menu_page": "alerts",
     }
@@ -448,32 +612,74 @@ class AdminUserList(UserList):
     def get_base_queryset(self) -> QuerySet[User]:
         return User.objects.all()
 
+    @staticmethod
+    def get_invite_form(data=None) -> AdminInviteUserForm:
+        return AdminInviteUserForm(data, auto_id="id_admin_invite_%s")
+
+    @staticmethod
+    def get_bulk_invite_form(data=None) -> AdminBulkInviteForm:
+        return AdminBulkInviteForm(data, auto_id="id_admin_bulk_invite_%s")
+
+    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
+        if request.method == "POST":
+            if not request.user.has_perm("user.edit"):
+                raise PermissionDenied
+        elif not (
+            request.user.has_perm("user.view") or request.user.has_perm("user.edit")
+        ):
+            raise PermissionDenied
+        return super().dispatch(request, *args, **kwargs)
+
     def post(self, request: AuthenticatedHttpRequest, **kwargs) -> HttpResponse:
-        if "email" in request.POST:
-            invite_form = AdminInviteUserForm(request.POST)
+        if "emails" in request.POST:
+            bulk_invite_form = self.get_bulk_invite_form(request.POST)
+            if bulk_invite_form.is_valid():
+                bulk_invite_form.save(request)
+                return redirect("manage-users")
+            show_form_errors(request, bulk_invite_form)
+        elif "email" in request.POST:
+            invite_form = self.get_invite_form(request.POST)
             if invite_form.is_valid():
                 invite_form.save(request)
                 return redirect("manage-users")
+            show_form_errors(request, invite_form)
         return super().get(request, **kwargs)
 
     def get_context_data(self, **kwargs) -> dict[str, Any]:
         result = super().get_context_data(**kwargs)
+        can_edit_users = self.request.user.has_perm("user.edit")
 
-        if self.request.method == "POST":
-            invite_form = AdminInviteUserForm(self.request.POST)
+        posted_invite = self.request.method == "POST" and "email" in self.request.POST
+        if can_edit_users and posted_invite:
+            invite_form = self.get_invite_form(self.request.POST)
             invite_form.is_valid()
+        elif can_edit_users:
+            invite_form = self.get_invite_form()
         else:
-            invite_form = AdminInviteUserForm()
+            invite_form = None
+
+        posted_bulk_invite = (
+            self.request.method == "POST" and "emails" in self.request.POST
+        )
+        if can_edit_users and posted_bulk_invite:
+            bulk_invite_form = self.get_bulk_invite_form(self.request.POST)
+            bulk_invite_form.is_valid()
+        elif can_edit_users:
+            bulk_invite_form = self.get_bulk_invite_form()
+        else:
+            bulk_invite_form = None
 
         result["menu_items"] = MENU
         result["menu_page"] = "users"
+        result["can_edit_users"] = can_edit_users
         result["invite_form"] = invite_form
+        result["bulk_invite_form"] = bulk_invite_form
         result["search_form"] = self.form
         result["invitations"] = Invitation.objects.all().select_related("user")
         return result
 
 
-@management_access
+@management_permission_required("user.edit")
 def users_check(request: AuthenticatedHttpRequest) -> HttpResponse:
     data: QueryDict = request.GET
     # Legacy links for care.weblate.org integration
@@ -485,17 +691,17 @@ def users_check(request: AuthenticatedHttpRequest) -> HttpResponse:
     user_list = None
     if form.is_valid():
         query = form.cleaned_data.get("q", "")
-        parser = getattr(form.fields["q"], "parser", "unit")
+        parser = cast(
+            "Literal['user', 'superuser']", getattr(form.fields["q"], "parser", "user")
+        )
         user_list = User.objects.search(query, parser=parser)[:2]
         if user_list.count() != 1:
-            return redirect_param(
-                "manage-users", "?q={}".format(quote(form.cleaned_data["q"]))
-            )
+            return redirect_param("manage-users", f"?q={quote(form.cleaned_data['q'])}")
         return redirect(user_list[0])
     return redirect("manage-users")
 
 
-@management_access
+@management_permission_required("management.configure")
 def appearance(request: AuthenticatedHttpRequest) -> HttpResponse:
     current = Setting.objects.get_settings_dict(SettingCategory.UI)
     form = AppearanceForm(initial=current)
@@ -541,8 +747,9 @@ def appearance(request: AuthenticatedHttpRequest) -> HttpResponse:
     )
 
 
-@management_access
+@management_permission_required("billing.manage")
 def billing(request: AuthenticatedHttpRequest) -> HttpResponse:
+    # ruff: ignore[import-outside-top-level]
     from weblate.billing.models import Billing
 
     trial = []
@@ -599,6 +806,16 @@ class TeamListView(FormMixin, ListView):
     model = Group
     form_class = SitewideTeamForm
 
+    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
+        if request.method == "POST":
+            if not request.user.has_perm("group.edit"):
+                raise PermissionDenied
+        elif not (
+            request.user.has_perm("group.view") or request.user.has_perm("group.edit")
+        ):
+            raise PermissionDenied
+        return super().dispatch(request, *args, **kwargs)
+
     def get_queryset(self) -> QuerySet[Group]:
         return (
             cast("GroupQuerySet", super().get_queryset())
@@ -612,6 +829,7 @@ class TeamListView(FormMixin, ListView):
         result = super().get_context_data(**kwargs)
         result["menu_items"] = MENU
         result["menu_page"] = "teams"
+        result["can_edit_teams"] = self.request.user.has_perm("group.edit")
         return result
 
     def get_success_url(self) -> str:
@@ -626,3 +844,86 @@ class TeamListView(FormMixin, ListView):
     def form_valid(self, form: SitewideTeamForm) -> HttpResponse:
         form.save()
         return super().form_valid(form)
+
+
+@method_decorator(management_access, name="dispatch")
+class WorkspaceListView(ListView):
+    template_name = "manage/workspaces.html"
+    paginate_by = 50
+    model = Workspace
+
+    def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:  # type: ignore[override]
+        super().setup(request, *args, **kwargs)
+        self.search_form = WorkspaceSearchForm(request.GET)
+
+    def get_queryset(self) -> QuerySet[Workspace]:
+        queryset = Workspace.objects.annotate(Count("projects")).order()
+        billing_enabled = "weblate.billing" in settings.INSTALLED_APPS
+        if self.search_form.is_valid() and (
+            query := self.search_form.cleaned_data["q"].strip()
+        ):
+            filters = Q(name__icontains=query)
+            if billing_enabled:
+                filters |= Q(billing__customer_name__icontains=query)
+            queryset = queryset.filter(filters)
+        if billing_enabled:
+            queryset = queryset.select_related("billing")
+        return queryset
+
+    def get_context_data(self, **kwargs) -> dict[str, Any]:
+        result = super().get_context_data(**kwargs)
+        search_query = ""
+        if self.search_form.is_valid():
+            search_query = self.search_form.cleaned_data["q"].strip()
+        search_items = (("q", search_query),) if search_query else ()
+        result["menu_items"] = MENU
+        result["menu_page"] = "workspaces"
+        result["billing_enabled"] = "weblate.billing" in settings.INSTALLED_APPS
+        result["can_add_workspace"] = self.request.user.has_perm("workspace.add")
+        result["search_form"] = self.search_form
+        result["search_query"] = search_query
+        result["search_items"] = search_items
+        result["query_string"] = urlencode(search_items)
+        return result
+
+
+class WorkspaceCreateView(CreateView):
+    template_name = "manage/workspace_form.html"
+    model = Workspace
+    form_class = WorkspaceCreateForm
+    request: AuthenticatedHttpRequest
+    object: Workspace
+
+    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
+        if "weblate.billing" in settings.INSTALLED_APPS:
+            raise Http404
+        if not request.user.has_perm("workspace.add"):
+            raise PermissionDenied
+        return super().dispatch(request, *args, **kwargs)
+
+    @transaction.atomic
+    def form_valid(self, form: WorkspaceCreateForm) -> HttpResponse:
+        self.object = form.save(commit=False)
+        self.object.acting_user = self.request.user
+        self.object.save()
+        self.object.add_owner(self.request.user, self.request)
+        self.request.user.clear_permissions_cache()
+        Change.objects.create(
+            action=ActionEvents.CREATE_WORKSPACE,
+            workspace=self.object,
+            user=self.request.user,
+            author=self.request.user,
+        )
+        messages.success(self.request, gettext("Workspace created."))
+        return redirect(self.get_success_url())
+
+    def get_context_data(self, **kwargs) -> dict[str, Any]:
+        result = super().get_context_data(**kwargs)
+        result["user_can_manage"] = self.request.user.has_perm("management.use")
+        if result["user_can_manage"]:
+            result["menu_items"] = MENU
+            result["menu_page"] = "workspaces"
+        return result
+
+    def get_success_url(self) -> str:
+        return self.object.get_absolute_url()

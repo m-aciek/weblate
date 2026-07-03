@@ -1,16 +1,22 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
-import argparse
 import json
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from django.core.exceptions import ValidationError
 from django.core.management.base import CommandError
 from django.utils.text import slugify
 
+from weblate.trans.inherited_settings import apply_create_inheritance_defaults
 from weblate.trans.models import Component, Project
 from weblate.utils.management.base import BaseCommand
+
+if TYPE_CHECKING:
+    from django.core.management.base import CommandParser
 
 
 class Command(BaseCommand):
@@ -18,7 +24,7 @@ class Command(BaseCommand):
 
     help = "imports projects based on JSON data"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: CommandParser) -> None:
         super().add_arguments(parser)
         parser.add_argument(
             "--project", default=None, required=True, help="Project where to operate"
@@ -42,11 +48,12 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "json-file",
-            type=argparse.FileType("r"),
+            type=Path,
             help="JSON file containing component definition",
         )
 
-    def handle(self, *args, **options) -> None:  # noqa: C901
+    # ruff: ignore[complex-structure]
+    def handle(self, *args, **options) -> None:
         """Automatic import of components."""
         # Get project
         try:
@@ -65,18 +72,22 @@ class Command(BaseCommand):
             except Component.DoesNotExist as error:
                 msg = "Main component does not exist!"
                 raise CommandError(msg) from error
-
         try:
-            data = json.load(options["json-file"])
-        except json.JSONDecodeError as error:
-            msg = "Could not parse JSON file!"
+            handle = options["json-file"].open("r")
+        except OSError as error:
+            msg = f"Could not open file: {error}"
             raise CommandError(msg) from error
-        finally:
-            options["json-file"].close()
+        with handle:
+            try:
+                data = json.load(handle)
+            except json.JSONDecodeError as error:
+                msg = "Could not parse JSON file!"
+                raise CommandError(msg) from error
 
         allfields = {
             field.name
-            for field in Component._meta.get_fields()  # noqa: SLF001
+            # ruff: ignore[private-member-access]
+            for field in Component._meta.get_fields()
             if field.editable and not field.is_relation
         }
 
@@ -102,14 +113,13 @@ class Command(BaseCommand):
                 component = Component.objects.get(slug=item["slug"], project=project)
             except Component.DoesNotExist:
                 params = {key: item[key] for key in allfields if key in item}
+                apply_create_inheritance_defaults(params, item)
                 component = Component(project=project, **params)
                 try:
                     component.full_clean()
                 except ValidationError as error:
                     for key, value in error.message_dict.items():
-                        self.stderr.write(
-                            "Error in {}: {}".format(key, ", ".join(value))
-                        )
+                        self.stderr.write(f"Error in {key}: {', '.join(value)}")
                     msg = "Component failed validation!"
                     raise CommandError(msg) from error
                 component.save(force_insert=True)

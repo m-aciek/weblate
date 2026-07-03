@@ -5,17 +5,27 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
+from django.utils import translation
+from django.utils.http import urlencode
 from django.views.decorators.cache import cache_control
 from django.views.decorators.http import require_POST
 
-from weblate.checks.flags import Flags
+from weblate.checks.flags import Flags, get_flag_choices
 from weblate.checks.models import Check
-from weblate.trans.models import Change, Component, Project, Translation, Unit
+from weblate.trans.models import (
+    Change,
+    Component,
+    PendingUnitChange,
+    Project,
+    Translation,
+    Unit,
+)
 from weblate.trans.util import sort_unicode
 from weblate.utils.views import parse_path
 
@@ -25,7 +35,7 @@ if TYPE_CHECKING:
 
 def get_unit_translations(request: AuthenticatedHttpRequest, unit_id):
     """Return unit's other translations."""
-    unit = get_object_or_404(Unit, pk=int(unit_id))
+    unit = get_object_or_404(Unit.objects.filter_access(request.user), pk=int(unit_id))
     user = request.user
     user.check_access_component(unit.translation.component)
 
@@ -48,7 +58,9 @@ def get_unit_translations(request: AuthenticatedHttpRequest, unit_id):
 @login_required
 @transaction.atomic
 def ignore_check(request: AuthenticatedHttpRequest, check_id):
-    obj = get_object_or_404(Check.objects.select_for_update(), pk=int(check_id))
+    obj = get_object_or_404(
+        Check.objects.filter_access(request.user).select_for_update(), pk=int(check_id)
+    )
 
     if not request.user.has_perm("unit.check", obj):
         raise PermissionDenied
@@ -63,7 +75,7 @@ def ignore_check(request: AuthenticatedHttpRequest, check_id):
 @login_required
 @transaction.atomic
 def ignore_check_source(request: AuthenticatedHttpRequest, check_id):
-    obj = get_object_or_404(Check, pk=int(check_id))
+    obj = get_object_or_404(Check.objects.filter_access(request.user), pk=int(check_id))
     unit = obj.unit.source_unit
 
     if not request.user.has_perm("unit.check", obj) or not request.user.has_perm(
@@ -80,8 +92,7 @@ def ignore_check_source(request: AuthenticatedHttpRequest, check_id):
     flags = Flags(unit.extra_flags)
     if ignore not in flags:
         flags.merge(ignore)
-        unit.extra_flags = flags.format()
-        unit.save(same_content=True)
+        unit.update_extra_flags(flags.format(), request.user)
 
     # response for AJAX
     return JsonResponse(
@@ -91,6 +102,23 @@ def ignore_check_source(request: AuthenticatedHttpRequest, check_id):
             "ignore_check": ignore,
         }
     )
+
+
+@require_POST
+@login_required
+@transaction.atomic
+def dismiss_automatically_translated(request: AuthenticatedHttpRequest, unit_id):
+    unit = get_object_or_404(Unit.objects.filter_access(request.user), pk=int(unit_id))
+    if not request.user.has_perm("unit.edit", unit):
+        raise PermissionDenied
+
+    unit.translate(
+        request.user,
+        unit.target,
+        unit.state,
+        request=request,
+    )
+    return JsonResponse({})
 
 
 @login_required
@@ -116,14 +144,29 @@ def git_status(request: AuthenticatedHttpRequest, path):
     except IndexError:
         push_label = ""
 
+    pending_units = PendingUnitChange.objects.detailed_count(obj)
+    is_translation = isinstance(obj, Translation)
+    supports_remove_duplicate_units = (
+        is_translation and obj.supports_remove_duplicate_units(obj.component)
+    )
+    supports_cleanup_unused = is_translation and obj.supports_cleanup_unused(
+        obj.component
+    )
+    supports_remove_obsolete_units = (
+        is_translation and obj.supports_remove_obsolete_units(obj.component)
+    )
+
     return render(
         request,
         "js/git-status.html",
         {
             "object": obj,
             "changes": changes,
+            "changes_url_query": urlencode(
+                ("action", action) for action in Change.ACTIONS_REPOSITORY
+            ),
             "repositories": repo_components,
-            "pending_units": obj.count_pending_units,
+            "pending_units": pending_units,
             "outgoing_commits": sum(
                 repo.count_repo_outgoing for repo in repo_components
             ),
@@ -134,6 +177,16 @@ def git_status(request: AuthenticatedHttpRequest, path):
                 if repo.push_branch
             ),
             "missing_commits": sum(repo.count_repo_missing for repo in repo_components),
+            "file_management": is_translation
+            and bool(obj.filename)
+            and (
+                supports_remove_duplicate_units
+                or supports_cleanup_unused
+                or supports_remove_obsolete_units
+            ),
+            "supports_remove_duplicate_units": supports_remove_duplicate_units,
+            "supports_cleanup_unused": supports_cleanup_unused,
+            "supports_remove_obsolete_units": supports_remove_obsolete_units,
             "supports_push": any(
                 repo.repository_class.supports_push for repo in repo_components
             ),
@@ -147,3 +200,16 @@ def matomo(request: AuthenticatedHttpRequest):
     return render(
         request, "js/matomo.js", content_type='text/javascript; charset="utf-8"'
     )
+
+
+@cache_control(max_age=3600, private=True)
+def flag_choices(request: AuthenticatedHttpRequest):
+    """Return the catalog of known translation flags as JSON."""
+    requested = request.GET.get("lang")
+    valid_languages = {code for code, _ in settings.LANGUAGES}
+    if requested and requested in valid_languages:
+        with translation.override(requested):
+            choices = list(get_flag_choices())
+    else:
+        choices = list(get_flag_choices())
+    return JsonResponse({"choices": choices})

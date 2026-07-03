@@ -28,8 +28,10 @@ class GlossaryCheck(TargetCheck):
     description = gettext_lazy(
         "The translation does not follow terms defined in a glossary."
     )
+    version_added = "4.5"
 
     def check_single(self, source: str, target: str, unit: Unit):
+        # ruff: ignore[import-outside-top-level]
         from weblate.glossary.models import get_glossary_terms
 
         forbidden = set()
@@ -95,6 +97,7 @@ class ProhibitedInitialCharacterCheck(TargetCheck):
     # Process readonly (source) strings
     ignore_readonly = False
     glossary = True
+    version_added = "5.9"
 
     def should_skip(self, unit: Unit) -> bool:
         if not unit.translation.component.is_glossary:

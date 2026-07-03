@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 from __future__ import annotations
 
-import random
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -14,7 +13,12 @@ from django.utils.translation import gettext
 
 import weblate.utils.version
 from weblate.configuration.views import CustomCSSView
+from weblate.legal.utils import get_document_context
 from weblate.utils.site import get_site_domain, get_site_url
+from weblate.utils.version_display import (
+    hide_detailed_version,
+    hide_prominent_version,
+)
 from weblate.wladmin.models import ConfigurationError, get_support_status
 
 if TYPE_CHECKING:
@@ -26,6 +30,8 @@ SUPPORT_URL = "https://weblate.org/support/"
 
 CONTEXT_SETTINGS = [
     "SITE_TITLE",
+    "SITE_DOMAIN",
+    "ENABLE_HTTPS",
     "OFFER_HOSTING",
     "ENABLE_AVATARS",
     "ENABLE_SHARING",
@@ -34,15 +40,19 @@ CONTEXT_SETTINGS = [
     "GOOGLE_ANALYTICS_ID",
     "ENABLE_HOOKS",
     "REGISTRATION_OPEN",
+    "CONTACT_FORM",
     "GET_HELP_URL",
     "STATUS_URL",
     "LEGAL_URL",
     "PRIVACY_URL",
+    "PASSWORD_RESET_URL",
     "FONTS_CDN_URL",
     "AVATAR_URL_PREFIX",
+    "VERSION_DISPLAY",
     "HIDE_VERSION",
     "EXTRA_HTML_HEAD",
     "PRIVATE_COMMIT_EMAIL_OPT_IN",
+    "PRIVATE_COMMIT_NAME_OPT_IN",
     # Hosted Weblate integration
     "PAYMENT_ENABLED",
     "IP_ADDRESSES",
@@ -60,10 +70,12 @@ def add_optional_context(context) -> None:
     for name in CONTEXT_APPS:
         appname = f"weblate.{name}"
         context[f"has_{name}"] = appname in settings.INSTALLED_APPS
+    if context["has_legal"]:
+        context.update(get_document_context())
 
 
-def get_preconnect_list():
-    result = []
+def get_preconnect_list() -> list[str | None]:
+    result: list[str | None] = []
     if settings.MATOMO_URL:
         result.append(urlparse(settings.MATOMO_URL).hostname)
     if settings.GOOGLE_ANALYTICS_ID:
@@ -95,20 +107,6 @@ def get_bread_image(path) -> str:
     return "project.svg"
 
 
-def get_interledger_payment_pointer() -> str:
-    interledger_payment_pointers: list[str] = []
-    if settings.INTERLEDGER_PAYMENT_BUILTIN:
-        # Weblate funding
-        interledger_payment_pointers.append("$ilp.uphold.com/ENU7fREdeZi9")
-
-    interledger_payment_pointers.extend(settings.INTERLEDGER_PAYMENT_POINTERS)
-
-    if not interledger_payment_pointers:
-        return None
-
-    return random.choice(interledger_payment_pointers)  # noqa: S311
-
-
 def weblate_context(request: AuthenticatedHttpRequest):
     """Context processor to inject various useful variables into context."""
     if url_has_allowed_host_and_scheme(request.GET.get("next", ""), allowed_hosts=None):
@@ -124,14 +122,18 @@ def weblate_context(request: AuthenticatedHttpRequest):
     # Load user translations if user is authenticated
     watched_projects = None
     theme = "auto"
-    if hasattr(request, "user"):
-        if request.user.is_authenticated:
-            watched_projects = request.user.watched_projects
-        theme = request.user.profile.theme
+    user = getattr(request, "user", None)
+    if user is not None and user.is_authenticated:
+        watched_projects = user.watched_projects
+        theme = user.profile.theme
 
     if settings.OFFER_HOSTING:
         description = gettext(
             "Hosted Weblate, the place to localize your software project."
+        )
+    elif settings.SINGLE_PROJECT:
+        description = gettext(
+            "This site runs Weblate for localizing a software project."
         )
     else:
         description = gettext(
@@ -139,6 +141,15 @@ def weblate_context(request: AuthenticatedHttpRequest):
         )
 
     support_status = get_support_status(request)
+    version_display = settings.VERSION_DISPLAY
+    show_version_details = bool(
+        getattr(user, "is_superuser", False)
+    ) or not hide_detailed_version(version_display)
+    weblate_label = (
+        "Weblate"
+        if hide_prominent_version(version_display)
+        else f"Weblate {weblate.utils.version.VERSION}"
+    )
 
     context = {
         "support_status": support_status,
@@ -151,16 +162,17 @@ def weblate_context(request: AuthenticatedHttpRequest):
         "weblate_link": format_html('<a href="{}">weblate.org</a>', WEBLATE_URL),
         "weblate_name_link": format_html('<a href="{}">Weblate</a>', WEBLATE_URL),
         "weblate_version_link": format_html(
-            '<a href="{}">Weblate {}</a>',
+            '<a href="{}">{}</a>',
             WEBLATE_URL,
-            "" if settings.HIDE_VERSION else weblate.utils.version.VERSION,
+            weblate_label,
         ),
+        "show_version_details": show_version_details,
         "donate_url": DONATE_URL,
         "support_url": SUPPORT_URL,
         "site_url": get_site_url(),
         "site_domain": get_site_domain(),
         "login_redirect_url": login_redirect_url,
-        "has_antispam": bool(settings.AKISMET_API_KEY),
+        "has_antispam": False,  # Akismet integration removed
         "has_sentry": bool(settings.SENTRY_DSN),
         "watched_projects": watched_projects,
         "allow_index": False,
@@ -169,7 +181,6 @@ def weblate_context(request: AuthenticatedHttpRequest):
         ).order_by("-timestamp"),
         "preconnect_list": get_preconnect_list(),
         "custom_css_hash": CustomCSSView.get_hash(request),
-        "interledger_payment_pointer": get_interledger_payment_pointer(),
         "theme": theme,
     }
 

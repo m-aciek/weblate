@@ -5,15 +5,16 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-from contextlib import suppress
-from functools import lru_cache
+from contextlib import nullcontext, suppress
+from pathlib import Path
 from typing import TYPE_CHECKING
 from zipfile import BadZipfile
 
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
-from django.forms import Form, HiddenInput
+from django.core.exceptions import ObjectDoesNotExist
+from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils.decorators import method_decorator
@@ -29,7 +30,6 @@ from weblate.trans.forms import (
     ComponentDiscoverForm,
     ComponentDocCreateForm,
     ComponentInitCreateForm,
-    ComponentProjectForm,
     ComponentScratchCreateForm,
     ComponentSelectForm,
     ComponentZipCreateForm,
@@ -37,21 +37,40 @@ from weblate.trans.forms import (
     ProjectImportCreateForm,
     ProjectImportForm,
 )
+from weblate.trans.inherited_settings import (
+    INHERITABLE_COMPONENT_FLAGS,
+    INHERITABLE_COMPONENT_SETTINGS,
+    get_inherit_field_name,
+)
 from weblate.trans.models import Category, Component, Project
-from weblate.trans.tasks import perform_update
-from weblate.trans.util import get_clean_env
+from weblate.trans.tasks import import_project_backup, perform_update
 from weblate.utils import messages
-from weblate.utils.errors import report_error
-from weblate.utils.licenses import LICENSE_URLS
+from weblate.utils.celery import store_task_metadata
+from weblate.utils.licenses import LICENSE_URLS, detect_license
 from weblate.utils.ratelimit import session_ratelimit_post
 from weblate.utils.views import create_component_from_doc, create_component_from_zip
+from weblate.vcs.base import RepositoryError
+from weblate.vcs.github import (
+    GitHubInstallation,
+    get_github_app_configurations,
+    get_github_repository_import_url,
+    github_app_is_configured,
+)
 from weblate.vcs.models import VCS_REGISTRY
+from weblate.vcs.permissions import github_app_installation_workspaces
+from weblate.workspaces.models import Workspace
 
 if TYPE_CHECKING:
+    from django.forms import Form
+
     from weblate.auth.models import AuthenticatedHttpRequest
+    from weblate.trans.forms import (
+        ComponentProjectForm,
+    )
     from weblate.trans.models.component import ComponentQuerySet
 
 SESSION_CREATE_KEY = "session_component"
+INTEGRATION_IMPORT_VCS_KEY = "integration_import_vcs"
 
 
 class BaseCreateView(CreateView):
@@ -82,37 +101,61 @@ class CreateProject(BaseCreateView):
     model = Project
     object: Project
     form_class: type[Form] = ProjectCreateForm
-    billings = None
+    workspaces = Workspace.objects.none()
+
+    def get_billing(self, workspace: Workspace | None):
+        if workspace is None or not self.has_billing:
+            return None
+        with suppress(ObjectDoesNotExist):
+            return workspace.billing
+        return None
 
     def get_form(self, form_class=None):
         form = super().get_form(form_class)
-        if "billing" in form.fields:
-            billing_field = form.fields["billing"]
-            if self.has_billing:
-                billing_field.queryset = self.billings
-                with suppress(ValueError, KeyError):
-                    billing_field.initial = int(self.request.GET["billing"])
-                billing_field.required = not self.request.user.is_superuser
-                if self.request.user.is_superuser:
-                    billing_field.empty_label = "-- without billing --"
+        if "workspace" in form.fields:
+            workspace_field = form.fields["workspace"]
+            workspace_field.queryset = self.workspaces
+            with suppress(ValueError, KeyError):
+                workspace_field.initial = self.request.GET["workspace"]
+            workspace_field.required = False
+            if self.request.user.has_perm("project.add"):
+                workspace_field.empty_label = gettext("No workspace")
             else:
-                billing_field.required = False
-                billing_field.widget = HiddenInput()
+                workspace_field.required = True
         return form
 
+    @transaction.atomic
     def form_valid(self, form):
+        workspace = form.cleaned_data["workspace"]
+        if workspace is None and not self.request.user.has_perm("project.add"):
+            form.add_error(
+                "workspace",
+                gettext("Creating a project without a workspace is not allowed."),
+            )
+            return self.form_invalid(form)
+        for field in INHERITABLE_COMPONENT_FLAGS:
+            setattr(form.instance, field, workspace is not None)
+        license_code = form.cleaned_data.get("license")
+        if workspace is None:
+            form.instance.inherit_license = False
+        elif license_code:
+            if not workspace.license:
+                if self.request.user.has_perm("workspace.edit", workspace):
+                    workspace.license = license_code
+                    workspace.acting_user = self.request.user
+                    workspace.save(update_fields=["license"])
+                    form.instance.inherit_license = True
+                else:
+                    form.instance.inherit_license = False
+            else:
+                form.instance.inherit_license = workspace.license == license_code
         result = super().form_valid(form)
-        if self.has_billing and form.cleaned_data["billing"]:
-            billing = form.cleaned_data["billing"]
-        else:
-            billing = None
+        billing = self.get_billing(workspace)
         self.object.post_create(self.request.user, billing)
         return result
 
     def can_create(self):
-        return (self.has_billing and self.billings) or self.request.user.has_perm(
-            "project.add"
-        )
+        return self.workspaces.exists() or self.request.user.has_perm("project.add")
 
     def post(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         if not self.can_create():
@@ -124,6 +167,7 @@ class CreateProject(BaseCreateView):
         kwargs["can_create"] = self.can_create()
         kwargs["import_form"] = self.get_form(ProjectImportForm)
         if self.has_billing:
+            # ruff: ignore[import-outside-top-level]
             from weblate.billing.models import Billing
 
             kwargs["user_billings"] = Billing.objects.for_user(
@@ -132,10 +176,17 @@ class CreateProject(BaseCreateView):
         return kwargs
 
     def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
+        self.workspaces = request.user.workspaces_with_perm("workspace.add_project")
         if self.has_billing:
+            # ruff: ignore[import-outside-top-level]
             from weblate.billing.models import Billing
 
-            self.billings = Billing.objects.for_user_within_limits(request.user)
+            valid_billing_workspaces = Billing.objects.for_user_within_limits(
+                request.user
+            ).values("workspace")
+            self.workspaces = self.workspaces.filter(
+                Q(billing__isnull=True) | Q(pk__in=valid_billing_workspaces)
+            )
         return super().dispatch(request, *args, **kwargs)
 
     def get_success_url(self) -> str:
@@ -153,7 +204,7 @@ class ImportProject(CreateProject):
             if "zipfile" in request.FILES:
                 # Delete previous (stale) import data
                 del request.session["import_project"]
-                request.session.pop("import_billing", None)
+                request.session.pop("import_workspace", None)
                 self.projectbackup = None
             else:
                 self.projectbackup = ProjectBackup(request.session["import_project"])
@@ -162,18 +213,16 @@ class ImportProject(CreateProject):
                 self.projectbackup.validate()
         else:
             request.session.pop("import_project", None)
-            request.session.pop("import_billing", None)
+            request.session.pop("import_workspace", None)
             self.projectbackup = None
         super().setup(request, *args, **kwargs)
 
     def get_form(self, form_class=None):
         form = super().get_form(form_class)
-        if "billing" in form.fields and self.has_billing:
-            from weblate.billing.models import Billing
-
-            billing = self.request.session.get("import_billing")
-            if billing:
-                form.fields["billing"].initial = Billing.objects.get(pk=billing)
+        if "workspace" in form.fields:
+            workspace = self.request.session.get("import_workspace")
+            if workspace:
+                form.fields["workspace"].initial = Workspace.objects.get(pk=workspace)
         return form
 
     def get_form_class(self):
@@ -193,28 +242,41 @@ class ImportProject(CreateProject):
             # Delete previous (stale) import data
             os.unlink(self.projectbackup.filename)
             del self.request.session["import_project"]
-            self.request.session.pop("import_billing", None)
+            self.request.session.pop("import_workspace", None)
             self.projectbackup = None
         return super().post(request, *args, **kwargs)
 
+    @transaction.atomic
     def form_valid(self, form):
         if isinstance(form, ProjectImportForm):
             # Save current zip to the import dir
             self.request.session["import_project"] = form.cleaned_data[
                 "projectbackup"
             ].store_for_import()
-            if form.cleaned_data["billing"]:
-                self.request.session["import_billing"] = form.cleaned_data["billing"].pk
+            if form.cleaned_data["workspace"]:
+                self.request.session["import_workspace"] = str(
+                    form.cleaned_data["workspace"].pk
+                )
             return redirect("create-project-import")
-        # Perform actual import
-        project = self.projectbackup.restore(
+        workspace = form.cleaned_data["workspace"]
+        billing = self.get_billing(workspace)
+        task = import_project_backup.delay(
             project_name=form.cleaned_data["name"],
             project_slug=form.cleaned_data["slug"],
-            user=self.request.user,
-            billing=form.cleaned_data["billing"],
+            user_id=self.request.user.id,
+            filename=self.projectbackup.filename,
+            billing_id=billing.pk if billing else None,
+            workspace_id=str(workspace.pk) if workspace else None,
+        )
+        store_task_metadata(task.id, user_id=self.request.user.id)
+        messages.success(
+            self.request,
+            gettext("Project backup import in progress"),
+            f"task:{task.id}",
         )
         del self.request.session["import_project"]
-        return redirect(project)
+        self.request.session.pop("import_workspace", None)
+        return redirect("home")
 
 
 @method_decorator(login_required, name="dispatch")
@@ -225,11 +287,23 @@ class CreateComponent(BaseCreateView):
     selected_project = None
     selected_category = None
     basic_fields = ("repo", "name", "slug", "vcs", "source_language")
+    passthrough_fields = (
+        "category",
+        "is_glossary",
+        "source_component",
+        *ComponentCreateForm.CREATE_INHERITABLE_SETTINGS,
+        *(
+            get_inherit_field_name(field)
+            for field in ComponentCreateForm.CREATE_INHERITABLE_SETTINGS
+        ),
+    )
+    initial_fields = (*basic_fields, "branch", *passthrough_fields)
     empty_form = False
     form_class: type[ComponentProjectForm] = ComponentInitCreateForm
     origin = "vcs"
     object: Component
     duplicate_existing_component: int | None = None
+    integration_import_vcs = ""
 
     def get_form_class(self):
         """Return the form class to use."""
@@ -271,62 +345,58 @@ class CreateComponent(BaseCreateView):
 
     def detect_license(self, form) -> None:
         """Automatic license detection based on licensee."""
-        try:
-            process_result = subprocess.run(
-                ["licensee", "detect", "--json", form.instance.full_path],
-                text=True,
-                capture_output=True,
-                env=get_clean_env(),
-                check=True,
-            )
-        except FileNotFoundError:
-            return
-        except (OSError, subprocess.CalledProcessError) as error:
-            if getattr(error, "returncode", 0) != 1:
-                report_error("Failed licensee invocation")
-            return
-        result = json.loads(process_result.stdout)
-        for license_data in result["licenses"]:
-            spdx_id = license_data["spdx_id"]
-            for license_id in (f"{spdx_id}-or-later", f"{spdx_id}-only", spdx_id):
-                if license_id in LICENSE_URLS:
-                    self.initial["license"] = license_id
-                    messages.info(
-                        self.request,
-                        gettext(
-                            "Detected license as %s, please check whether it is correct."
-                        )
-                        % license_id,
-                    )
-                    return
+        detected_license = detect_license(Path(form.instance.full_path))
 
+        if detected_license and detected_license in LICENSE_URLS:
+            self.initial["license"] = detected_license
+            self.initial["detected_license"] = detected_license
+            messages.info(
+                self.request,
+                gettext("Detected license as %s, please check whether it is correct.")
+                % detected_license,
+            )
+
+    @transaction.atomic
     def form_valid(self, form):
         if self.stage == "create":
-            form.instance.manage_units = (
-                bool(form.instance.template) or form.instance.file_format == "tbx"
+            lock = (
+                nullcontext()
+                if form.instance.is_repo_link
+                else form.instance.repository.lock
             )
-            if self.duplicate_existing_component and (
-                source_component := form.cleaned_data["source_component"]
-            ):
-                fields_to_duplicate = [
-                    "agreement",
-                    "merge_style",
-                    "commit_message",
-                    "add_message",
-                    "delete_message",
-                    "merge_message",
-                    "addon_message",
-                    "pull_message",
-                ]
-                for field in fields_to_duplicate:
-                    setattr(form.instance, field, getattr(source_component, field))
+            with lock:
+                for field in INHERITABLE_COMPONENT_FLAGS:
+                    setattr(form.instance, field, True)
+                for field in ("license", "new_lang", "language_code_style"):
+                    if form.disables_inheritance_for_explicit_setting(field):
+                        setattr(form.instance, f"inherit_{field}", False)
+                form.instance.manage_units = (
+                    bool(form.instance.template) or form.instance.file_format == "tbx"
+                )
+                if source_component := form.cleaned_data.get("source_component"):
+                    create_fields = set(ComponentCreateForm.CREATE_INHERITABLE_SETTINGS)
+                    fields_to_duplicate = [
+                        "merge_style",
+                        *(
+                            field
+                            for field in INHERITABLE_COMPONENT_SETTINGS
+                            if field not in create_fields
+                        ),
+                        *(
+                            get_inherit_field_name(field)
+                            for field in INHERITABLE_COMPONENT_SETTINGS
+                            if field not in create_fields
+                        ),
+                    ]
+                    for field in fields_to_duplicate:
+                        setattr(form.instance, field, getattr(source_component, field))
 
-            result = super().form_valid(form)
-            self.object.post_create(self.request.user, origin=self.origin)
-            return result
+                result = super().form_valid(form)
+                self.object.post_create(self.request.user, origin=self.origin)
+                return result
         if self.stage == "discover":
             # Move to create
-            self.initial = form.cleaned_data
+            self.update_initial(form.cleaned_data)
             self.stage = "create"
             self.request.method = "GET"
             self.warn_outdated(form)
@@ -335,13 +405,14 @@ class CreateComponent(BaseCreateView):
         # Move to discover
         self.stage = "discover"
         self.request.method = "GET"
-        self.initial = form.cleaned_data
+        self.update_initial(form.cleaned_data)
         self.warn_outdated(form)
         return self.get(self.request)
 
     def get_form(self, form_class=None, empty=False):
         self.empty_form = empty
         form = super().get_form(form_class)
+        self.patch_integration_vcs_choice(form)
         if "project" in form.fields:
             project_field = form.fields["project"]
             category_field = form.fields["category"]
@@ -358,12 +429,50 @@ class CreateComponent(BaseCreateView):
                     category_field.initial = self.selected_category
         self.empty_form = False
         if "source_component" in form.fields and self.duplicate_existing_component:
-            self.components = Component.objects.filter(
+            components = Component.objects.filter_access(self.request.user).filter(
                 pk=self.duplicate_existing_component
             )
-            form.fields["source_component"].queryset = self.components
-            form.initial["source_component"] = self.duplicate_existing_component
+            if components.exists():
+                form.fields["source_component"].queryset = components
+                form.initial["source_component"] = self.duplicate_existing_component
         return form
+
+    def patch_integration_vcs_choice(self, form) -> None:
+        vcs_field = form.fields.get("vcs")
+        if vcs_field is None:
+            return
+
+        integration_choices = [
+            choice
+            for choice in VCS_REGISTRY.get_choices(exclude={"local"})
+            if not VCS_REGISTRY[choice[0]].manual_component_creation
+        ]
+        vcs_field.choices = [
+            choice
+            for choice in vcs_field.choices
+            if VCS_REGISTRY[choice[0]].manual_component_creation
+        ]
+        if (
+            self.integration_import_vcs
+            and self.integration_import_vcs == self.initial.get("vcs")
+        ):
+            vcs_backend = VCS_REGISTRY.get(self.integration_import_vcs)
+            vcs_field.choices = [
+                *vcs_field.choices,
+                *(
+                    choice
+                    for choice in integration_choices
+                    if choice[0] == self.integration_import_vcs
+                ),
+            ]
+            if vcs_backend is not None:
+                for field in vcs_backend.component_lock_fields:
+                    if field in form.fields:
+                        form.fields[field].disabled = True
+                for field in vcs_backend.component_clear_fields:
+                    if field in form.fields:
+                        form.initial[field] = ""
+                        form.fields[field].initial = ""
 
     def get_context_data(self, **kwargs):
         kwargs = super().get_context_data(**kwargs)
@@ -387,10 +496,11 @@ class CreateComponent(BaseCreateView):
         if request.user.is_superuser:
             self.projects = Project.objects.order()
         elif self.has_billing:
+            # ruff: ignore[import-outside-top-level]
             from weblate.billing.models import Billing
 
             self.projects = request.user.managed_projects.filter(
-                billing__in=Billing.objects.get_valid()
+                workspace__billing__in=Billing.objects.get_valid()
             ).order()
         else:
             self.projects = request.user.managed_projects
@@ -398,16 +508,27 @@ class CreateComponent(BaseCreateView):
         session_data = {}
         if SESSION_CREATE_KEY in request.GET and SESSION_CREATE_KEY in request.session:
             session_data = request.session[SESSION_CREATE_KEY]
-        for field in self.basic_fields:
+        self.integration_import_vcs = session_data.get(INTEGRATION_IMPORT_VCS_KEY, "")
+        for field in self.initial_fields:
             if field in session_data:
                 self.initial[field] = session_data[field]
             elif field in request.GET:
                 self.initial[field] = request.GET[field]
 
         try:
-            self.duplicate_existing_component = int(request.GET.get("source_component"))
+            self.duplicate_existing_component = int(
+                request.POST.get(
+                    "source_component",
+                    request.GET.get(
+                        "source_component", session_data.get("source_component", "")
+                    ),
+                )
+            )
         except (ValueError, TypeError):
             self.duplicate_existing_component = None
+
+    def update_initial(self, cleaned_data: dict) -> None:
+        self.initial = {**self.initial, **cleaned_data}
 
     def has_all_fields(self):
         session_data = {}
@@ -442,19 +563,20 @@ class CreateFromZip(CreateComponent):
     form_class = ComponentZipCreateForm
     origin = "zip"
 
+    @transaction.atomic
     def form_valid(self, form):
         if self.stage != "init":
             return super().form_valid(form)
 
         try:
             create_component_from_zip(form.cleaned_data)
-        except (BadZipfile, OSError):
+        except (BadZipfile, OSError, RepositoryError):
             form.add_error("zipfile", gettext("Could not parse uploaded ZIP file."))
             return self.form_invalid(form)
 
         # Move to discover phase
         self.stage = "discover"
-        self.initial = form.cleaned_data
+        self.update_initial(form.cleaned_data)
         self.initial["vcs"] = "local"
         self.initial["repo"] = "local:"
         self.initial["branch"] = "main"
@@ -467,6 +589,7 @@ class CreateFromDoc(CreateComponent):
     form_class = ComponentDocCreateForm
     origin = "document"
 
+    @transaction.atomic
     def form_valid(self, form):
         if self.stage != "init":
             return super().form_valid(form)
@@ -478,7 +601,7 @@ class CreateFromDoc(CreateComponent):
         )
         # Move to discover phase
         self.stage = "discover"
-        self.initial = form.cleaned_data
+        self.update_initial(form.cleaned_data)
         self.initial["vcs"] = "local"
         self.initial["repo"] = "local:"
         self.initial["branch"] = "main"
@@ -487,15 +610,6 @@ class CreateFromDoc(CreateComponent):
 
         self.request.method = "GET"
         return self.get(self.request)
-
-
-@lru_cache(maxsize=1024)
-def component_branches(repo: str) -> set[str]:
-    return set(Component.objects.filter(repo=repo).values_list("branch", flat=True))
-
-
-def branch_exists(repo: str, branch: str) -> bool:
-    return branch in component_branches(repo)
 
 
 class CreateComponentSelection(CreateComponent):
@@ -508,12 +622,29 @@ class CreateComponentSelection(CreateComponent):
     @cached_property
     def branch_data(self):
         result = {}
-        for component in self.components:
+        components = list(self.components)
+        repos = {component.repo for component in components}
+        existing_branches: dict[str, set[str]] = {repo: set() for repo in repos}
+        remote_branches: dict[str, list[str]] = {}
+
+        for repo, branch in Component.objects.filter(repo__in=repos).values_list(
+            "repo", "branch"
+        ):
+            existing_branches[repo].add(branch)
+
+        for component in components:
             repo = component.repo
+            if repo not in remote_branches:
+                try:
+                    remote_branches[repo] = component.repository.list_remote_branches()
+                except RepositoryError:
+                    # Ignore error, use no branches
+                    remote_branches[repo] = []
+
             branches = [
                 branch
-                for branch in component.repository.list_remote_branches()
-                if branch != component.branch and not branch_exists(repo, branch)
+                for branch in remote_branches[repo]
+                if branch != component.branch and branch not in existing_branches[repo]
             ]
             if branches:
                 result[component.pk] = branches
@@ -538,13 +669,14 @@ class CreateComponentSelection(CreateComponent):
             self.duplicate_existing_component = None
         self.initial = {}
         if self.duplicate_existing_component:
-            source_component = Component.objects.get(
+            source_component = self.components.filter(
                 pk=self.duplicate_existing_component
-            )
-            self.initial |= {
-                "component": source_component,
-                "is_glossary": source_component.is_glossary,
-            }
+            ).first()
+            if source_component is not None:
+                self.initial |= {
+                    "component": source_component,
+                    "is_glossary": source_component.is_glossary,
+                }
 
     def get_context_data(self, **kwargs):
         kwargs = super().get_context_data(**kwargs)
@@ -566,6 +698,85 @@ class CreateComponentSelection(CreateComponent):
             kwargs["scratch_form"] = kwargs["form"]
         else:
             kwargs["existing_form"] = kwargs["form"]
+        workspace_ids = list(
+            self.projects.filter(workspace__isnull=False)
+            .values_list("workspace_id", flat=True)
+            .distinct()
+        )
+        configured_hosts = set(get_github_app_configurations())
+        installations = GitHubInstallation.objects.filter(
+            enabled=True,
+            hostname__in=configured_hosts,
+            workspace_id__in=workspace_ids,
+        ).select_related("workspace")
+        selected_project_obj = None
+        if self.selected_project:
+            selected_project_obj = self.projects.filter(
+                pk=self.selected_project
+            ).first()
+            if selected_project_obj is not None and selected_project_obj.workspace_id:
+                installations = installations.filter(
+                    workspace_id=selected_project_obj.workspace_id
+                )
+            else:
+                installations = installations.none()
+        installations = installations.order_by(
+            "workspace__name", "target_login", "hostname"
+        )
+        kwargs["github_app_available"] = github_app_is_configured() or (
+            installations.exists()
+        )
+        repositories: list[dict] = []
+        for installation in installations:
+            for repo in installation.repositories:
+                if repo.get("archived", False):
+                    continue
+                entry = dict(repo)
+                entry["account_name"] = installation.target_login
+                entry["workspace_id"] = str(installation.workspace_id)
+                entry["workspace_name"] = installation.workspace.name
+                entry["import_url"] = get_github_repository_import_url(
+                    entry,
+                    installation_id=installation.pk,
+                    project_id=(
+                        selected_project_obj.pk
+                        if selected_project_obj is not None
+                        else None
+                    ),
+                    category_id=self.selected_category,
+                )
+                repositories.append(entry)
+        kwargs["github_app_repositories"] = repositories
+        install_workspace_id = None
+        installation_workspaces = github_app_installation_workspaces(self.request.user)
+        if (
+            github_app_is_configured()
+            and selected_project_obj is not None
+            and selected_project_obj.workspace_id
+            and installation_workspaces.filter(
+                pk=selected_project_obj.workspace_id
+            ).exists()
+        ):
+            install_workspace_id = selected_project_obj.workspace_id
+        elif (
+            github_app_is_configured()
+            and selected_project_obj is None
+            and len(workspace_ids) == 1
+            and installation_workspaces.filter(pk=workspace_ids[0]).exists()
+        ):
+            install_workspace_id = workspace_ids[0]
+
+        if install_workspace_id is not None:
+            kwargs["github_app_install_url"] = (
+                reverse("github-app-install")
+                + "?"
+                + urlencode(
+                    {
+                        "next": f"{self.request.get_full_path()}#github",
+                        "workspace": install_workspace_id,
+                    }
+                )
+            )
         return kwargs
 
     def get_form(self, form_class=None, empty=False):
@@ -591,15 +802,20 @@ class CreateComponentSelection(CreateComponent):
         return ComponentSelectForm
 
     def redirect_create(self, **kwargs):
+        vcs = kwargs.get("vcs")
+        if vcs:
+            vcs_backend = VCS_REGISTRY.get(vcs)
+            if vcs_backend is not None and not vcs_backend.manual_component_creation:
+                kwargs.setdefault(INTEGRATION_IMPORT_VCS_KEY, vcs)
+
         # Store params in session
         self.request.session[SESSION_CREATE_KEY] = kwargs
 
         return redirect(
-            "{}?{}".format(
-                reverse("create-component-vcs"), urlencode({SESSION_CREATE_KEY: 1})
-            )
+            f"{reverse('create-component-vcs')}?{urlencode({SESSION_CREATE_KEY: 1})}"
         )
 
+    @transaction.atomic
     def form_valid(self, form):
         if self.origin == "scratch":
             project = form.cleaned_data["project"]
@@ -610,18 +826,22 @@ class CreateComponentSelection(CreateComponent):
             )
         component = form.cleaned_data["component"]
         if self.origin == "existing":
-            return self.redirect_create(
-                repo=component.repo or component.get_repo_link_url(),
-                project=component.project.pk,
-                category=component.category.pk if component.category else "",
-                name=form.cleaned_data["name"],
-                slug=form.cleaned_data["slug"],
-                is_glossary=form.cleaned_data["is_glossary"],
-                vcs=component.vcs,
-                source_language=component.source_language.pk,
-                license=component.license,
-                source_component=component.pk,
-            )
+            kwargs = {
+                "repo": component.repo or component.get_repo_link_url(),
+                "project": component.project.pk,
+                "category": component.category.pk if component.category else "",
+                "name": form.cleaned_data["name"],
+                "slug": form.cleaned_data["slug"],
+                "is_glossary": form.cleaned_data["is_glossary"],
+                "vcs": component.vcs,
+                "source_language": component.source_language.pk,
+                "source_component": component.pk,
+            }
+            for field in ComponentCreateForm.CREATE_INHERITABLE_SETTINGS:
+                kwargs[field] = getattr(component, field)
+                inherit_field = get_inherit_field_name(field)
+                kwargs[inherit_field] = getattr(component, inherit_field)
+            return self.redirect_create(**kwargs)
         if self.origin == "branch":
             form.instance.save()
             form.instance.post_create(self.request.user, origin="branch")

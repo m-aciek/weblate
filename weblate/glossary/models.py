@@ -5,15 +5,13 @@
 from __future__ import annotations
 
 import re
-import sys
-import unicodedata
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from copy import copy
 from itertools import chain
+from threading import Lock
 from typing import TYPE_CHECKING, cast
 
 import ahocorasick_rs
-import sentry_sdk
 from django.core.cache import cache
 from django.db.models import Prefetch, Q, Value
 from django.db.models.functions import MD5, Lower
@@ -21,21 +19,37 @@ from django.db.models.functions import MD5, Lower
 from weblate.trans.models.unit import Unit
 from weblate.utils.csv import PROHIBITED_INITIAL_CHARS
 from weblate.utils.state import STATE_TRANSLATED
+from weblate.utils.tracing import start_span
+from weblate.utils.unicodechars import CONTROLCHARS
 
 if TYPE_CHECKING:
-    from weblate.trans.models.translation import Translation
+    from collections.abc import Generator, Iterable
+
+    from weblate.trans.models import Project, Translation
 
 SPLIT_RE = re.compile(r"[\s,.:!?]+")
 NON_WORD_RE = re.compile(r"\W")
-# All control chars including tab and newline, this is different from
-# weblate.formats.helpers.CONTROLCHARS which contains only chars
-# problematic in XML or SQL scopes.
-CONTROLCHARS = [
-    char
-    for char in map(chr, range(sys.maxunicode + 1))
-    if unicodedata.category(char) in {"Zl", "Cc"}
-]
+PROHIBITED_INITIAL_CHARS_RE = re.compile(
+    f"^({'|'.join(re.escape(char) for char in PROHIBITED_INITIAL_CHARS)})*"
+)
 CONTROLCHARS_TRANS = str.maketrans(dict.fromkeys(CONTROLCHARS))
+GLOSSARY_AUTOMATON_CACHE_SIZE = 16
+GLOSSARY_AUTOMATON_CACHE: OrderedDict[tuple[int, int], ahocorasick_rs.AhoCorasick] = (
+    OrderedDict()
+)
+GLOSSARY_AUTOMATON_CACHE_LOCK = Lock()
+
+
+def cleanup_glossary_term(text: str) -> str:
+    """
+    Clean up the provided glossary term by removing unwanted characters.
+
+    - Translates and removes control characters.
+    - Strips leading and trailing whitespace.
+    - Removes prohibited leading characters.
+    """
+    text = text.translate(CONTROLCHARS_TRANS)
+    return PROHIBITED_INITIAL_CHARS_RE.sub("", text).strip()
 
 
 def get_glossary_sources(component):
@@ -47,10 +61,30 @@ def get_glossary_sources(component):
     )
 
 
-def get_glossary_automaton(project):
-    from weblate.trans.models.component import prefetch_glossary_terms
+def clear_glossary_automaton_cache(project_id: int | None = None) -> None:
+    """Clear process-local glossary automatons."""
+    with GLOSSARY_AUTOMATON_CACHE_LOCK:
+        if project_id is None:
+            GLOSSARY_AUTOMATON_CACHE.clear()
+        else:
+            for cache_key in list(GLOSSARY_AUTOMATON_CACHE):
+                if cache_key[0] == project_id:
+                    del GLOSSARY_AUTOMATON_CACHE[cache_key]
 
-    with sentry_sdk.start_span(op="glossary.automaton", name=project.slug):
+
+def get_glossary_automaton(project: Project) -> ahocorasick_rs.AhoCorasick:
+    # ruff: ignore[import-outside-top-level]
+    from weblate.trans.models.component import (
+        prefetch_glossary_terms,
+    )
+
+    with start_span(op="glossary.automaton", name=project.slug):
+        cache_key = (project.pk, project.glossary_automaton_cache_version)
+        with GLOSSARY_AUTOMATON_CACHE_LOCK:
+            if cache_key in GLOSSARY_AUTOMATON_CACHE:
+                GLOSSARY_AUTOMATON_CACHE.move_to_end(cache_key)
+                return GLOSSARY_AUTOMATON_CACHE[cache_key]
+
         # Chain terms
         prefetch_glossary_terms(project.glossaries)
         terms = set(
@@ -61,11 +95,17 @@ def get_glossary_automaton(project):
         # Remove blank string as that is not really reasonable to match
         terms.discard("")
         # Build automaton for efficient Aho-Corasick search
-        return ahocorasick_rs.AhoCorasick(
+        result = ahocorasick_rs.AhoCorasick(
             terms,
             implementation=ahocorasick_rs.Implementation.ContiguousNFA,
             store_patterns=False,
         )
+        with GLOSSARY_AUTOMATON_CACHE_LOCK:
+            GLOSSARY_AUTOMATON_CACHE[cache_key] = result
+            GLOSSARY_AUTOMATON_CACHE.move_to_end(cache_key)
+            while len(GLOSSARY_AUTOMATON_CACHE) > GLOSSARY_AUTOMATON_CACHE_SIZE:
+                GLOSSARY_AUTOMATON_CACHE.popitem(last=False)
+        return result
 
 
 def get_glossary_units(project, source_language, target_language):
@@ -85,11 +125,19 @@ def get_glossary_terms(
     return cast("list[Unit]", unit.glossary_terms)
 
 
-def fetch_glossary_terms(  # noqa: C901
+def fetch_glossary_terms(  # ruff: ignore[complex-structure]
     units: list[Unit], *, full: bool = False, include_variants: bool = True
 ) -> None:
     """Fetch glossary terms for list of units."""
-    from weblate.trans.models import Component, Project
+    from weblate.trans.models import (  # ruff: ignore[import-outside-top-level]
+        Component,
+        Project,
+    )
+
+    # ruff: ignore[import-outside-top-level]
+    from weblate.workspaces.models import (
+        Workspace,
+    )
 
     if len(units) == 0:
         return
@@ -106,12 +154,11 @@ def fetch_glossary_terms(  # noqa: C901
     for translation_id, translation in translations.items():
         language = translation.language
         component = translation.component
+        # Do not get glossary matches when display is disabled
+        if component.hide_glossary_matches:
+            continue
         project = component.project
         source_language = component.source_language
-
-        # Short circuit source language
-        if language == source_language:
-            continue
 
         # Extract all source strings
         sources = [unit.source.lower() for unit in translation_units[translation_id]]
@@ -134,7 +181,7 @@ def fetch_glossary_terms(  # noqa: C901
         ]
         terms: set[str] = set()
         # Extract terms present in the source
-        with sentry_sdk.start_span(op="glossary.match", name=project.slug):
+        with start_span(op="glossary.match", name=project.slug):
             for i, source in enumerate(sources):
                 for _termno, start, end in automaton.find_matches_as_indexes(
                     source, overlapping=True
@@ -153,6 +200,11 @@ def fetch_glossary_terms(  # noqa: C901
             base_units = get_glossary_units(project, source_language, language)
             # Variant is used for variant grouping below, source unit for flags
             base_units = base_units.select_related("source_unit", "variant")
+
+            # Exclude currently edited unit items to prevent self-referencing glossary items
+            current_unit_ids = [u.pk for u in translation_units[translation_id] if u.pk]
+            if current_unit_ids:
+                base_units = base_units.exclude(pk__in=current_unit_ids)
 
             if full:
                 # Include full details needed for rendering
@@ -174,6 +226,10 @@ def fetch_glossary_terms(  # noqa: C901
                         queryset=Project.objects.only(
                             "check_flags",
                         ),
+                    ),
+                    Prefetch(
+                        "translation__component__project__workspace",
+                        queryset=Workspace.objects.defer_huge(),
                     ),
                 )
 
@@ -228,9 +284,9 @@ def fetch_glossary_terms(  # noqa: C901
                 )
 
 
-def render_glossary_units_tsv(units) -> str:
+def get_glossary_tuples(units: Iterable[Unit]) -> Generator[tuple[str, str]]:
     r"""
-    Build a tab separated glossary.
+    Build a glossary content as word tuples.
 
     Based on the DeepL specification:
 
@@ -241,22 +297,15 @@ def render_glossary_units_tsv(units) -> str:
     - source/target entry pairs are separated by a newline
     - source entries and target entries are separated by a tab
     """
-    from weblate.trans.models.component import Component
+    from weblate.trans.models import (  # ruff: ignore[import-outside-top-level]
+        Component,
+        Project,
+    )
 
-    def cleanup(text):
-        """
-        Clean up the provided text by removing unwanted characters.
-
-        - Translates and removes control characters using CONTROLCHARS_TRANS.
-        - Strips leading and trailing whitespace.
-        - Removes leading characters from PROHIBITED_INITIAL_CHARS if present.
-        """
-        text = text.translate(CONTROLCHARS_TRANS)
-        prohibited_initial_chars_pattern = (
-            "^(" + "|".join(re.escape(char) for char in PROHIBITED_INITIAL_CHARS) + ")*"
-        )
-
-        return re.sub(prohibited_initial_chars_pattern, "", text).strip()
+    # ruff: ignore[import-outside-top-level]
+    from weblate.workspaces.models import (
+        Workspace,
+    )
 
     # We can get list or iterator as well
     if hasattr(units, "prefetch_related"):
@@ -264,10 +313,17 @@ def render_glossary_units_tsv(units) -> str:
             "source_unit",
             "translation",
             Prefetch("translation__component", queryset=Component.objects.defer_huge()),
+            Prefetch(
+                "translation__component__project",
+                queryset=Project.objects.defer_huge(),
+            ),
+            Prefetch(
+                "translation__component__project__workspace",
+                queryset=Workspace.objects.defer_huge(),
+            ),
         )
 
     included = set()
-    output = []
     for unit in units:
         # Skip forbidden term
         if "forbidden" in unit.all_flags:
@@ -277,8 +333,12 @@ def render_glossary_units_tsv(units) -> str:
             continue
 
         # Cleanup strings
-        source = cleanup(unit.source)
-        target = source if "read-only" in unit.all_flags else cleanup(unit.target)
+        source = cleanup_glossary_term(unit.source)
+        target = (
+            source
+            if "read-only" in unit.all_flags
+            else cleanup_glossary_term(unit.target)
+        )
 
         # Skip blanks and duplicates
         if not source or not target or source in included:
@@ -288,9 +348,14 @@ def render_glossary_units_tsv(units) -> str:
         included.add(source)
 
         # Render TSV
-        output.append(f"{source}\t{target}")
+        yield source, target
 
-    return "\n".join(output)
+
+def render_glossary_units_tsv(units: Iterable[Unit]) -> str:
+    """Build a tab separated glossary."""
+    return "\n".join(
+        f"{source}\t{target}" for source, target in get_glossary_tuples(units)
+    )
 
 
 def get_glossary_tsv(translation) -> str:

@@ -1,3 +1,5 @@
+.. _moko-resource:
+
 Mobile Kotlin resources
 -----------------------
 
@@ -11,9 +13,11 @@ A variant of :doc:`/formats/android`. It differs in plural tag (``plural`` is us
 
 .. seealso::
 
-    `Mobile Kotlin resources <https://github.com/icerockdev/moko-resources>`_,
-    :doc:`/formats/android`,
-    :doc:`tt:formats/android`
+    * `Mobile Kotlin resources <https://github.com/icerockdev/moko-resources>`_
+    * :doc:`/formats/android`
+    * :doc:`tt:formats/android`
+
+.. include:: /snippets/format-features/moko-resource-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

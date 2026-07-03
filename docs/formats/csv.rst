@@ -26,8 +26,7 @@ the following files:
 
    By default, the CSV format does autodetection of file encoding. This can be
    unreliable in some corner cases and causes performance penalty. Please
-   choose file format variant with encoding to avoid this (for example
-   :guilabel:`CSV file (UTF-8)`).
+   choose a file format encoding to avoid this (for example :guilabel:`UTF-8`).
 
 .. warning::
 
@@ -36,7 +35,9 @@ the following files:
    results. This is especially true for CSV files with newlines in the
    values. As a workaround it is recommended to omit quoting characters.
 
-.. seealso:: :doc:`tt:formats/csv`
+.. seealso::
+
+   :doc:`tt:formats/csv`
 
 .. _translate-toolkit: https://toolkit.translatehouse.org/
 
@@ -56,6 +57,8 @@ Example file:
 
 .. literalinclude:: ../../weblate/trans/tests/data/cs.csv
     :language: text
+
+.. include:: /snippets/format-features/csv-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

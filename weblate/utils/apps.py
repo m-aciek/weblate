@@ -6,24 +6,26 @@ from __future__ import annotations
 
 import errno
 import os
-import sys
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import time
 from datetime import timedelta
+from email.utils import parseaddr
 from itertools import chain
 from pathlib import Path
+from shutil import disk_usage
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, cast
 
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from django.apps import AppConfig
 from django.conf import settings
 from django.core.cache import cache
-from django.core.checks import CheckMessage, Error, Info, register
+from django.core.checks import Error, Info, register
 from django.core.exceptions import ImproperlyConfigured
 from django.core.mail import get_connection
-from django.db import DatabaseError
+from django.db import DatabaseError, connections
 from django.db.models import CharField, TextField
 from django.db.models.functions import MD5, Lower
-from django.db.models.lookups import Lookup, Regex
 from django.utils import timezone
 from packaging.version import Version
 
@@ -35,19 +37,22 @@ from .classloader import ClassLoader
 from .const import HEARTBEAT_FREQUENCY
 from .data import data_path
 from .db import (
-    MySQLSearchLookup,
     PostgreSQLRegexLookup,
     PostgreSQLSearchLookup,
     PostgreSQLSubstringLookup,
+    get_database_size,
     measure_database_latency,
-    using_postgresql,
 )
+from .encoding import get_filesystem_encoding, get_locale_encoding, get_python_encoding
 from .errors import init_error_collection
 from .site import check_domain, get_site_domain
 from .version import VERSION_BASE, get_latest_version
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+
+    from django.core.checks import CheckMessage
+    from django.db.models.lookups import Lookup
 
 
 GOOD_CACHE = {"MemcachedCache", "PyLibMCCache", "DatabaseCache", "RedisCache"}
@@ -61,6 +66,40 @@ DEFAULT_SECRET_KEYS = {
     "jm8fqjlg+5!#xu%e-oh#7!$aa7!6avf7ud*_v=chdrb9qdco6(",
     "secret key used for tests only",
 }
+CACHE_EXEC_CHECK_PREFIX = ".weblate-cache-exec-"
+
+
+def run_cache_exec_probe(cache_dir: Path) -> subprocess.CompletedProcess[bytes]:
+    with TemporaryDirectory(dir=cache_dir, prefix=CACHE_EXEC_CHECK_PREFIX) as tempdir:
+        probe = Path(tempdir) / "probe"
+        probe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        probe.chmod(0o755)
+        return subprocess.run(
+            [probe.as_posix()],
+            check=False,
+            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            timeout=5,
+        )
+
+
+def check_cache_dir_executable(cache_dir: Path) -> CheckMessage | None:
+    """Check whether Weblate can execute generated files from cache."""
+    message = (
+        "Cannot execute files from {}, check your CACHE_DIR settings and mount options."
+    )
+    try:
+        result = run_cache_exec_probe(cache_dir)
+        if result.returncode:
+            status = result.returncode
+            return weblate_check(
+                "weblate.C044",
+                f"{message.format(cache_dir)} The check exited with status {status}.",
+            )
+    except (OSError, subprocess.SubprocessError) as error:
+        return weblate_check("weblate.C044", f"{message.format(cache_dir)} {error}")
+
+    return None
 
 
 @register(deploy=True)
@@ -70,7 +109,7 @@ def check_mail_connection(
     databases: Sequence[str] | None,
     **kwargs,
 ) -> Iterable[CheckMessage]:
-    errors = []
+    errors: list[CheckMessage] = []
     try:
         connection = get_connection(timeout=5)
         connection.open()
@@ -82,6 +121,31 @@ def check_mail_connection(
     return errors
 
 
+def check_celery_response(
+    errors: list[CheckMessage], result, start: float, ping_task
+) -> None:
+    pong = result.get(timeout=10, disable_sync_subtasks=False)
+    cache.set("celery_latency", round(1000 * (time.monotonic() - start)))
+    current = ping_task()
+    # Check for outdated Celery running different version of configuration
+    if current != pong:
+        if pong is None:
+            # Celery runs Weblate 4.0 or older
+            differing = ["version"]
+        else:
+            differing = [
+                key
+                for key, value in current.items()
+                if key not in pong or value != pong[key]
+            ]
+        errors.append(
+            weblate_check(
+                "weblate.E034",
+                f"The Celery process is outdated or misconfigured. Following items differ: {format_html_join_comma('{}', list_to_tuples(differing))}",
+            )
+        )
+
+
 @register(deploy=True)
 def check_celery(
     *,
@@ -90,9 +154,9 @@ def check_celery(
     **kwargs,
 ) -> Iterable[CheckMessage]:
     # Import this lazily to avoid evaluating settings too early
-    from weblate.utils.tasks import ping
+    from weblate.utils.tasks import ping  # ruff: ignore[import-outside-top-level, unsorted-imports]
 
-    errors = []
+    errors: list[CheckMessage] = []
     if settings.CELERY_TASK_ALWAYS_EAGER:
         errors.append(
             weblate_check(
@@ -118,29 +182,7 @@ def check_celery(
         start = time.monotonic()
         result = ping.delay()
         try:
-            pong = result.get(timeout=10, disable_sync_subtasks=False)
-            cache.set("celery_latency", round(1000 * (time.monotonic() - start)))
-            current = ping()
-            # Check for outdated Celery running different version of configuration
-            if current != pong:
-                if pong is None:
-                    # Celery runs Weblate 4.0 or older
-                    differing = ["version"]
-                else:
-                    differing = [
-                        key
-                        for key, value in current.items()
-                        if key not in pong or value != pong[key]
-                    ]
-                errors.append(
-                    weblate_check(
-                        "weblate.E034",
-                        "The Celery process is outdated or misconfigured."
-                        " Following items differ: {}".format(
-                            format_html_join_comma("{}", list_to_tuples(differing))
-                        ),
-                    )
-                )
+            check_celery_response(errors, result, start, ping)
         except CeleryTimeoutError:
             errors.append(
                 weblate_check(
@@ -184,13 +226,13 @@ def check_database(
     databases: Sequence[str] | None,
     **kwargs,
 ) -> Iterable[CheckMessage]:
-    errors = []
-    if not using_postgresql():
+    errors: list[CheckMessage] = []
+    if connections["default"].vendor != "postgresql":
         errors.append(
             weblate_check(
                 "weblate.E006",
-                "Weblate performs best with PostgreSQL, consider migrating to it.",
-                Info,
+                "Weblate now requires PostgreSQL. Support for other databases has been removed.",
+                Error,
             )
         )
 
@@ -223,14 +265,14 @@ def check_cache(
     **kwargs,
 ) -> Iterable[CheckMessage]:
     """Check for sane caching."""
-    errors = []
+    errors: list[CheckMessage] = []
 
     cache_backend = cast("str", settings.CACHES["default"]["BACKEND"]).split(".")[-1]
     if cache_backend not in GOOD_CACHE:
         errors.append(
             weblate_check(
                 "weblate.E007",
-                "The configured cache back-end will lead to serious "
+                "The configured cache backend will lead to serious "
                 "performance or consistency issues.",
             )
         )
@@ -256,13 +298,23 @@ def check_settings(
     **kwargs,
 ) -> Iterable[CheckMessage]:
     """Check for sane settings."""
-    errors = []
+    errors: list[CheckMessage] = []
 
-    if not settings.ADMINS or any(x[1] in DEFAULT_MAILS for x in settings.ADMINS):
+    def is_default_admin_email(admin: str | tuple[str, str]) -> bool:
+        if isinstance(admin, tuple):
+            admin_mail = admin[1]
+        else:
+            admin_mail = parseaddr(admin)[1] or admin
+
+        return any(email in admin_mail for email in DEFAULT_MAILS)
+
+    if not settings.ADMINS or any(
+        is_default_admin_email(admin) for admin in settings.ADMINS
+    ):
         errors.append(
             weblate_check(
                 "weblate.E011",
-                "E-mail addresses for site admins is misconfigured",
+                "E-mail addresses for site admins are misconfigured",
                 Error,
             )
         )
@@ -304,7 +356,7 @@ def check_class_loader(
     **kwargs,
 ) -> Iterable[CheckMessage]:
     errors: list[CheckMessage] = []
-    for instance in ClassLoader.instances.values():
+    for instance in ClassLoader.instances:
         try:
             instance.load_data()
         except ImproperlyConfigured as error:
@@ -320,7 +372,7 @@ def check_data_writable(
     **kwargs,
 ) -> Iterable[CheckMessage]:
     """Check we can write to data dir."""
-    errors = []
+    errors: list[CheckMessage] = []
     if not settings.DATA_DIR:
         return [
             weblate_check(
@@ -330,18 +382,26 @@ def check_data_writable(
         ]
     dirs: list[Path] = [
         Path(settings.DATA_DIR),
+        data_path("locks"),
         data_path("home"),
         data_path("ssh"),
         data_path("vcs"),
         data_path("backups"),
         data_path("fonts"),
+        data_path("cache") / "ssh",
         data_path("cache") / "fonts",
     ]
-    message = "Path {} is not writable, check your DATA_DIR settings."
+    message = "Path {} is not writable, check your DATA_DIR and CACHE_DIR settings."
+    cache_path = data_path("cache") / "ssh"
     for path in dirs:
         path.mkdir(parents=True, exist_ok=True)
         if not os.access(path, os.W_OK):
-            errors.append(weblate_check("weblate.E002", message.format(path)))
+            errors.append(weblate_check("weblate.E002", message.format(path), Error))
+
+    if os.access(cache_path, os.W_OK) and (
+        executable_error := check_cache_dir_executable(cache_path)
+    ):
+        errors.append(executable_error)
 
     return errors
 
@@ -353,7 +413,7 @@ def check_site(
     databases: Sequence[str] | None,
     **kwargs,
 ) -> Iterable[CheckMessage]:
-    errors = []
+    errors: list[CheckMessage] = []
     if not check_domain(get_site_domain()):
         errors.append(weblate_check("weblate.E017", "Correct the site domain"))
     return errors
@@ -370,14 +430,14 @@ def check_perms(
     if not settings.DATA_DIR:
         return []
     start = time.monotonic()
-    errors = []
+    errors: list[CheckMessage] = []
     uid = os.getuid()
     message = "The path {} is owned by a different user, check your DATA_DIR settings."
     for dirpath, dirnames, filenames in os.walk(settings.DATA_DIR):
         for name in chain(dirnames, filenames):
             # Skip toplevel lost+found dir, that one is typically owned by root
             # on filesystem toplevel directory. Also skip settings-override.py
-            # used in the Docker container as that one is typically bind mouted
+            # used in the Docker container as that one is typically bind mounted
             # with different permissions (and Weblate is not expected to write
             # to it).
             if dirpath == settings.DATA_DIR and name in {
@@ -409,7 +469,11 @@ def check_errors(
     **kwargs,
 ) -> Iterable[CheckMessage]:
     """Check that error collection is configured."""
-    if hasattr(settings, "ROLLBAR") or settings.SENTRY_DSN:
+    if (
+        hasattr(settings, "ROLLBAR")
+        or settings.SENTRY_DSN
+        or settings.GOOGLE_CLOUD_ERROR_REPORTING is not None
+    ):
         return []
     return [
         weblate_check(
@@ -429,7 +493,11 @@ def check_encoding(
     **kwargs,
 ) -> Iterable[CheckMessage]:
     """Check that the encoding is UTF-8."""
-    if sys.getfilesystemencoding() == "utf-8" and sys.getdefaultencoding() == "utf-8":
+    if (
+        get_filesystem_encoding() == "utf-8"
+        and get_python_encoding() == "utf-8"
+        and get_locale_encoding() == "utf-8"
+    ):
         return []
     return [
         weblate_check(
@@ -437,6 +505,30 @@ def check_encoding(
             "System encoding is not UTF-8, processing non-ASCII strings will break",
         )
     ]
+
+
+@register(deploy=True)
+def check_database_size(
+    *,
+    app_configs: Sequence[AppConfig] | None,
+    databases: Sequence[str] | None,
+    **kwargs,
+) -> Iterable[CheckMessage]:
+    """Check that PostgreSQL database size can be collected."""
+    connection = connections["default"]
+    if connection.vendor != "postgresql":
+        return []
+
+    database_size = get_database_size()
+    if database_size is None:
+        return [
+            weblate_check(
+                "weblate.C045",
+                "Could not determine PostgreSQL database disk usage",
+            )
+        ]
+
+    return []
 
 
 @register(deploy=True)
@@ -448,9 +540,20 @@ def check_diskspace(
 ) -> Iterable[CheckMessage]:
     """Check free disk space."""
     if settings.DATA_DIR:
-        stat = os.statvfs(settings.DATA_DIR)
-        if stat.f_bavail * stat.f_bsize < 10000000:
-            return [weblate_check("weblate.C032", "The disk is nearly full")]
+        try:
+            usage = disk_usage(settings.DATA_DIR)
+        except OSError:
+            # check_data_writable will trigger for this
+            return []
+        if usage is None:
+            return []
+        # Show critical error on really low space, error on low space
+        if usage.free < 20_000_000:
+            message = f"There is not enough free space in {settings.DATA_DIR}"
+            return [weblate_check("weblate.C032", message)]
+        if usage.free < 100_000_000:
+            message = f"The disk space in {settings.DATA_DIR} is running low"
+            return [weblate_check("weblate.E043", message, Error)]
     return []
 
 
@@ -471,7 +574,7 @@ def check_version(
             return [
                 weblate_check(
                     "weblate.C031",
-                    f"You Weblate version is outdated, please upgrade to {latest.version}.",
+                    f"Your Weblate version is outdated, please upgrade to {latest.version}.",
                 )
             ]
         return [
@@ -493,22 +596,13 @@ class UtilsConfig(AppConfig):
         super().ready()
         init_error_collection()
 
-        lookups: list[tuple[type[Lookup]] | tuple[type[Lookup], str]]
-        if using_postgresql():
-            lookups = [
-                (PostgreSQLSearchLookup,),
-                (PostgreSQLSubstringLookup,),
-                (PostgreSQLRegexLookup, "trgm_regex"),
-            ]
-        else:
-            lookups = [
-                (MySQLSearchLookup,),
-                (MySQLSearchLookup, "substring"),
-                (Regex, "trgm_regex"),
-            ]
-
-        lookups.append((cast("type[Lookup]", MD5),))
-        lookups.append((cast("type[Lookup]", Lower),))
+        lookups: list[tuple[type[Lookup]] | tuple[type[Lookup], str]] = [
+            (PostgreSQLSearchLookup,),
+            (PostgreSQLSubstringLookup,),
+            (PostgreSQLRegexLookup, "trgm_regex"),
+            (cast("type[Lookup]", MD5),),
+            (cast("type[Lookup]", Lower),),
+        ]
 
         for lookup in lookups:
             CharField.register_lookup(*lookup)

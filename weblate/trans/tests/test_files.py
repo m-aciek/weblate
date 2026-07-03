@@ -4,22 +4,45 @@
 
 """Test for import and export."""
 
-from io import BytesIO
+from __future__ import annotations
+
+import csv
+import os
+import tempfile
+from io import BytesIO, StringIO
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import patch
+from zipfile import ZipFile
 
 from django.contrib.messages import ERROR
-from django.test import SimpleTestCase
+from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import DatabaseError
+from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from openpyxl import load_workbook
 
-from weblate.formats.helpers import NamedBytesIO
+from weblate.auth.results import Denied
+from weblate.formats.helpers import NamedBytesIO, format_csv_id_hash
+from weblate.formats.ttkit import CSVFormat
+from weblate.lang.models import Language, Plural
 from weblate.trans.actions import ActionEvents
-from weblate.trans.forms import SimpleUploadForm
-from weblate.trans.models import ComponentList
+from weblate.trans.exceptions import FailedCommitError, FileParseError
+from weblate.trans.forms import SimpleUploadForm, UploadForm, get_upload_form
+from weblate.trans.models import Change, ComponentList, PendingUnitChange, Translation
 from weblate.trans.tests.test_views import ViewTestCase
-from weblate.trans.tests.utils import get_test_file
+from weblate.trans.tests.utils import get_optional_path, get_test_file
+from weblate.utils.data import data_dir
 from weblate.utils.state import STATE_READONLY
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from django.http import HttpResponseBase
+
 TEST_PO = get_test_file("cs.po")
+TEST_PO_PLURAL = get_test_file("cs-plural.po")
 TEST_CSV = get_test_file("cs.csv")
 TEST_CSV_QUOTES = get_test_file("cs-quotes.csv")
 TEST_CSV_QUOTES_ESCAPED = get_test_file("cs-quotes-escaped.csv")
@@ -30,6 +53,7 @@ TEST_POT = get_test_file("hello.pot")
 TEST_POT_CHARSET = get_test_file("hello-charset.pot")
 TEST_MO = get_test_file("cs.mo")
 TEST_XLIFF = get_test_file("cs.poxliff")
+TEST_RUBY = get_test_file("cs.ryml")
 TEST_ANDROID = get_test_file("strings-cs.xml")
 TEST_ANDROID_READONLY = get_test_file("strings-with-readonly.xml")
 TEST_XLSX = get_test_file("cs.xlsx")
@@ -37,6 +61,49 @@ TEST_TBX = get_test_file("terms.tbx")
 
 TRANSLATION_OURS = "Nazdar světe!\n"
 TRANSLATION_PO = "Ahoj světe!\n"
+
+
+class UploadFormTest(SimpleTestCase):
+    def test_upload_form_rejects_approved_conflicts_without_review(self) -> None:
+        form = UploadForm(
+            data={
+                "method": "translate",
+                "fuzzy": "",
+                "conflicts": "replace-approved",
+            },
+            files={"file": SimpleUploadedFile("test.po", b'msgid ""\n')},
+            review_permission=Denied("Translation reviews are turned off."),
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertEqual(
+            form.errors["conflicts"],
+            ["Translation reviews are turned off."],
+        )
+
+
+class UploadFormPermissionTest(ViewTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.project.add_user(self.user, "Administration")
+        self.user.clear_permissions_cache()
+
+    def test_upload_form_hides_approved_conflicts_without_review(self) -> None:
+        form = get_upload_form(self.user, self.translation)
+
+        choices = [choice[0] for choice in form.fields["conflicts"].choices]
+        self.assertIn("replace-translated", choices)
+        self.assertNotIn("replace-approved", choices)
+
+    def test_upload_form_keeps_approved_conflicts_with_review(self) -> None:
+        self.project.translation_review = True
+        self.project.save()
+        self.user.clear_permissions_cache()
+
+        form = get_upload_form(self.user, self.translation)
+
+        choices = [choice[0] for choice in form.fields["conflicts"].choices]
+        self.assertIn("replace-approved", choices)
 
 
 class ImportBaseTest(ViewTestCase):
@@ -50,7 +117,9 @@ class ImportBaseTest(ViewTestCase):
         self.user.is_superuser = True
         self.user.save()
 
-    def do_import(self, test_file=None, follow=False, **kwargs):
+    def do_import(
+        self, *, test_file: str | None = None, follow: bool = False, **kwargs
+    ) -> HttpResponseBase:
         """Perform file import."""
         if test_file is None:
             test_file = self.test_file
@@ -63,11 +132,12 @@ class ImportBaseTest(ViewTestCase):
                 "author_email": self.user.email,
             }
             params.update(kwargs)
-            return self.client.post(
-                reverse("upload", kwargs=self.kw_translation),
-                params,
-                follow=follow,
-            )
+            with self.captureOnCommitCallbacks(execute=True):
+                return self.client.post(
+                    reverse("upload", kwargs=self.kw_translation),
+                    params,
+                    follow=follow,
+                )
 
 
 class ImportTest(ImportBaseTest):
@@ -78,6 +148,15 @@ class ImportTest(ImportBaseTest):
 
     def test_import_normal(self) -> None:
         """Test importing normally."""
+        translation = self.get_translation()
+
+        initial_change_count = Change.objects.filter(
+            action=ActionEvents.UPLOAD, translation=translation
+        ).count()
+        initial_pending_count = PendingUnitChange.objects.filter(
+            unit__translation=translation
+        ).count()
+
         response = self.do_import()
         self.assertRedirects(response, self.translation_url)
 
@@ -87,9 +166,39 @@ class ImportTest(ImportBaseTest):
         self.assertEqual(translation.stats.fuzzy, 0)
         self.assertEqual(translation.stats.all, 4)
 
+        self.assertGreater(
+            Change.objects.filter(
+                action=ActionEvents.UPLOAD, translation=translation
+            ).count(),
+            initial_change_count,
+        )
+        self.assertGreater(
+            PendingUnitChange.objects.filter(unit__translation=translation).count(),
+            initial_pending_count,
+        )
+
         # Verify unit
         unit = self.get_unit()
         self.assertEqual(unit.target, TRANSLATION_PO)
+        self.assertTrue(PendingUnitChange.objects.filter(unit=unit).exists())
+
+    @override_settings(TRANSLATION_UPLOAD_MAX_SIZE=1)
+    def test_import_too_big(self) -> None:
+        response = self.do_import(follow=True)
+
+        self.assertRedirects(response, self.translation_url)
+        self.assertContains(response, "Uploaded translation file is too big.")
+
+    @override_settings(TRANSLATION_UPLOAD_MAX_SIZE=1)
+    def test_direct_upload_too_big_without_size(self) -> None:
+        translation = self.get_translation()
+        request = self.get_request()
+        handle = NamedBytesIO("test.po", Path(TEST_PO).read_bytes())
+
+        with self.assertRaisesMessage(
+            ValidationError, "Uploaded translation file is too big."
+        ):
+            translation.handle_upload(request, handle, "")
 
     def test_import_author(self) -> None:
         """Test importing normally."""
@@ -107,6 +216,72 @@ class ImportTest(ImportBaseTest):
         # Verify unit
         unit = self.get_unit()
         self.assertEqual(unit.target, TRANSLATION_PO)
+
+    def test_import_commit_error_is_sanitized(self) -> None:
+        with patch.object(
+            Translation,
+            "handle_upload",
+            side_effect=FailedCommitError(
+                "Commit failed via "
+                "ssh://git@internal.example.net/private/repo.git "
+                f"in {self.component.full_path}/secret"
+            ),
+        ):
+            response = self.do_import(follow=True)
+
+        self.assertRedirects(response, self.translation_url)
+        messages = [message.message for message in response.context["messages"]]
+        self.assertIn("Commit failed", messages[0])
+        self.assertNotIn("internal.example.net", messages[0])
+        self.assertNotIn("ssh://", messages[0])
+        self.assertNotIn(self.component.full_path, messages[0])
+        self.assertIn(".../secret", messages[0])
+
+    def test_import_database_error_is_hidden(self) -> None:
+        with (
+            patch.object(
+                Translation,
+                "handle_upload",
+                side_effect=DatabaseError(
+                    "invalid page in block 876338 of relation base/16386/17990"
+                ),
+            ),
+            patch("weblate.trans.views.files.report_error") as mocked_report_error,
+        ):
+            response = self.do_import(follow=True)
+
+        self.assertRedirects(response, self.translation_url)
+        messages = [message.message for message in response.context["messages"]]
+        self.assertIn("File upload has failed", messages[0])
+        self.assertIn("Please try again later.", messages[0])
+        self.assertNotIn("invalid page", messages[0])
+        self.assertNotIn("base/16386/17990", messages[0])
+        mocked_report_error.assert_called_once_with(
+            "Upload error", project=self.component.project
+        )
+
+    def test_direct_import_commit_database_error_is_hidden(self) -> None:
+        translation = self.get_translation()
+        request = self.get_request()
+        handle = NamedBytesIO("test.po", Path(TEST_PO).read_bytes())
+
+        with (
+            patch.object(
+                Translation,
+                "commit_pending",
+                side_effect=DatabaseError(
+                    "invalid page in block 876338 of relation base/16386/17990"
+                ),
+            ),
+            self.assertRaises(FailedCommitError) as context,
+        ):
+            translation.handle_upload(request, handle, "", method="replace")
+
+        message = str(context.exception)
+        self.assertIn("Could not commit pending changes", message)
+        self.assertIn("Please try again later.", message)
+        self.assertNotIn("invalid page", message)
+        self.assertNotIn("base/16386/17990", message)
 
     def test_import_overwrite(self) -> None:
         """Test importing with overwriting."""
@@ -175,6 +350,19 @@ class ImportTest(ImportBaseTest):
 class ImportErrorTest(ImportBaseTest):
     """Testing import of broken files."""
 
+    def test_invalid_toml_is_reported(self) -> None:
+        fd, filename = tempfile.mkstemp(suffix=".toml")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(b"=broken")
+
+            response = self.do_import(test_file=filename, follow=True)
+        finally:
+            os.unlink(filename)
+
+        self.assertRedirects(response, self.translation_url)
+        self.assertContains(response, "Could not parse uploaded file")
+
     def test_mismatched_plurals(self) -> None:
         """
         Test importing a file with different number of plural forms.
@@ -189,6 +377,262 @@ class ImportErrorTest(ImportBaseTest):
         self.assertIn(
             "Plural forms in the uploaded file do not match", messages[0].message
         )
+
+
+class PluralMetadataUploadValidationTest(ImportBaseTest):
+    @staticmethod
+    def get_csv_id_hash(id_hash: int) -> str:
+        return format_csv_id_hash(id_hash)
+
+    @staticmethod
+    def get_csv_content(rows: list[dict[str, str]]) -> bytes:
+        output = StringIO()
+        fieldnames = [
+            "source",
+            "target",
+            "id_hash",
+            "source_plural_form",
+            "target_plural_form",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+        return output.getvalue().encode()
+
+    @classmethod
+    def get_csv_store(cls, rows: list[dict[str, str]]) -> CSVFormat:
+        return CSVFormat(NamedBytesIO("plural.csv", cls.get_csv_content(rows)))
+
+    def test_merge_plural_metadata_out_of_range_is_not_partially_applied(
+        self,
+    ) -> None:
+        translation = self.get_translation()
+        request = self.get_request()
+        hello_unit = self.get_unit()
+        plural_unit = self.get_unit("Orangutan has %d banana.\n")
+        original_hello_target = hello_unit.target
+        original_plural_target = plural_unit.target
+        source_plurals = plural_unit.get_source_plurals()
+
+        store = self.get_csv_store(
+            [
+                {
+                    "source": hello_unit.source,
+                    "target": "This should not be imported.\n",
+                    "id_hash": str(hello_unit.id_hash),
+                    "source_plural_form": "",
+                    "target_plural_form": "",
+                },
+                *(
+                    {
+                        "source": source_plurals[min(form, len(source_plurals) - 1)],
+                        "target": f"Plural form {form}.\n",
+                        "id_hash": self.get_csv_id_hash(plural_unit.id_hash),
+                        "source_plural_form": str(min(form, len(source_plurals) - 1)),
+                        "target_plural_form": str(form),
+                    }
+                    for form in range(translation.plural.number + 1)
+                ),
+            ]
+        )
+
+        with self.assertRaisesMessage(
+            FileParseError,
+            f"Plural form {translation.plural.number} in the uploaded file is out of range.",
+        ):
+            translation.merge_translations(
+                request, self.user, store, "", "translate", ""
+            )
+
+        hello_unit.refresh_from_db()
+        plural_unit.refresh_from_db()
+        self.assertEqual(hello_unit.target, original_hello_target)
+        self.assertEqual(plural_unit.target, original_plural_target)
+
+    def test_merge_incomplete_plural_metadata_is_not_partially_applied(self) -> None:
+        translation = self.get_translation()
+        request = self.get_request()
+        hello_unit = self.get_unit()
+        plural_unit = self.get_unit("Orangutan has %d banana.\n")
+        original_hello_target = hello_unit.target
+        original_plural_target = plural_unit.target
+        self.assertGreater(translation.plural.number, 1)
+        missing_form = translation.plural.number - 1
+        source_plurals = plural_unit.get_source_plurals()
+        plural_rows = [
+            {
+                "source": source_plurals[min(form, len(source_plurals) - 1)],
+                "target": f"Incomplete plural form {form}.\n",
+                "id_hash": self.get_csv_id_hash(plural_unit.id_hash),
+                "source_plural_form": str(min(form, len(source_plurals) - 1)),
+                "target_plural_form": str(form),
+            }
+            for form in range(missing_form)
+        ]
+        store = self.get_csv_store(
+            [
+                {
+                    "source": hello_unit.source,
+                    "target": "This should not be imported.\n",
+                    "id_hash": str(hello_unit.id_hash),
+                    "source_plural_form": "",
+                    "target_plural_form": "",
+                },
+                *plural_rows,
+            ]
+        )
+
+        with self.assertRaisesMessage(
+            FileParseError,
+            f"Plural form {missing_form} in the uploaded file is missing.",
+        ):
+            translation.merge_translations(
+                request, self.user, store, "", "translate", ""
+            )
+
+        hello_unit.refresh_from_db()
+        plural_unit.refresh_from_db()
+        self.assertEqual(hello_unit.target, original_hello_target)
+        self.assertEqual(plural_unit.target, original_plural_target)
+
+    def test_merge_malformed_id_hash_is_not_partially_applied(self) -> None:
+        translation = self.get_translation()
+        request = self.get_request()
+        hello_unit = self.get_unit()
+        plural_unit = self.get_unit("Orangutan has %d banana.\n")
+        original_target = hello_unit.target
+
+        store = self.get_csv_store(
+            [
+                {
+                    "source": hello_unit.source,
+                    "target": "This should not be imported.\n",
+                    "id_hash": str(hello_unit.id_hash),
+                    "source_plural_form": "",
+                    "target_plural_form": "",
+                },
+                {
+                    "source": plural_unit.get_source_plurals()[0],
+                    "target": "Invalid id hash.\n",
+                    "id_hash": "invalid",
+                    "source_plural_form": "0",
+                    "target_plural_form": "0",
+                },
+            ]
+        )
+
+        with self.assertRaisesMessage(
+            FileParseError, "Invalid id_hash metadata in CSV file: invalid"
+        ):
+            translation.merge_translations(
+                request, self.user, store, "", "translate", ""
+            )
+
+        hello_unit.refresh_from_db()
+        self.assertEqual(hello_unit.target, original_target)
+
+    def test_merge_non_plural_id_hash_column_is_ignored(self) -> None:
+        translation = self.get_translation()
+        hello_unit = self.get_unit()
+        target = "Imported despite external id_hash.\n"
+        store = self.get_csv_store(
+            [
+                {
+                    "source": hello_unit.source,
+                    "target": target,
+                    "id_hash": "external-id",
+                    "source_plural_form": "",
+                    "target_plural_form": "",
+                },
+            ]
+        )
+
+        result = translation.merge_translations(
+            self.get_request(), self.user, store, "replace-translated", "translate", ""
+        )
+
+        self.assertEqual(result, (0, 0, 1, 1))
+        hello_unit.refresh_from_db()
+        self.assertEqual(hello_unit.target, target)
+
+    def test_upload_plural_metadata_without_id_hash_is_rejected(self) -> None:
+        translation = self.get_translation()
+        translation.plural = Plural.objects.create(
+            language=translation.language, number=1, formula="0"
+        )
+        translation.save(update_fields=["plural"])
+
+        plural_unit = self.get_unit("Orangutan has %d banana.\n")
+        original_target = plural_unit.target
+
+        with self.assertRaisesMessage(
+            FileParseError, "Plural form metadata in CSV file requires id_hash."
+        ):
+            translation.handle_upload(
+                self.get_request(),
+                NamedBytesIO(
+                    "plural.csv",
+                    self.get_csv_content(
+                        [
+                            {
+                                "source": plural_unit.get_source_plurals()[1],
+                                "target": "Imported one plural form.\n",
+                                "id_hash": "",
+                                "source_plural_form": "1",
+                                "target_plural_form": "0",
+                            },
+                        ]
+                    ),
+                ),
+                "replace-translated",
+                method="translate",
+            )
+
+        plural_unit.refresh_from_db()
+        self.assertEqual(plural_unit.target, original_target)
+
+    def test_add_plural_metadata_with_id_hash_sparse_source_form_skips_existing(
+        self,
+    ) -> None:
+        translation = self.get_translation()
+        translation.plural = Plural.objects.create(
+            language=translation.language, number=1, formula="0"
+        )
+        translation.save(update_fields=["plural"])
+        plural_unit = self.get_unit("Orangutan has %d banana.\n")
+        translation.add_unit(
+            self.get_request(),
+            plural_unit.context,
+            [
+                "Ambiguous singular source.\n",
+                plural_unit.get_source_plurals()[1],
+            ],
+            ["Ambiguous one plural form.\n"],
+        )
+        initial_count = translation.unit_set.count()
+
+        result = translation.handle_upload(
+            self.get_request(),
+            NamedBytesIO(
+                "plural.csv",
+                self.get_csv_content(
+                    [
+                        {
+                            "source": plural_unit.get_source_plurals()[1],
+                            "target": "Existing one plural form.\n",
+                            "id_hash": self.get_csv_id_hash(plural_unit.id_hash),
+                            "source_plural_form": "1",
+                            "target_plural_form": "0",
+                        },
+                    ]
+                ),
+            ),
+            "",
+            method="add",
+        )
+
+        self.assertEqual(result, (0, 1, 0, 1))
+        self.assertEqual(translation.unit_set.count(), initial_count)
 
 
 class BOMImportTest(ImportTest):
@@ -330,6 +774,77 @@ class StringsImportTest(ImportTest):
         return self.create_iphone()
 
 
+class RubyPluralImportText(ImportBaseTest):
+    test_file = TEST_RUBY
+
+    def create_component(self):
+        return self.create_ruby_yaml()
+
+    def test_import_plural(self) -> None:
+        """Test importing normally."""
+        response = self.do_import()
+        self.assertRedirects(response, self.translation_url)
+
+        # Verify stats
+        translation = self.get_translation()
+        self.assertEqual(translation.stats.translated, 1)
+        self.assertEqual(translation.stats.fuzzy, 0)
+        self.assertEqual(translation.stats.all, 4)
+
+        # Verify unit
+        unit = self.get_unit("Orangutan has %d banana.\n")
+        self.assertEqual(
+            unit.get_target_plurals(),
+            [
+                "Orangutan má %d banán.\n",
+                "Orangutan má %d banány.\n",
+                "Orangutan má %d banánů.\n",
+            ],
+        )
+
+    def test_import_pt_br(self) -> None:
+        language = Language.objects.get(code="pt_BR")
+        with self.captureOnCommitCallbacks(execute=True):
+            translation = self.component.add_new_language(language, None)
+        self.assertIsNotNone(translation)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("upload", kwargs={"path": translation.get_url_path()}),
+                {
+                    "file": BytesIO(
+                        r"""
+pt_br:
+  weblate:
+    orangutan:
+      one: "Orangutan má %d banán.\n"
+      many: "Orangutan má %d banány.\n"
+      other: "Orangutan má %d banánů.\n"
+""".encode()
+                    ),
+                    "method": "translate",
+                    "author_name": self.user.full_name,
+                    "author_email": self.user.email,
+                },
+                follow=True,
+            )
+        self.assertRedirects(response, translation.get_absolute_url())
+
+        self.assertEqual(translation.stats.translated, 1)
+        self.assertEqual(translation.stats.fuzzy, 0)
+        self.assertEqual(translation.stats.all, 4)
+
+        # Verify unit
+        unit = self.get_unit("Orangutan has %d banana.\n", "pt_BR")
+        self.assertEqual(
+            unit.get_target_plurals(),
+            [
+                "Orangutan má %d banán.\n",
+                "Orangutan má %d banány.\n",
+                "Orangutan má %d banánů.\n",
+            ],
+        )
+
+
 class AndroidImportTest(ViewTestCase):
     def create_component(self):
         return self.create_android()
@@ -428,7 +943,10 @@ class CSVImportTest(ViewTestCase):
         translation = self.get_translation()
         self.assertEqual(translation.stats.translated, 0)
         self.assertEqual(translation.stats.fuzzy, 0)
-        with open(self.test_file, "rb") as handle:
+        with (
+            open(self.test_file, "rb") as handle,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
             self.client.post(
                 reverse("upload", kwargs=self.kw_translation),
                 {
@@ -604,6 +1122,16 @@ class ImportReplaceTest(ImportBaseTest):
         unit = self.get_unit()
         self.assertEqual(unit.target, TRANSLATION_PO)
 
+    def test_import_wrong(self) -> None:
+        """Test importing normally."""
+        response = self.do_import(method="replace", test_file=TEST_TBX, follow=True)
+        self.assertRedirects(response, self.translation_url)
+        self.assertContains(response, "Could not parse uploaded file")
+
+        # Verify stats
+        translation = self.get_translation()
+        self.assertEqual(translation.stats.translated, 0)
+
 
 class ImportSourceTest(ImportBaseTest):
     """Testing of source strings update imports."""
@@ -623,7 +1151,18 @@ class ImportSourceTest(ImportBaseTest):
         self.assertFalse(
             translation.change_set.filter(action=ActionEvents.SOURCE_UPLOAD).exists()
         )
-        response = self.do_import(method="source", follow=True)
+
+        def run_on_commit(
+            callback: Callable[[], object], *args: object, **kwargs: object
+        ) -> object:
+            del args, kwargs
+            return callback()
+
+        with patch(
+            "django.db.transaction.on_commit",
+            side_effect=run_on_commit,
+        ):
+            response = self.do_import(method="source", follow=True)
         self.assertRedirects(response, self.translation.get_absolute_url())
         messages = list(response.context["messages"])
         self.assertIn(self.expected, messages[0].message)
@@ -643,11 +1182,75 @@ class ImportSourceTest(ImportBaseTest):
             self.expected_uploads,
         )
 
+    def test_import_removes_obsolete(self) -> None:
+        self.component.file_format_params = {
+            **self.component.file_format_params,
+            "po_remove_obsolete": True,
+        }
+        self.component.save(update_fields=["file_format_params"])
+        translation = self.component.translation_set.get(language__code="cs")
+        translation_file = get_optional_path(translation.get_filename())
+        translation_file.write_text(
+            translation_file.read_text(encoding="utf-8").replace(
+                'msgid "Thank you for using Weblate."\nmsgstr ""',
+                'msgid "Thank you for using Weblate."\nmsgstr "Dekuji"',
+            ),
+            encoding="utf-8",
+        )
+        content = Path(TEST_POT).read_text(encoding="utf-8")
+        for line in ("14", "15"):
+            content = content.replace(
+                f"\n#: main.c:{line}\n"
+                'msgid "Thank you for using Weblate."\n'
+                'msgstr ""\n',
+                "\n",
+            )
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", suffix=".pot", delete=False
+        ) as handle:
+            handle.write(content)
+            test_file = handle.name
+
+        try:
+            response = self.do_import(method="source", test_file=test_file, follow=True)
+        finally:
+            os.unlink(test_file)
+
+        self.assertRedirects(response, self.translation.get_absolute_url())
+        self.assertNotIn(
+            "#~ msgid",
+            get_optional_path(translation.get_filename()).read_text(encoding="utf-8"),
+        )
+
 
 class ImportAddTest(ImportBaseTest):
     """Testing of source strings update imports."""
 
     test_file = TEST_TBX
+
+    def test_add_upload_holds_component_lock(self) -> None:
+        translation = self.get_translation()
+        request = self.get_request()
+        store = object()
+
+        def handle_add_upload(*args, **kwargs):
+            self.assertTrue(translation.component.lock.is_locked)
+            return (0, 0, 0, 0)
+
+        with (
+            patch.object(translation, "load_uploaded_file", return_value=store),
+            patch.object(
+                translation, "handle_add_upload", side_effect=handle_add_upload
+            ) as add_upload,
+        ):
+            translation.handle_upload(
+                request,
+                NamedBytesIO("upload.tbx", b""),
+                "",
+                method="add",
+            )
+
+        add_upload.assert_called_once()
 
     def test_import(self) -> None:
         """Test importing normally."""
@@ -680,6 +1283,25 @@ class ImportAddTest(ImportBaseTest):
         self.assertEqual(translation.stats.translated, 164)
         self.assertEqual(translation.stats.fuzzy, 0)
         self.assertEqual(translation.stats.all, 168)
+
+    def test_add_plural(self) -> None:
+        self.component.manage_units = True
+        self.component.save(update_fields=["manage_units"])
+        response = self.do_import(method="add", follow=True, test_file=TEST_PO_PLURAL)
+        self.assertRedirects(response, self.translation_url)
+        messages = [message.message for message in response.context["messages"]]
+        self.assertIn(
+            (
+                "Processed 1 string from the uploaded files (skipped: 1, not found: 0, updated: 0)."
+            ),
+            messages,
+        )
+
+        # Verify stats
+        translation = self.get_translation()
+        self.assertEqual(translation.stats.translated, 0)
+        self.assertEqual(translation.stats.fuzzy, 0)
+        self.assertEqual(translation.stats.all, 4)
 
 
 class ImportSourceBrokenTest(ImportSourceTest):
@@ -714,6 +1336,15 @@ class DownloadMultiTest(ViewTestCase):
         )
         self.assert_zip(response, "test/test/po/cs.po")
 
+    def test_empty_component_list_denied(self) -> None:
+        ComponentList.objects.create(name="TestCL", slug="testcl")
+
+        response = self.client.get(
+            reverse("download_component_list", kwargs={"name": "testcl"})
+        )
+
+        self.assertEqual(response.status_code, 404)
+
     def test_component_csv(self) -> None:
         response = self.client.get(
             reverse("download", kwargs=self.kw_component), {"format": "zip:csv"}
@@ -726,6 +1357,35 @@ class DownloadMultiTest(ViewTestCase):
         )
         content = self.assert_zip(response, "test-test-cs.xlsx")
         load_workbook(BytesIO(content))
+
+    def test_component_skips_symlinked_template(self) -> None:
+        self.component.template = "template.pot"
+        self.component.save(update_fields=["template"])
+
+        template_path = os.path.join(self.component.full_path, self.component.template)
+        Path(template_path).write_bytes(Path(TEST_POT).read_bytes())
+
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(b"outside repository")
+        self.addCleanup(os.unlink, handle.name)
+
+        os.unlink(template_path)
+        os.symlink(handle.name, template_path)
+
+        response = self.client.get(reverse("download", kwargs=self.kw_component))
+        self.assertEqual(response.status_code, 200)
+
+        with ZipFile(BytesIO(response.content), "r") as zipfile:
+            zip_names = set(zipfile.namelist())
+
+        root = data_dir("vcs")
+        translation_filename = self.get_translation().get_filename()
+        self.assertIsNotNone(translation_filename)
+        translation_rel = os.path.relpath(translation_filename, root)
+        template_rel = os.path.relpath(template_path, root)
+
+        self.assertIn(translation_rel, zip_names)
+        self.assertNotIn(template_rel, zip_names)
 
 
 EXPECTED_CSV = """location,source,target,id,fuzzy,context,translator_comments,developer_comments\r
@@ -783,6 +1443,38 @@ class ImportExportAddTest(ViewTestCase):
 
         handle = NamedBytesIO(
             "test.csv", UPLOAD_CSV.replace("Hello, world", "Hi, World").encode()
+        )
+        params = {
+            "file": handle,
+            "method": "translate",
+            "author_name": self.user.full_name,
+            "author_email": self.user.email,
+        }
+        response = self.client.post(
+            reverse("upload", kwargs=self.kw_translation),
+            params,
+            follow=True,
+        )
+        self.assertContains(response, "(skipped: 0, not found: 0, updated: 1)")
+
+    def test_xliff(self) -> None:
+        self.component.source_translation.add_unit(
+            None, "amp", "Source & translation", author=self.user
+        )
+        response = self.client.get(
+            reverse("download", kwargs=self.kw_translation),
+            {"format": "xliff11"},
+        )
+        content = response.text
+        placeholder = """<source>Source &amp; translation</source>
+        <target></target>"""
+        translation = """<source>Source &amp; translation</source>
+        <target>Zdroj &amp; překlad</target>"""
+
+        self.assertIn(placeholder, content)
+
+        handle = NamedBytesIO(
+            "test.xliff", content.replace(placeholder, translation).encode()
         )
         params = {
             "file": handle,

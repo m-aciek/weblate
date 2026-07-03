@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Sum
 from django.shortcuts import redirect
 from django.utils.translation import gettext, ngettext
 from django.views.decorators.cache import never_cache
@@ -24,6 +24,7 @@ from weblate.trans.forms import (
     SearchForm,
 )
 from weblate.trans.models import Category, Component, Project, Translation, Unit
+from weblate.trans.models.unit import fill_in_source_translation
 from weblate.trans.util import render
 from weblate.utils import messages
 from weblate.utils.ratelimit import check_rate_limit
@@ -34,9 +35,13 @@ from weblate.utils.views import (
     parse_path_units,
     show_form_errors,
 )
+from weblate.workspaces.models import Workspace
 
 if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest
+
+
+SEARCH_SUMMARY_MAX_STRINGS = 1_000
 
 
 @login_required
@@ -45,7 +50,14 @@ def search_replace(request: AuthenticatedHttpRequest, path):
     obj, unit_set, context = parse_path_units(
         request,
         path,
-        (Translation, Component, Project, ProjectLanguage, Category, CategoryLanguage),
+        (
+            Translation,
+            Component,
+            Project,
+            ProjectLanguage,
+            Category,
+            CategoryLanguage,
+        ),
     )
 
     if not request.user.has_perm("unit.edit", obj):
@@ -79,6 +91,12 @@ def search_replace(request: AuthenticatedHttpRequest, path):
 
         matching = Unit.objects.filter(id__in=matching_ids).prefetch()
 
+        confirm_initial = {
+            "q": query,
+            "path": form.cleaned_data.get("path", ""),
+            "search": search_text,
+            "replacement": replacement,
+        }
         confirm = ReplaceConfirmForm(matching, request.POST)
 
         if not confirm.is_valid():
@@ -92,7 +110,7 @@ def search_replace(request: AuthenticatedHttpRequest, path):
                     "replacement": replacement,
                     "form": form,
                     "limited": limited,
-                    "confirm": ReplaceConfirmForm(matching),
+                    "confirm": ReplaceConfirmForm(matching, initial=confirm_initial),
                 }
             )
             return render(request, "replace.html", context)
@@ -142,6 +160,7 @@ def search(request: AuthenticatedHttpRequest, path=None):
             Translation,
             Category,
             CategoryLanguage,
+            Workspace,
             Language,
             None,
         ),
@@ -157,21 +176,20 @@ def search(request: AuthenticatedHttpRequest, path=None):
             request=request, data=request.GET, show_builder=False, obj=obj
         )
         search_form.is_valid()
-        units = unit_set.prefetch_bulk().search(
+        search_units = unit_set.prefetch_bulk().search(
             search_form.cleaned_data.get("q", ""), project=context.get("project")
         )
+        ordered_units = search_units.order_by_request(search_form.cleaned_data, obj)
+        units = get_paginator(request, ordered_units)
+        total_strings = units.paginator.count
+        total_words = None
+        if total_strings <= SEARCH_SUMMARY_MAX_STRINGS:
+            total_words = search_units.aggregate(total_words=Sum("num_words"))[
+                "total_words"
+            ]
 
-        # Count total strings and sum total words from the search results
-        aggregation = units.aggregate(
-            total_strings=Count("id"), total_words=Sum("num_words")
-        )
-        # Get the total strings and total words from the aggregation
-        total_strings = aggregation["total_strings"]
-        total_words = aggregation["total_words"]
-
-        units = get_paginator(
-            request, units.order_by_request(search_form.cleaned_data, obj)
-        )
+        # Make sure source translation is available
+        fill_in_source_translation(units)
         # Rebuild context from scratch here to get new form
         context.update(
             {
@@ -206,15 +224,23 @@ def bulk_edit(request: AuthenticatedHttpRequest, path):
     obj, unit_set, context = parse_path_units(
         request,
         path,
-        (Translation, Component, Project, ProjectLanguage, Category, CategoryLanguage),
+        (
+            Translation,
+            Component,
+            Project,
+            ProjectLanguage,
+            Category,
+            CategoryLanguage,
+            Workspace,
+        ),
     )
 
-    if not request.user.has_perm("translation.auto", obj) or not request.user.has_perm(
+    if not request.user.has_perm("unit.bulk_edit", obj) or not request.user.has_perm(
         "unit.edit", obj
     ):
         raise PermissionDenied
 
-    form = BulkEditForm(request.user, obj, request.POST, project=context["project"])
+    form = BulkEditForm(request.user, obj, request.POST, project=context.get("project"))
 
     if not form.is_valid():
         messages.error(request, gettext("Could not process form!"))
@@ -230,7 +256,7 @@ def bulk_edit(request: AuthenticatedHttpRequest, path):
         remove_flags=form.cleaned_data["remove_flags"],
         add_labels=form.cleaned_data["add_labels"],
         remove_labels=form.cleaned_data["remove_labels"],
-        project=context["project"],
+        project=context.get("project"),
         components=context["components"],
     )
 

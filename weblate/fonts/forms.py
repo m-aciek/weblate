@@ -4,17 +4,19 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import ClassVar, cast
 
 from django import forms
 
 from weblate.fonts.models import Font, FontGroup, FontOverride
+from weblate.utils.forms import AssetFileField
 
 
 class FontForm(forms.ModelForm):
     class Meta:
         model = Font
         fields = ("font",)
+        field_classes: ClassVar[dict[str, type[forms.Field]]] = {"font": AssetFileField}
 
 
 class FontGroupForm(forms.ModelForm):

@@ -4,14 +4,14 @@ Language definitions
 ====================
 
 To present different translations properly, info about language name,
-text direction, plural definitions and language code is needed.
+text direction, plural definitions and language code are needed.
 
 .. _included-languages:
 
 Built-in language definitions
 -----------------------------
 
-Definitions for about 650 languages are included in Weblate and the list is
+Definitions for about 800 languages are included in Weblate and the list is
 extended in every release. Whenever Weblate is upgraded (more specifically
 whenever :wladmin:`migrate` is executed, see
 :ref:`generic-upgrade-instructions`) the database of languages is updated to
@@ -23,8 +23,8 @@ enforce updating the database to match Weblate built-in data using
 
 .. seealso::
 
-   :ref:`extending-languages`,
-   `Current language definitions <https://github.com/WeblateOrg/language-data/blob/main/languages.csv>`_
+   * :ref:`extending-languages`
+   * `Current language definitions <https://github.com/WeblateOrg/language-data/blob/main/languages.csv>`_
 
 .. _language-parsing-codes:
 
@@ -62,8 +62,8 @@ upcoming Weblate release.
 
 .. seealso::
 
-    :ref:`language-code`,
-    :ref:`adding-translation`
+   * :ref:`language-code`
+   * :ref:`adding-translation`
 
 
 .. _changing-languages:
@@ -77,6 +77,10 @@ You can change language definitions in the languages interface
 While editing, ensure all fields are correct (especially plurals and
 text direction), otherwise translators will be unable to properly edit
 those translations.
+
+.. hint::
+
+   Please consider contributing your changes back, see :ref:`extending-languages`.
 
 .. _ambiguous-languages:
 
@@ -92,6 +96,8 @@ only and avoid macrolanguages.
 .. seealso::
 
    `Macrolanguages at Wikipedia <https://en.wikipedia.org/wiki/ISO_639_macrolanguage>`_
+
+.. _language-definitions:
 
 Language definitions
 --------------------
@@ -113,8 +119,8 @@ have two letter code. It can also support extended codes as defined by `BCP 47`_
 
 .. seealso::
 
-   :ref:`language-parsing-codes`,
-   :ref:`adding-translation`
+   * :ref:`language-parsing-codes`
+   * :ref:`adding-translation`
 
 .. _language-name:
 
@@ -171,10 +177,32 @@ Plural formula
 
 Gettext compatible plural formula used to determine which plural form is used for given count.
 
+The formula uses the same expression syntax as the ``plural=`` part of the
+Gettext ``Plural-Forms`` header. The ``nplurals`` value sets how many plural
+forms the language has, and the formula returns the zero-based index of the
+plural form to use for a count ``n``.
+
+Weblate validates the formula using the Gettext parser provided by Python.
+The accepted syntax is a C-like integer expression with ``n`` as the only
+variable. It can use decimal numbers, parentheses, arithmetic operators
+(``+``, ``-``, ``*``, ``/``, ``%``), comparison and equality operators,
+logical operators (``&&``, ``||``, ``!``), and the ternary operator
+(``condition ? value1 : value2``). The result must be between ``0`` and
+``nplurals - 1``.
+
+For example, English uses:
+
+.. code-block:: text
+
+   nplurals=2; plural=n != 1;
+
 .. seealso::
 
-   :ref:`plurals`,
-   `GNU gettext utilities: Plural forms <https://www.gnu.org/software/gettext/manual/html_node/Plural-forms.html>`_,
-   `Language Plural Rules by the Unicode Consortium`_
+   * :ref:`plurals`
+   * `GNU gettext manual for plural forms`_
+   * `GNU gettext plural formula parser`_
+   * `Language Plural Rules by the Unicode Consortium`_
 
+.. _GNU gettext manual for plural forms: https://www.gnu.org/software/gettext/manual/gettext.html#Plural-forms
+.. _GNU gettext plural formula parser: https://cgit.git.savannah.gnu.org/cgit/gettext.git/tree/gettext-runtime/intl/plural.y
 .. _Language Plural Rules by the Unicode Consortium: https://www.unicode.org/cldr/charts/43/supplemental/language_plural_rules.html

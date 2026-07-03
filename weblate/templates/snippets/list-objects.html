@@ -51,14 +51,14 @@
               <span class="sort-icon {% if objects.paginator.sort_by == "name" %}sort-down{% elif objects.paginator.sort_by == "-name" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
-          {% if project and project.enable_review %}
+          {% if show_review_columns or project and project.enable_review %}
             <th title="{% translate "Sort this column" %}"
                 class="number zero-width-540 sort-cell">
               {% if objects.paginator.num_pages > 1 %}
                 <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "approved" %}-{% endif %}approved">
                 {% endif %}
+                <span class="sort-icon {% if objects.paginator.sort_by == "approved" %}sort-down{% elif objects.paginator.sort_by == "-approved" %}sort-up{% endif %}"> </span>
                 {% translate "Approved" %}
-                <span class="sort-icon {% if objects.paginator.sort_by == "approved" %}sort-down{% elif objects.paginator.sort_by == "-approved" %}sort-up{% endif %}" />
                 {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
             </th>
           {% endif %}
@@ -66,17 +66,28 @@
             {% if objects.paginator.num_pages > 1 %}
               <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "translated" %}-{% endif %}translated">
               {% endif %}
+              <span class="sort-icon {% if objects.paginator.sort_by == "translated" %}sort-down{% elif objects.paginator.sort_by == "-translated" %}sort-up{% endif %}"> </span>
               {% translate "Translated" %}
-              <span class="sort-icon {% if objects.paginator.sort_by == "translated" %}sort-down{% elif objects.paginator.sort_by == "-translated" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
+          {% if show_review_columns or project and project.enable_review %}
+            <th title="{% translate "Sort this column" %}"
+                class="number zero-width-640 sort-cell">
+              {% if objects.paginator.num_pages > 1 %}
+                <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "unreviewed" %}-{% endif %}unreviewed">
+                {% endif %}
+                <span class="sort-icon {% if objects.paginator.sort_by == "unreviewed" %}sort-down{% elif objects.paginator.sort_by == "-unreviewed" %}sort-up{% endif %}"> </span>
+                {% translate "Unreviewed" %}
+                {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
+            </th>
+          {% endif %}
           <th title="{% translate "Sort this column" %}"
               class="number zero-width-640 sort-cell">
             {% if objects.paginator.num_pages > 1 %}
               <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "untranslated" %}-{% endif %}untranslated">
               {% endif %}
+              <span class="sort-icon {% if objects.paginator.sort_by == "untranslated" %}sort-down{% elif objects.paginator.sort_by == "-untranslated" %}sort-up{% endif %}"> </span>
               {% translate "Unfinished" %}
-              <span class="sort-icon {% if objects.paginator.sort_by == "untranslated" %}sort-down{% elif objects.paginator.sort_by == "-untranslated" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
           <th title="{% translate "Sort this column" %}"
@@ -84,8 +95,8 @@
             {% if objects.paginator.num_pages > 1 %}
               <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "untranslated_words" %}-{% endif %}untranslated_words">
               {% endif %}
+              <span class="sort-icon {% if objects.paginator.sort_by == "untranslated_words" %}sort-down{% elif objects.paginator.sort_by == "-untranslated_words" %}sort-up{% endif %}"> </span>
               {% translate "Unfinished words" %}
-              <span class="sort-icon {% if objects.paginator.sort_by == "untranslated_words" %}sort-down{% elif objects.paginator.sort_by == "-untranslated_words" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
           <th title="{% translate "Sort this column" %}"
@@ -93,8 +104,8 @@
             {% if objects.paginator.num_pages > 1 %}
               <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "untranslated_chars" %}-{% endif %}untranslated_chars">
               {% endif %}
+              <span class="sort-icon {% if objects.paginator.sort_by == "untranslated_chars" %}sort-down{% elif objects.paginator.sort_by == "-untranslated_chars" %}sort-up{% endif %}"> </span>
               {% translate "Unfinished characters" %}
-              <span class="sort-icon {% if objects.paginator.sort_by == "untranslated_chars" %}sort-down{% elif objects.paginator.sort_by == "-untranslated_chars" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
           <th title="{% translate "Sort this column" %}"
@@ -102,8 +113,8 @@
             {% if objects.paginator.num_pages > 1 %}
               <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "nottranslated" %}-{% endif %}nottranslated">
               {% endif %}
+              <span class="sort-icon {% if objects.paginator.sort_by == "nottranslated" %}sort-down{% elif objects.paginator.sort_by == "-nottranslated" %}sort-up{% endif %}"> </span>
               {% translate "Untranslated" %}
-              <span class="sort-icon {% if objects.paginator.sort_by == "nottranslated" %}sort-down{% elif objects.paginator.sort_by == "-nottranslated" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
           <th title="{% translate "Sort this column" %}"
@@ -111,8 +122,8 @@
             {% if objects.paginator.num_pages > 1 %}
               <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "checks" %}-{% endif %}checks">
               {% endif %}
+              <span class="sort-icon {% if objects.paginator.sort_by == "checks" %}sort-down{% elif objects.paginator.sort_by == "-checks" %}sort-up{% endif %}"> </span>
               {% translate "Checks" %}
-              <span class="sort-icon {% if objects.paginator.sort_by == "checks" %}sort-down{% elif objects.paginator.sort_by == "-checks" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
           <th title="{% translate "Sort this column" %}"
@@ -120,8 +131,8 @@
             {% if objects.paginator.num_pages > 1 %}
               <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "suggestions" %}-{% endif %}suggestions">
               {% endif %}
+              <span class="sort-icon {% if objects.paginator.sort_by == "suggestions" %}sort-down{% elif objects.paginator.sort_by == "-suggestions" %}sort-up{% endif %}"> </span>
               {% translate "Suggestions" %}
-              <span class="sort-icon {% if objects.paginator.sort_by == "suggestions" %}sort-down{% elif objects.paginator.sort_by == "-suggestions" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
           <th title="{% translate "Sort this column" %}"
@@ -129,8 +140,8 @@
             {% if objects.paginator.num_pages > 1 %}
               <a href="?page={{ objects.number }}&amp;sort_by={% if objects.paginator.sort_by == "comments" %}-{% endif %}comments">
               {% endif %}
+              <span class="sort-icon {% if objects.paginator.sort_by == "comments" %}sort-down{% elif objects.paginator.sort_by == "-comments" %}sort-up{% endif %}"> </span>
               {% translate "Comments" %}
-              <span class="sort-icon {% if objects.paginator.sort_by == "comments" %}sort-down{% elif objects.paginator.sort_by == "-comments" %}sort-up{% endif %}" />
               {% if objects.paginator.num_pages > 1 %}</a>{% endif %}
           </th>
         </tr>
@@ -154,12 +165,29 @@
           <th class="object-link">
             <a href="{{ category.get_absolute_url }}">{{ category.name }}</a>
           </th>
-          {% if project and project.enable_review %}
-            {% review_percent category.stats %}
+          {% if show_review_columns or project and project.enable_review %}
+            {% if category.stats.has_review %}
+              {% review_percent category.stats %}
+            {% else %}
+              {% list_objects_number value=0 css="zero-width-540" %}
+            {% endif %}
           {% endif %}
           {% list_objects_percent percent=category.stats.translated_percent value=category.stats.translated search_url=search_url translate_url=translate_url query="q=state:>=translated" total=category.stats.all checks=category.stats.allchecks %}
           {% if not hide_details %}
-            {% list_objects_number value=category.stats.todo search_url=search_url translate_url=translate_url query="q=state:<translated " css="zero-width-640" %} {% list_objects_number value=category.stats.todo_words search_url=search_url translate_url=translate_url query="q=state:<translated" css="zero-width-720" %} {% list_objects_number value=category.stats.todo_chars search_url=search_url translate_url=translate_url query="q=state:<translated" css="zero-width-1200" %} {% list_objects_number value=category.stats.nottranslated search_url=search_url translate_url=translate_url query="q=state:empty" css="zero-width-1400" %} {% list_objects_number value=category.stats.allchecks search_url=search_url translate_url=translate_url query="q=has:check" css="zero-width-768" %} {% list_objects_number value=category.stats.suggestions search_url=search_url translate_url=translate_url query="q=has:suggestion#suggestions" css="zero-width-900" %} {% list_objects_number value=category.stats.comments search_url=search_url translate_url=translate_url query="q=has:comment#comments" css="zero-width-1000" %}
+            {% if show_review_columns or project and project.enable_review %}
+              {% if category.stats.has_review %}
+                {% list_objects_number value=category.stats.waiting_review search_url=search_url translate_url=translate_url query="q=state:translated " css="zero-width-640" %}
+              {% else %}
+                {% list_objects_number value=0 css="zero-width-640" %}
+              {% endif %}
+            {% endif %}
+            {% list_objects_number value=category.stats.todo search_url=search_url translate_url=translate_url query="q=state:<translated " css="zero-width-640" %}
+            {% list_objects_number value=category.stats.todo_words search_url=search_url translate_url=translate_url query="q=state:<translated" css="zero-width-720" %}
+            {% list_objects_number value=category.stats.todo_chars search_url=search_url translate_url=translate_url query="q=state:<translated" css="zero-width-1200" %}
+            {% list_objects_number value=category.stats.nottranslated search_url=search_url translate_url=translate_url query="q=state:empty" css="zero-width-1400" %}
+            {% list_objects_number value=category.stats.allchecks search_url=search_url translate_url=translate_url query="q=has:check" css="zero-width-768" %}
+            {% list_objects_number value=category.stats.suggestions search_url=search_url translate_url=translate_url query="q=has:suggestion#suggestions" css="zero-width-900" %}
+            {% list_objects_number value=category.stats.comments search_url=search_url translate_url=translate_url query="q=has:comment#comments" css="zero-width-1000" %}
           {% endif %}
         </tr>
         <tr data-parent="{{ row_id }}">
@@ -175,9 +203,9 @@
         <tr id="{{ row_id }}">
           <td class="actions" rowspan="2">
             {% if object.is_ghost %}
-              {% perm 'translation.add' object.component as user_can_add_translation %}
+              {% perm 'translation.add' object.base_obj as user_can_add_translation %}
               {% if user_can_add_translation %}
-                <form action="{% url 'new-language' path=object.component.get_url_path %}"
+                <form action="{% url 'new-language' path=object.base_obj.get_url_path %}"
                       method="post">
                   {% csrf_token %}
                   <input type="hidden" name="lang" value="{{ object.language.code }}" />
@@ -231,7 +259,7 @@
                 {% endif %}
               </span>
             {% elif name_source == "translation" %}
-              <a href="{{ object.component.project.get_absolute_url }}">{{ object.component.project.name }}</a>/<a href="{{ object.component.get_absolute_url }}">{{ object.component.name }}</a> — <a class="tail" href="{{ browse_url }}">{{ object.language }}</a>
+              {% path_object_links object.component flags=False %} — <a class="tail" href="{{ browse_url }}">{{ object.language }}</a>
             {% else %}
               <a href="{{ browse_url }}">
                 {% spaceless %}
@@ -255,11 +283,15 @@
             {% endif %}
             {% indicate_alerts object %}
             {% if custom_workflows and object.pk in custom_workflows %}
-              <span class="badge">{% translate "Customized workflow" %}</span>
+              <span class="badge  text-bg-secondary">{% translate "Customized workflow" %}</span>
             {% endif %}
           </th>
-          {% if project and project.enable_review %}
-            {% review_percent object.stats %}
+          {% if show_review_columns or project and project.enable_review %}
+            {% if object.stats.has_review %}
+              {% review_percent object.stats %}
+            {% else %}
+              {% list_objects_number value=0 css="zero-width-540" %}
+            {% endif %}
           {% endif %}
 
           {% if is_glossary %}
@@ -268,6 +300,13 @@
             {% list_objects_percent percent=object.stats.translated_percent value=object.stats.translated search_url=search_url translate_url=translate_url query="q=state:>=translated" total=object.stats.all checks=object.stats.allchecks %}
           {% endif %}
           {% if not hide_details %}
+            {% if show_review_columns or project and project.enable_review %}
+              {% if object.stats.has_review %}
+                {% list_objects_number value=object.stats.waiting_review search_url=search_url translate_url=translate_url query="q=state:translated " css="zero-width-640" %}
+              {% else %}
+                {% list_objects_number value=0 css="zero-width-640" %}
+              {% endif %}
+            {% endif %}
             {% list_objects_number value=object.stats.todo search_url=search_url translate_url=translate_url query="q=state:<translated" css="zero-width-640" %}
             {% list_objects_number value=object.stats.todo_words search_url=search_url translate_url=translate_url query="q=state:<translated" css="zero-width-720" %}
             {% list_objects_number value=object.stats.todo_chars search_url=search_url translate_url=translate_url query="q=state:<translated" css="zero-width-1200" %}

@@ -10,14 +10,16 @@ XML based format used by Apple which is able to store plural forms of a string.
 
 .. seealso::
 
-   :ref:`apple`,
-   `Stringsdict File Format <https://developer.apple.com/documentation/xcode/localizing-strings-that-contain-plurals>`_
+   * :ref:`apple`
+   * `Stringsdict File Format <https://developer.apple.com/documentation/xcode/localizing-strings-that-contain-plurals>`_
 
 Example file:
 
 .. literalinclude:: ../../weblate/trans/tests/data/cs.stringsdict
     :language: xml
 
+
+.. include:: /snippets/format-features/stringsdict-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

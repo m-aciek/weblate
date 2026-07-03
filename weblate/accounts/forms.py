@@ -4,14 +4,14 @@
 
 from __future__ import annotations
 
-import base64
 import json
+import struct
 from binascii import unhexlify
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from time import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
-from altcha import Challenge, ChallengeOptions, create_challenge, verify_solution
+from altcha import Payload, create_challenge, verify_solution
 from crispy_forms.helper import FormHelper
 from crispy_forms.layout import HTML, Div, Field, Fieldset, Layout, Submit
 from django import forms
@@ -22,7 +22,14 @@ from django.db import transaction
 from django.middleware.csrf import rotate_token
 from django.utils.functional import cached_property
 from django.utils.html import escape, format_html
-from django.utils.translation import activate, gettext, gettext_lazy, ngettext, pgettext
+from django.utils.translation import (
+    activate,
+    get_language,
+    gettext,
+    gettext_lazy,
+    ngettext,
+    pgettext,
+)
 from django_otp.forms import OTPTokenForm as DjangoOTPTokenForm
 from django_otp.forms import otp_verification_failed
 from django_otp.oath import totp
@@ -38,8 +45,10 @@ from weblate.accounts.utils import (
     cycle_session_keys,
     get_all_user_mails,
     invalidate_reset_codes,
+    reset_api_token,
 )
-from weblate.auth.models import AuthenticatedHttpRequest, Group, User
+from weblate.auth.models import Group, User
+from weblate.lang.forms import LimitLanguagesField, get_language_code_choices
 from weblate.lang.models import Language
 from weblate.logger import LOGGER
 from weblate.trans.defines import FULLNAME_LENGTH
@@ -57,7 +66,11 @@ from weblate.utils.ratelimit import check_rate_limit, get_rate_setting, reset_ra
 from weblate.utils.validators import validate_fullname
 
 if TYPE_CHECKING:
+    from altcha import Challenge
     from django_otp.models import Device
+    from django_stubs_ext import StrOrPromise
+
+    from weblate.auth.models import AuthenticatedHttpRequest
 
 
 class UniqueEmailMixin(forms.Form):
@@ -123,6 +136,7 @@ class UniqueUsernameField(UsernameField):
 
 
 class FullNameField(forms.CharField):
+    # ruff: ignore[mutable-class-default]
     default_validators = [validate_fullname]
 
     def __init__(self, *args, **kwargs) -> None:
@@ -160,6 +174,7 @@ class LanguagesForm(ProfileBaseForm):
     class Meta:
         model = Profile
         fields = ("language", "languages", "secondary_languages")
+        # ruff: ignore[mutable-class-default]
         widgets = {
             "language": SortedSelect,
             "languages": SortedSelectMultiple,
@@ -201,16 +216,27 @@ class CommitForm(ProfileBaseForm):
         required=False,
         widget=forms.RadioSelect,
     )
+    commit_name = forms.TypedChoiceField(
+        coerce=int,
+        label=gettext_lazy("Commit name"),
+        choices=[],
+        help_text=gettext_lazy(
+            "Used in version control commits. The name stays in the repository forever, once changes are committed by Weblate."
+        ),
+        required=False,
+        widget=forms.RadioSelect,
+    )
 
     class Meta:
         model = Profile
-        fields = ("commit_email",)
+        fields = ("commit_email", "commit_name")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        instance = self.instance
 
-        commit_emails = get_all_user_mails(self.instance.user, filter_deliverable=False)
-        site_commit_email = self.instance.get_site_commit_email()
+        commit_emails = get_all_user_mails(instance.user, filter_deliverable=False)
+        site_commit_email = instance.get_site_commit_email()
         if site_commit_email:
             if not settings.PRIVATE_COMMIT_EMAIL_OPT_IN:
                 self.fields["commit_email"].choices = [("", site_commit_email)]
@@ -218,6 +244,24 @@ class CommitForm(ProfileBaseForm):
                 commit_emails.add(site_commit_email)
 
         self.fields["commit_email"].choices += [(x, x) for x in sorted(commit_emails)]
+
+        site_name = instance.get_site_commit_name()
+        visible_name = instance.user.get_visible_name()
+
+        if not settings.PRIVATE_COMMIT_NAME_OPT_IN and site_name:
+            default_label = gettext_lazy("Use anonymous account name")
+        else:
+            default_label = gettext_lazy("Use account name")
+
+        name_choices = [
+            (Profile.CommitNameChoices.DEFAULT, default_label),
+            (Profile.CommitNameChoices.PUBLIC, visible_name),
+        ]
+
+        if site_name:
+            name_choices.append((Profile.CommitNameChoices.PRIVATE, site_name))
+
+        self.fields["commit_name"].choices = name_choices
 
         self.helper = FormHelper(self)
         self.helper.disable_csrf = True
@@ -269,7 +313,10 @@ class SubscriptionForm(ProfileBaseForm):
             "auto_watch",
             "watched",
         )
-        widgets = {"watched": forms.SelectMultiple}
+        # ruff: ignore[mutable-class-default]
+        widgets = {
+            "watched": forms.SelectMultiple,
+        }
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -319,6 +366,7 @@ class DashboardSettingsForm(ProfileBaseForm):
     class Meta:
         model = Profile
         fields = ("dashboard_view", "dashboard_component_list")
+        # ruff: ignore[mutable-class-default]
         widgets = {
             "dashboard_view": forms.RadioSelect,
             "dashboard_component_list": forms.HiddenInput,
@@ -382,6 +430,7 @@ class UserForm(forms.ModelForm):
     class Meta:
         model = User
         fields = ("username", "full_name", "email")
+        # ruff: ignore[mutable-class-default]
         field_classes = {
             "username": UniqueUsernameField,
             "full_name": FullNameField,
@@ -393,7 +442,9 @@ class UserForm(forms.ModelForm):
         emails = get_all_user_mails(self.instance)
 
         self.fields["email"].choices = [(x, x) for x in sorted(emails)]
-        self.fields["username"].valid = self.instance.username
+        cast(
+            "UniqueUsernameField", self.fields["username"]
+        ).valid = self.instance.username
 
         self.helper = FormHelper(self)
         self.helper.disable_csrf = True
@@ -419,36 +470,20 @@ class UserForm(forms.ModelForm):
 class CaptchaWidget(forms.TextInput):
     challenge: Challenge | None = None
 
+    @staticmethod
+    def serialize_challenge(challenge: Challenge) -> str:
+        return json.dumps(challenge.to_dict())
+
     def render(self, name, value, attrs=None, renderer=None, **kwargs):
         if self.challenge is None:
             msg = "Challenge is missing!"
             raise ValueError(msg)
 
         return format_html(
-            "<altcha-widget challengejson='{}' strings='{}' hidefooter auto='onfocus'></altcha-widget>",
-            # Directly include challenge
-            json.dumps(
-                {
-                    "algorithm": self.challenge.algorithm,
-                    "challenge": self.challenge.challenge,
-                    "maxnumber": self.challenge.max_number,
-                    "salt": self.challenge.salt,
-                    "signature": self.challenge.signature,
-                }
-            ),
-            # Localize strings
-            json.dumps(
-                {
-                    "error": gettext("Verification failed. Try again later."),
-                    "expired": gettext("Verification expired. Try again."),
-                    "label": gettext("I'm not a robot"),
-                    "verified": gettext("Verification completed"),
-                    "verifying": gettext("Verifying…"),
-                    "waitAlert": gettext(
-                        "Verification is still in progress, please wait."
-                    ),
-                }
-            ),
+            '<altcha-widget challenge="{}" configuration="{}" language="{}" auto="onfocus"></altcha-widget>',
+            self.serialize_challenge(self.challenge),
+            json.dumps({"hideFooter": True}),
+            get_language() or "",
         )
 
 
@@ -505,17 +540,14 @@ class CaptchaForm(forms.Form):
                 self.store_challenge()
 
     def generate_challenge(self) -> Challenge:
-        # The expires timestamp needs to be in the local time and not
-        # timezone aware because it is converted using time.mktime(expires.timetuple())
-        # and then compared to time.time()
-        expires = datetime.now(tz=None) + timedelta(hours=1)  # noqa: DTZ005
-
-        challenge_options = ChallengeOptions(
-            hmac_key=settings.SECRET_KEY,
-            max_number=settings.ALTCHA_MAX_NUMBER,
-            expires=expires,
+        self.challenge = create_challenge(
+            algorithm="ARGON2ID",
+            cost=settings.ALTCHA_COST,
+            memory_cost=settings.ALTCHA_MEMORY_COST,
+            parallelism=settings.ALTCHA_PARALLELISM,
+            hmac_secret=settings.SECRET_KEY,
+            expires_at=datetime.now(tz=UTC) + timedelta(hours=1),
         )
-        self.challenge = create_challenge(challenge_options)
         return self.challenge
 
     def generate_captcha(self) -> None:
@@ -537,7 +569,7 @@ class CaptchaForm(forms.Form):
             self["captcha"].label = cast("str", self.fields["captcha"].label)
 
     def store_challenge(self) -> None:
-        self.request.session["captcha_challenge"] = self.challenge.challenge
+        self.request.session["captcha_challenge"] = self.challenge.signature
 
     def clean_captcha(self) -> None:
         """Validate math captcha."""
@@ -557,17 +589,37 @@ class CaptchaForm(forms.Form):
             return
         payload = self.data.get("altcha", "")
 
-        # Validate payload
-        result = verify_solution(payload, settings.SECRET_KEY, check_expires=True)
-        if not result[0]:
-            LOGGER.error("Invalid altcha solution: %s", result[1:])
-            raise forms.ValidationError(gettext("Validation failed, please try again."))
+        try:
+            payload = Payload.from_base64(payload)
+        except (ValueError, KeyError, TypeError) as error:
+            LOGGER.error("Invalid altcha payload: %s", error)
+            raise forms.ValidationError(
+                gettext("Validation failed, please try again.")
+            ) from error
 
         # Manually guard against replay attacks
-        payload = json.loads(base64.b64decode(payload).decode())
         # Use get to gracefully handle already solved challenges
-        if payload["challenge"] != self.request.session.get("captcha_challenge"):
+        if payload.challenge.signature != self.request.session.get("captcha_challenge"):
             LOGGER.error("Outdated altcha solution")
+            raise forms.ValidationError(gettext("Validation failed, please try again."))
+
+        # Validate payload
+        try:
+            result = verify_solution(payload, hmac_secret=settings.SECRET_KEY)
+        except (ValueError, TypeError, struct.error) as error:
+            LOGGER.error("Invalid altcha solution: %s", error)
+            raise forms.ValidationError(
+                gettext("Validation failed, please try again.")
+            ) from error
+
+        if not result.verified:
+            LOGGER.error(
+                "Invalid altcha solution: expired=%s invalid_signature=%s invalid_solution=%s error=%s",
+                result.expired,
+                result.invalid_signature,
+                result.invalid_solution,
+                result.error,
+            )
             raise forms.ValidationError(gettext("Validation failed, please try again."))
 
     def is_valid(self) -> bool:
@@ -604,7 +656,15 @@ class ContactForm(CaptchaForm):
         widget=forms.Textarea,
     )
 
-    field_order = ["subject", "name", "email", "message", "captcha"]
+    # ruff: ignore[mutable-class-default]
+    field_order = [
+        "subject",
+        "name",
+        "email",
+        "message",
+        "captcha",
+        "altcha",
+    ]
 
 
 class EmailForm(CaptchaForm, UniqueEmailMixin):
@@ -618,7 +678,12 @@ class EmailForm(CaptchaForm, UniqueEmailMixin):
         help_text=gettext_lazy("An e-mail with a confirmation link will be sent here."),
     )
 
-    field_order = ["email", "captcha"]
+    # ruff: ignore[mutable-class-default]
+    field_order = [
+        "email",
+        "captcha",
+        "altcha",
+    ]
 
 
 class RegistrationForm(EmailForm):
@@ -631,8 +696,6 @@ class RegistrationForm(EmailForm):
     # This has to be without underscore for social-auth
     fullname = FullNameField()
 
-    field_order = ["email", "username", "fullname", "captcha"]
-
     def __init__(
         self, request=None, data=None, initial=None, hide_captcha: bool = False
     ) -> None:
@@ -641,6 +704,16 @@ class RegistrationForm(EmailForm):
         self.request = request
         super().__init__(
             request=request, data=data, initial=initial, hide_captcha=hide_captcha
+        )
+        self.helper = FormHelper(self)
+        self.helper.form_tag = False
+        self.helper.layout = Layout(
+            "email",
+            "username",
+            "fullname",
+            "captcha",
+            "altcha",
+            ContextDiv(template="accounts/register-password.html"),
         )
 
     def clean(self):
@@ -673,8 +746,19 @@ class SetPasswordForm(DjangoSetPasswordForm):
         label=gettext_lazy("New password confirmation"),
         new_password=True,
     )
+    regenerate_api_key = forms.BooleanField(
+        label=gettext_lazy("Regenerate API key"),
+        help_text=gettext_lazy(
+            "Leave enabled to revoke the current API key and generate a new one. "
+            "This is recommended if you suspect your password was compromised. "
+            "Disable it to keep your current API key active after changing your password."
+        ),
+        required=False,
+        initial=True,
+    )
 
     @transaction.atomic
+    # pylint: disable-next=arguments-renamed
     def save(self, request: AuthenticatedHttpRequest, delete_session=False) -> None:
         AuditLog.objects.create(
             self.user,
@@ -694,6 +778,9 @@ class SetPasswordForm(DjangoSetPasswordForm):
 
         # Invalidate password reset codes
         invalidate_reset_codes(self.user)
+
+        if self.cleaned_data.get("regenerate_api_key"):
+            reset_api_token(self.user)
 
         if delete_session:
             request.session.flush()
@@ -743,6 +830,7 @@ class LoginForm(forms.Form):
     username = forms.CharField(max_length=254, label=gettext_lazy("Username or e-mail"))
     password = PasswordField(label=gettext_lazy("Password"))
 
+    # ruff: ignore[mutable-class-default]
     error_messages = {
         "invalid_login": gettext_lazy(
             "Please enter the correct username and password."
@@ -778,14 +866,14 @@ class LoginForm(forms.Form):
                     )
                     % lockout_period
                 )
-            self.user_cache = cast(
+            user = self.user_cache = cast(
                 "User | None",
                 authenticate(self.request, username=username, password=password),
             )
-            if self.user_cache is None:
-                for user in try_get_user(username, True):
+            if user is None:
+                for failed_user in try_get_user(username, True):
                     audit = AuditLog.objects.create(
-                        user,
+                        failed_user,
                         self.request,
                         "failed-auth",
                         method="password",
@@ -796,14 +884,14 @@ class LoginForm(forms.Form):
                 raise forms.ValidationError(
                     self.error_messages["invalid_login"], code="invalid_login"
                 )
-            if not self.user_cache.is_active or self.user_cache.is_bot:
+            if not user.is_active or user.is_bot:
                 raise forms.ValidationError(
                     self.error_messages["inactive"], code="inactive"
                 )
             AuditLog.objects.create(
-                self.user_cache, self.request, "login", method="password", name=username
+                user, self.request, "login", method="password", name=username
             )
-            adjust_session_expiry(self.request)
+            adjust_session_expiry(request=self.request, user=user)
             reset_rate_limit("login", self.request)
         return self.cleaned_data
 
@@ -858,8 +946,9 @@ class NotificationForm(forms.Form):
         self.helper = FormHelper(self)
         self.helper.disable_csrf = True
         self.helper.form_tag = False
-        self.helper.label_class = "col-md-3"
-        self.helper.field_class = "col-md-9"
+        self.helper.label_class = "col-3"
+        self.helper.field_class = "col-9"
+        self.helper.form_class = "form-horizontal"
         self.helper.layout = Layout(
             "scope",
             "project",
@@ -1012,7 +1101,7 @@ class UserSearchForm(forms.Form):
     q = QueryField(parser="user")
     sort_by = forms.CharField(required=False, widget=forms.HiddenInput)
 
-    sort_choices = {
+    sort_choices: ClassVar[dict[str, StrOrPromise]] = {
         "username": gettext_lazy("Username"),
         "full_name": gettext_lazy("Full name"),
         "date_joined": gettext_lazy("Date joined"),
@@ -1060,19 +1149,24 @@ class GroupChoiceField(forms.ModelChoiceField):
 
 class GroupAddForm(forms.Form):
     add_group = GroupChoiceField(
-        label=gettext_lazy("Add user to a team"),
+        label=gettext_lazy("Team"),
         queryset=Group.objects.prefetch_related("defining_project").order(),
         required=True,
+    )
+    limit_languages = LimitLanguagesField(
+        Language.objects.order(), hide_placeholder=True
     )
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.fields["limit_languages"].choices = get_language_code_choices(
+            self.fields["limit_languages"].queryset
+        )
         self.helper = FormHelper(self)
-        self.helper.form_class = "form-inline"
-        self.helper.field_template = "bootstrap3/layout/inline_field.html"
         self.helper.layout = Layout(
             "add_group",
-            Submit("add_group_button", gettext("Add team")),
+            "limit_languages",
+            Submit("add_group_button", gettext("Add to a team")),
         )
 
 
@@ -1102,6 +1196,22 @@ class TOTPDeviceForm(forms.Form):
         }
     )
 
+    remove_previous = forms.BooleanField(
+        required=False,
+        initial=True,
+        label=gettext_lazy("Discard previously configured authentication apps"),
+        help_text=format_html(
+            "{}<br>{}",
+            gettext_lazy(
+                "All previously configured authentication apps will be discarded upon verification of the new app."
+            ),
+            gettext(
+                "Other two-factor methods (such as WebAuthn and security keys) won't be affected."
+            ),
+        ),
+    )
+
+    # ruff: ignore[mutable-class-default]
     error_messages = {
         "invalid_token": gettext_lazy("The entered token is not valid."),
     }
@@ -1116,6 +1226,8 @@ class TOTPDeviceForm(forms.Form):
         self.digits = 6
         self.user = user
         self.metadata = metadata or {}
+        if not self.user.totpdevice_set.exists():
+            self.fields["remove_previous"].widget = forms.HiddenInput()
 
     @property
     def bin_key(self):
@@ -1195,7 +1307,8 @@ class OTPTokenForm(DjangoOTPTokenForm):
         return None
 
     @staticmethod
-    def device_choices(user):  # noqa: ARG004
+    # ruff: ignore[unused-static-method-argument]
+    def device_choices(user):
         # Not needed as we do not support challenge/response devices
         # Also this is incompatible with WebAuthn
         return []

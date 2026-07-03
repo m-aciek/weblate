@@ -4,22 +4,32 @@
 
 """Celery integration helper tools."""
 
+# mypy: disable-error-code="attr-defined"
+
 from __future__ import annotations
 
 import os
 import time
 from collections import defaultdict
+from typing import Any
 
 from celery import Celery
-from celery.signals import after_setup_logger, task_failure
+from celery.contrib.django.task import DjangoTask
+from celery.signals import after_setup_logger, before_task_publish, task_failure
 from django.conf import settings
 from django.core.cache import cache
 from django.core.checks import run_checks
 
+# Type annotation compatibility
+# ruff: ignore[unused-lambda-argument]
+Celery.__class_getitem__ = classmethod(lambda cls, *args, **kwargs: cls)
+# ruff: ignore[unused-lambda-argument]
+DjangoTask.__class_getitem__ = classmethod(lambda cls, *args, **kwargs: cls)
+
 # set the default Django settings module for the 'celery' program.
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "weblate.settings")
 
-app = Celery("weblate")
+app = Celery[DjangoTask[..., Any]]("weblate")
 
 # Using a string here means the worker doesn't have to serialize
 # the configuration object to child processes.
@@ -30,22 +40,87 @@ app.config_from_object("django.conf:settings", namespace="CELERY")
 # Load task modules from all registered Django app configs.
 app.autodiscover_tasks()
 
+TASK_METADATA_TTL = 6 * 3600
+
+
+def get_task_metadata_key(task_id: str) -> str:
+    return f"task-meta-{task_id}"
+
+
+def store_task_metadata(
+    task_id: str | None,
+    *,
+    component_id: int | None = None,
+    translation_id: int | None = None,
+    user_id: int | None = None,
+) -> None:
+    if not task_id:
+        return
+    data = {
+        "component_id": component_id,
+        "translation_id": translation_id,
+    }
+    if user_id is not None:
+        data["user_id"] = user_id
+    cache.set(
+        get_task_metadata_key(task_id),
+        data,
+        TASK_METADATA_TTL,
+    )
+
+
+def get_task_metadata(task_id: str) -> dict[str, int | None] | None:
+    return cache.get(get_task_metadata_key(task_id))
+
+
+def delete_task_metadata(task_id: str | None) -> None:
+    if not task_id:
+        return
+    cache.delete(get_task_metadata_key(task_id))
+
+
+def extract_task_kwargs(body) -> dict[str, Any]:
+    if isinstance(body, dict):
+        kwargs = body.get("kwargs")
+        return kwargs if isinstance(kwargs, dict) else {}
+    if isinstance(body, (list, tuple)) and len(body) >= 2 and isinstance(body[1], dict):
+        return body[1]
+    return {}
+
+
+@before_task_publish.connect
+def store_published_task_metadata(headers=None, body=None, **kwargs) -> None:
+    if not isinstance(headers, dict):
+        return
+    task_kwargs = extract_task_kwargs(body)
+    component_id = task_kwargs.get("component_id")
+    translation_id = task_kwargs.get("translation_id")
+    if component_id is None and translation_id is None:
+        return
+    store_task_metadata(
+        headers.get("id"),
+        component_id=component_id,
+        translation_id=translation_id,
+    )
+
 
 @task_failure.connect
-def handle_task_failure(exception=None, **kwargs) -> None:
+def handle_task_failure(task_id="", exception=None, **kwargs) -> None:
+    # ruff: ignore[import-outside-top-level]
     from weblate.utils.errors import report_error
 
     report_error(
-        "Failure while executing task",
-        skip_sentry=True,
+        f"Failure while executing task {task_id}",
+        skip_error_reporting=True,
         print_tb=True,
         level="error",
     )
 
 
 @app.on_after_configure.connect
-def configure_error_handling(sender, **kargs) -> None:
+def configure_error_handling(sender, **kwargs) -> None:
     """Rollbar and Sentry integration."""
+    # ruff: ignore[import-outside-top-level]
     from weblate.utils.errors import init_error_collection
 
     init_error_collection(celery=True)
@@ -63,13 +138,13 @@ def show_failing_system_check(sender, logger, **kwargs) -> None:
 
 
 def get_queue_length(queue="celery"):
-    with app.connection_or_acquire() as conn:
+    with app.connection_or_acquire() as conn:  # type: ignore[attr-defined]
         return conn.default_channel.queue_declare(
             queue=queue, durable=True, auto_delete=False
         ).message_count
 
 
-def get_queue_list():
+def get_queue_list() -> set[str]:
     """List queues in Celery."""
     result = {"celery"}
     for route in settings.CELERY_TASK_ROUTES.values():
@@ -78,7 +153,7 @@ def get_queue_list():
     return result
 
 
-def get_queue_stats():
+def get_queue_stats() -> dict[str, int]:
     """Calculate queue stats."""
     return {queue: get_queue_length(queue) for queue in get_queue_list()}
 
@@ -105,6 +180,7 @@ def is_celery_queue_long():
     filtered out, and no warning need be issued for big operations (for example
     site-wide autotranslation).
     """
+    # ruff: ignore[import-outside-top-level]
     from weblate.trans.models import Translation
 
     cache_key = "celery_queue_stats"

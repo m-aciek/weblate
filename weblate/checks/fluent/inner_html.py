@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from django.utils.translation import gettext, gettext_lazy
 
-from weblate.checks.base import SourceCheck, TargetCheck
+from weblate.checks.base import Highlight, SourceCheck, TargetCheck
 from weblate.checks.fluent.utils import (
     FluentPatterns,
     FluentUnitConverter,
@@ -19,6 +19,7 @@ from weblate.checks.fluent.utils import (
     translation_from_check,
     variant_name,
 )
+from weblate.checks.utils import pair_markup_highlights
 from weblate.utils.html import format_html_join_comma, list_to_tuples
 
 if TYPE_CHECKING:
@@ -100,7 +101,7 @@ class _HTMLNode:
 
         serialized, end = self.tags()
         if end:
-            serialized += "…" + end
+            serialized += f"…{end}"
 
         node = self.parent
         while node and node.parent:
@@ -126,7 +127,7 @@ class _HTMLFluentReferenceTagError(_HTMLParseError):
     def description(self) -> SafeString:
         return format_html_code(
             gettext(
-                "The Fluent reference in {sequence} may expand into a HTML "
+                "The Fluent reference in {sequence} may expand into an HTML "
                 "tag. Maybe use {suggestion}."
             ),
             sequence=self.sequence,
@@ -141,7 +142,7 @@ class _HTMLFluentReferenceCharacterReferenceError(_HTMLParseError):
     def description(self) -> SafeString:
         return format_html_code(
             gettext(
-                "The Fluent reference in {sequence} may expand into a HTML "
+                "The Fluent reference in {sequence} may expand into an HTML "
                 "character reference. Maybe use {suggestion}."
             ),
             sequence=self.sequence,
@@ -153,7 +154,7 @@ class _HTMLInvalidTagSequenceError(_HTMLParseError):
     """
     Base class for parsing errors in a tag-like sequence.
 
-    We assume the user may not have wanted to create a HTML tag, so we will show
+    We assume the user may not have wanted to create an HTML tag, so we will show
     a suggestion on how to avoid it.
     """
 
@@ -169,7 +170,7 @@ class _HTMLInvalidEndTagError(_HTMLInvalidTagSequenceError):
     def description(self) -> SafeString:
         return format_html_code(
             gettext(
-                "The sequence {sequence} begins with a HTML closing tag, "
+                "The sequence {sequence} begins with an HTML closing tag, "
                 "but the name or syntax is not valid. "
                 "If you do not want a closing tag, use {suggestion}."
             ),
@@ -182,9 +183,9 @@ class _HTMLInvalidStartTagNameError(_HTMLInvalidTagSequenceError):
     def description(self) -> SafeString:
         return format_html_code(
             gettext(
-                "The sequence {sequence} begins with a HTML tag, "
+                "The sequence {sequence} begins with an HTML tag, "
                 "but the name is not valid. "
-                "If you do not want to begin a HTML tag, use {suggestion}."
+                "If you do not want to begin an HTML tag, use {suggestion}."
             ),
             sequence=self.sequence,
             suggestion=self.suggestion,
@@ -195,9 +196,9 @@ class _HTMLStartTagNotClosedError(_HTMLInvalidTagSequenceError):
     def description(self) -> SafeString:
         return format_html_code(
             gettext(
-                "The sequence {sequence} begins with a HTML tag, "
+                "The sequence {sequence} begins with an HTML tag, "
                 "but the tag is never closed by {close}. "
-                "If you do not want to begin a HTML tag, use {suggestion}."
+                "If you do not want to begin an HTML tag, use {suggestion}."
             ),
             sequence=self.sequence,
             close=">",
@@ -225,10 +226,10 @@ class _HTMLUnexpectedAttributeError(_HTMLInvalidTagSequenceError):
     def description(self) -> SafeString:
         return format_html_code(
             gettext(
-                "The sequence {sequence} begins with a HTML tag, "
+                "The sequence {sequence} begins with an HTML tag, "
                 "but the sequence {attribute} is not a valid attribute "
                 "with a value. "
-                "If you do not want to begin a HTML tag, use {suggestion}."
+                "If you do not want to begin an HTML tag, use {suggestion}."
             ),
             sequence=self.sequence,
             attribute=self.attribute,
@@ -339,7 +340,7 @@ class _HTMLUnexpectedCharacterReferenceError(_HTMLParseError):
         suggestion = self.sequence.replace("&", "&amp;", 1)
         return format_html_code(
             gettext(
-                "The sequence {sequence} will begin a HTML character "
+                "The sequence {sequence} will begin an HTML character "
                 "reference, but does not end with {semicolon}. "
                 "If you do not want a character reference, use {suggestion}."
             ),
@@ -541,7 +542,7 @@ class _FluentInnerHTMLCheck:
     # "-".
     _TAG_FIRST_CHAR = r"[a-zA-Z]"
     _TAG_FIRST_CHAR_REGEX = re.compile(_TAG_FIRST_CHAR)
-    _TAG_PATTERN = _TAG_FIRST_CHAR + r"[a-zA-Z0-9-]*"
+    _TAG_PATTERN = f"{_TAG_FIRST_CHAR}[a-zA-Z0-9-]*"
 
     # Only allow a limited set of "blank" characters within a tag.
     _BLANK_CHAR = r"[ \t\n]"
@@ -559,7 +560,7 @@ class _FluentInnerHTMLCheck:
         + r")"
     )
     _START_TAG_REGEX = re.compile(
-        r"(?P<tag>" + _TAG_PATTERN + r")" + _CLOSE_BLANK_OR_END_PATTERN
+        rf"(?P<tag>{_TAG_PATTERN}){_CLOSE_BLANK_OR_END_PATTERN}"
     )
     # Only allow a limited set of characters for attribute names, which should
     # cover HTML attributes and "data-" attributes.
@@ -575,7 +576,7 @@ class _FluentInnerHTMLCheck:
         # Followed by a blank or the closing character.
         + _CLOSE_BLANK_OR_END_PATTERN
     )
-    _END_TAG_REGEX = re.compile(r"(?P<tag>" + _TAG_PATTERN + r")" + _BLANK_CHAR + r"*>")
+    _END_TAG_REGEX = re.compile(rf"(?P<tag>{_TAG_PATTERN}){_BLANK_CHAR}*>")
 
     # Pattern used to pull text within a suspected tag up until the next
     # attribute or the tag closes.
@@ -610,7 +611,7 @@ class _FluentInnerHTMLCheck:
         """
         Get all the non-blank and non ">" characters found at the start.
 
-        This is used to grab some joined sequence of characters within a HTML
+        This is used to grab some joined sequence of characters within an HTML
         tag to show back to the user.
         """
         return source.get(cls._NON_BLANK_OR_CLOSE_REGEX)
@@ -638,7 +639,8 @@ class _FluentInnerHTMLCheck:
             #
             # Some parsing errors, like eof-before-tag-name, will not lead to a
             # loss of content, but aren't allowed here for consistency.
-            raise _HTMLInvalidEndTagError("</" + cls._non_blank_or_close(source))
+            msg = f"</{cls._non_blank_or_close(source)}"
+            raise _HTMLInvalidEndTagError(msg)
 
         tag = end_tag_match.group("tag")
 
@@ -663,7 +665,8 @@ class _FluentInnerHTMLCheck:
             non_blank = cls._non_blank_or_close(source)
             if "=" not in non_blank:
                 # Doesn't look like an attribute with a value.
-                raise _HTMLUnexpectedAttributeError("<" + node.tag, non_blank)
+                msg = f"<{node.tag}"
+                raise _HTMLUnexpectedAttributeError(msg, non_blank)
             raise _HTMLInvalidAttributeNameError(
                 node.tag,
                 non_blank[: non_blank.index("=")],
@@ -714,11 +717,13 @@ class _FluentInnerHTMLCheck:
             # still cause problems when it is expanded with the value. E.g. if
             # the value closes the quotes and injects parts, but we are not
             # trying to protect against this.
-            raise _HTMLFluentReferenceTagError("<" + source.get(cls._FLUENT_REF_REGEX))
+            msg = f"<{source.get(cls._FLUENT_REF_REGEX)}"
+            raise _HTMLFluentReferenceTagError(msg)
 
         tag_not_allowed_match = source.match(cls._TAG_NOT_ALLOWED_FIRST_CHAR_REGEX)
         if tag_not_allowed_match:
-            raise _HTMLTagTypeNotAllowedError("<" + tag_not_allowed_match.group())
+            msg = f"<{tag_not_allowed_match.group()}"
+            raise _HTMLTagTypeNotAllowedError(msg)
 
         if not source.peak_matches(cls._TAG_FIRST_CHAR_REGEX):
             # Corresponds to the HTML parsing errors
@@ -730,7 +735,8 @@ class _FluentInnerHTMLCheck:
 
         tag_match = source.match(cls._START_TAG_REGEX)
         if not tag_match:
-            raise _HTMLInvalidStartTagNameError("<" + cls._non_blank_or_close(source))
+            msg = f"<{cls._non_blank_or_close(source)}"
+            raise _HTMLInvalidStartTagNameError(msg)
 
         tag = tag_match.group("tag")
 
@@ -753,7 +759,8 @@ class _FluentInnerHTMLCheck:
                 # Corresponds to HTML parsing error eof-in-tag.
                 # We have some blank, but then reach the end of the string
                 # before the tag is closed.
-                raise _HTMLStartTagNotClosedError("<" + tag)
+                msg = f"<{tag}"
+                raise _HTMLStartTagNotClosedError(msg)
 
             end_match = cls._parse_attribute(source, node)
 
@@ -901,7 +908,7 @@ class FluentSourceInnerHTMLCheck(_FluentInnerHTMLCheck, SourceCheck):
     for some HTML element. For example, when using the Fluent DOM package.
 
     The aim of this check is to predict how the value will be parsed as inner
-    HTML, assuming a HTML5 conforming parser, to catch cases where there would
+    HTML, assuming an HTML5 conforming parser, to catch cases where there would
     be some "unintended" loss of the string, without being too strict about
     technical parsing errors that do *not* lead to a loss of the string.
 
@@ -915,7 +922,7 @@ class FluentSourceInnerHTMLCheck(_FluentInnerHTMLCheck, SourceCheck):
     Therefore, this check does not expect or want translators and developers to
     have to care about strictly avoiding *any* technical HTML5 parsing errors
     (let alone XHTML parsing errors). Instead, this check will just want to warn
-    them when they may have unintentionally opened a HTML tag or inserted a
+    them when they may have unintentionally opened an HTML tag or inserted a
     character reference.
 
     Moreover, for the Fluent values that intentionally contain HTML tags or
@@ -944,6 +951,7 @@ class FluentSourceInnerHTMLCheck(_FluentInnerHTMLCheck, SourceCheck):
     name = gettext_lazy("Fluent source inner HTML")
     description = gettext_lazy("Fluent source should be valid inner HTML.")
     default_disabled = True
+    version_added = "5.0"
 
     def check_source_unit(self, sources: list[str], unit: TransUnitModel) -> bool:
         try:
@@ -952,13 +960,13 @@ class FluentSourceInnerHTMLCheck(_FluentInnerHTMLCheck, SourceCheck):
             return True
         return False
 
-    def get_description(self, check_model: CheckModel) -> StrOrPromise:
-        unit, source, _target = translation_from_check(check_model)
+    def get_description(self, check_obj: CheckModel) -> StrOrPromise:
+        unit, source, _target = translation_from_check(check_obj)
         try:
             self.get_fluent_inner_html(unit, source)
         except _HTMLParseError as err:
             return err.description()
-        return super().get_description(check_model)
+        return super().get_description(check_obj)
 
 
 class _VariantNodesDifference:
@@ -1013,12 +1021,12 @@ class _VariantNodesDifference:
     ) -> SafeString:
         if not variants:
             return format_html_code(
-                gettext("Fluent value is missing a HTML {tag} tag."),
+                gettext("Fluent value is missing an HTML {tag} tag."),
                 tag=tag,
             )
         return format_html_code(
             gettext(
-                "Fluent value is missing a HTML {tag} tag "
+                "Fluent value is missing an HTML {tag} tag "
                 "for the following variants: {variant_list}."
             ),
             tag=tag,
@@ -1222,6 +1230,7 @@ class FluentTargetInnerHTMLCheck(_FluentInnerHTMLCheck, TargetCheck):
     name = gettext_lazy("Fluent translation inner HTML")
     description = gettext_lazy("Fluent target should be valid inner HTML that matches.")
     default_disabled = True
+    version_added = "5.0"
 
     @classmethod
     def _compare_inner_html(
@@ -1266,15 +1275,15 @@ class FluentTargetInnerHTMLCheck(_FluentInnerHTMLCheck, TargetCheck):
             return True
         return bool(difference)
 
-    def get_description(self, check_model: CheckModel) -> StrOrPromise:
-        unit, source, target = translation_from_check(check_model)
+    def get_description(self, check_obj: CheckModel) -> StrOrPromise:
+        unit, source, target = translation_from_check(check_obj)
         try:
             difference = self._compare_inner_html(unit, source, target)
         except _HTMLParseError as err:
             return err.description()
 
         if not difference:
-            return super().get_description(check_model)
+            return super().get_description(check_obj)
 
         return difference.description()
 
@@ -1288,7 +1297,10 @@ class FluentTargetInnerHTMLCheck(_FluentInnerHTMLCheck, TargetCheck):
 
         # We simply highlight all HTML tags that are valid tags according to our
         # parser, regardless of whether it matches a tag found in the source.
-        return [
-            (match.start(), match.end(), match.group())
-            for match in self.ALL_TAGS_REGEX.finditer(source)
-        ]
+        return pair_markup_highlights(
+            [
+                Highlight(match.start(), match.end(), match.group(), kind="markup")
+                for match in self.ALL_TAGS_REGEX.finditer(source)
+            ],
+            group_prefix="fluent-html",
+        )

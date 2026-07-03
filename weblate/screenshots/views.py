@@ -6,33 +6,46 @@ from __future__ import annotations
 import difflib
 import os
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, cast
 
-import sentry_sdk
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
-from django.http import JsonResponse
+from django.db.models import Count
+from django.http import FileResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
-from django.utils.translation import gettext
+from django.urls import reverse
+from django.utils.http import urlencode
+from django.utils.translation import gettext, ngettext
 from django.views.decorators.http import require_POST
 from django.views.generic import DetailView, ListView
+from PIL import Image
+from tesserocr import OEM, PSM, RIL, PyTessBaseAPI, iterate_level
 
-from weblate.auth.models import AuthenticatedHttpRequest
 from weblate.logger import LOGGER
-from weblate.screenshots.forms import ScreenshotEditForm, ScreenshotForm, SearchForm
+from weblate.screenshots.forms import (
+    ScreenshotEditForm,
+    ScreenshotForm,
+    ScreenshotListSearchForm,
+    SearchForm,
+)
 from weblate.screenshots.models import Screenshot
 from weblate.trans.actions import ActionEvents
 from weblate.trans.models import Component, Unit
+from weblate.trans.util import redirect_next
 from weblate.utils import messages
 from weblate.utils.data import data_dir
 from weblate.utils.lock import WeblateLock
-from weblate.utils.requests import request
+from weblate.utils.requests import fetch_url
 from weblate.utils.search import parse_query
+from weblate.utils.tracing import start_span
+from weblate.utils.validators import PIL_FORMATS
 from weblate.utils.views import PathViewMixin
 
 if TYPE_CHECKING:
-    from tesserocr import PyTessBaseAPI
+    from collections.abc import Generator
+
+    from django.http import HttpResponse
 
     from weblate.auth.models import AuthenticatedHttpRequest
     from weblate.lang.models import Language
@@ -157,13 +170,12 @@ def ensure_tesseract_language(lang: str) -> None:
     # Operate with a lock held to avoid concurrent downloads
     with (
         WeblateLock(
-            lock_path=data_dir("home"),
-            scope="screenshots:tesseract-download",
+            scope="screenshots:tesseract:download",
             key=0,
-            slug="screenshots:tesseract-download",
+            slug="screenshots:tesseract:download",
             timeout=600,
         ),
-        sentry_sdk.start_span(op="ocr.models"),
+        start_span(op="ocr.models"),
     ):
         if not os.path.isdir(tessdata):
             os.makedirs(tessdata)
@@ -178,42 +190,193 @@ def ensure_tesseract_language(lang: str) -> None:
 
             LOGGER.debug("downloading tesseract data %s", url)
 
-            with sentry_sdk.start_span(op="ocr.download", name=url):
-                response = request("GET", url, allow_redirects=True)
+            with start_span(op="ocr.download", name=url):
+                response = fetch_url("GET", url, allow_redirects=True)
 
             with open(full_name, "xb") as handle:
                 handle.write(response.content)
 
 
+def add_sources(request: AuthenticatedHttpRequest, obj) -> dict[str, int | bool]:
+    sources = request.POST.getlist("source")
+    if not sources:
+        return {"status": False, "added": 0, "skipped": 0, "invalid": 0}
+
+    source_ids: list[int] = []
+    seen: set[int] = set()
+    skipped = 0
+    invalid = 0
+    for source in sources:
+        try:
+            source_id = int(source)
+        except ValueError:
+            invalid += 1
+            continue
+        if source_id in seen:
+            skipped += 1
+            continue
+        seen.add(source_id)
+        source_ids.append(source_id)
+
+    existing = set(obj.units.filter(pk__in=source_ids).values_list("pk", flat=True))
+    units = obj.translation.unit_set.in_bulk(source_ids)
+    added = 0
+    for source_id in source_ids:
+        unit = units.get(source_id)
+        if unit is None:
+            invalid += 1
+            continue
+        if source_id in existing:
+            skipped += 1
+            continue
+        obj.add_unit(unit, user=request.user)
+        existing.add(source_id)
+        added += 1
+
+    return {
+        "status": added > 0,
+        "added": added,
+        "skipped": skipped,
+        "invalid": invalid,
+    }
+
+
 def try_add_source(request: AuthenticatedHttpRequest, obj) -> bool:
-    if "source" not in request.POST:
-        return False
-
-    try:
-        source = obj.translation.unit_set.get(pk=int(request.POST["source"]))
-    except (Unit.DoesNotExist, ValueError):
-        return False
-
-    obj.units.add(source)
-    return True
+    return bool(add_sources(request, obj)["status"])
 
 
-class ScreenshotList(PathViewMixin, ListView):
-    paginate_by = 25
+class ScreenshotList(PathViewMixin, ListView):  # type: ignore[misc]
+    paginate_by = 48
     model = Screenshot
     supported_path_types = (Component,)
     _add_form = None
 
+    sort_ordering: ClassVar[dict[str, tuple[str, ...]]] = {
+        "name": ("name", "pk"),
+        "-name": ("-name", "pk"),
+        "-timestamp": ("-timestamp", "name", "pk"),
+        "timestamp": ("timestamp", "name", "pk"),
+        "language": ("translation__language__name", "name", "pk"),
+        "-language": ("-translation__language__name", "name", "pk"),
+        "-strings": ("-strings_count", "name", "pk"),
+        "strings": ("strings_count", "name", "pk"),
+    }
+    search_preset_queries: ClassVar[tuple[str, ...]] = (
+        "",
+        "has:string",
+        "NOT has:string",
+        "has:repository",
+        "has:repository AND NOT has:string",
+    )
+
+    def get_search_presets(self) -> list[dict[str, str]]:
+        labels = {
+            "": gettext("All screenshots"),
+            "has:string": gettext("Assigned screenshots"),
+            "NOT has:string": gettext("Unassigned screenshots"),
+            "has:repository": gettext("Repository screenshots"),
+            "has:repository AND NOT has:string": gettext(
+                "Unassigned repository screenshots"
+            ),
+        }
+        sort_by = ""
+        if self.search_form.is_valid():
+            sort_by = self.search_form.cleaned_data["sort_by"]
+
+        result = []
+        for query in self.search_preset_queries:
+            params = []
+            if query:
+                params.append(("q", query))
+            if sort_by and sort_by != "name":
+                params.append(("sort_by", sort_by))
+            result.append(
+                {
+                    "label": labels[query],
+                    "query": query,
+                    "query_string": urlencode(params),
+                }
+            )
+        return result
+
+    def setup(self, *args, **kwargs) -> None:
+        super().setup(*args, **kwargs)
+        data = self.request.GET.copy()
+        if "q" not in data and data.get("assigned") == "0":
+            data["q"] = "NOT has:string"
+        self.search_form = ScreenshotListSearchForm(data=data)
+
     def get_queryset(self):
-        return (
+        result = (
             Screenshot.objects.filter(translation__component=self.path_object)
-            .prefetch_related("translation__language")
+            .prefetch_related(
+                "translation__component__category",
+                "translation__component__project",
+                "translation__language",
+            )
+            .annotate(strings_count=Count("units", distinct=True))
             .order()
         )
+        if self.search_form.is_valid():
+            if query := self.search_form.cleaned_data["q"]:
+                filters, annotations = parse_query(
+                    query,
+                    parser="screenshot",
+                    project=self.path_object.project,
+                    component=self.path_object,
+                )
+                result = result.annotate(**annotations).filter(filters).distinct()
+            sort_by = self.search_form.cleaned_data["sort_by"]
+        else:
+            sort_by = "name"
+        return result.order_by(*self.sort_ordering[sort_by])
 
     def get_context_data(self, **kwargs):
         result = super().get_context_data(**kwargs)
         result["object"] = self.path_object
+        result["add_form_active"] = self._add_form is not None
+        result["search_form"] = self.search_form
+        result["active_query"] = ""
+        result["active_query_label"] = gettext("Filters")
+        result["sort_query"] = "name"
+        result["sort_name"] = self.search_form.sort_choices["name"]
+        result["sort_choices"] = self.search_form.sort_choices
+        result["sort_desc"] = False
+        result["query_string"] = ""
+        result["search_items"] = []
+        if self.search_form.is_valid():
+            result["active_query"] = self.search_form.cleaned_data["q"]
+            result["sort_query"] = self.search_form.cleaned_data["sort_by"]
+            result["sort_name"] = self.search_form.sort_choices[
+                result["sort_query"].removeprefix("-")
+            ]
+            result["sort_desc"] = result["sort_query"].startswith("-")
+            result["query_string"] = self.search_form.urlencode()
+            result["search_items"] = self.search_form.items()
+        result["screenshot_search_presets"] = self.get_search_presets()
+        for preset in result["screenshot_search_presets"]:
+            if preset["query"] == result["active_query"]:
+                result["active_query_label"] = preset["label"]
+                break
+        screenshots = Screenshot.objects.filter(translation__component=self.path_object)
+        source_units = self.path_object.source_translation.unit_set
+        source_strings_with_screenshots = (
+            source_units.filter(screenshots__isnull=False).distinct().count()
+        )
+        source_strings_total = source_units.count()
+        result["screenshot_summary"] = {
+            "total": screenshots.count(),
+            "unassigned": screenshots.filter(units__isnull=True).count(),
+            "source_strings_with_screenshots": source_strings_with_screenshots,
+            "source_strings_without_screenshots": (
+                source_strings_total - source_strings_with_screenshots
+            ),
+            "source_translation": self.path_object.source_translation,
+            "with_query": "has:screenshot",
+            "without_query": "NOT has:screenshot",
+            "assigned_query": urlencode({"q": "has:string"}),
+            "unassigned_query": urlencode({"q": "NOT has:string"}),
+        }
         if self.request.user.has_perm("screenshot.add", self.path_object):
             if self._add_form is not None:
                 result["add_form"] = self._add_form
@@ -232,7 +395,7 @@ class ScreenshotList(PathViewMixin, ListView):
             )
             request.user.profile.increase_count("uploaded")
             obj.change_set.create(
-                action=ActionEvents.SCREENSHOT_ADDED,
+                action=ActionEvents.SCREENSHOT_UPLOADED,
                 user=request.user,
                 target=obj.name,
             )
@@ -241,26 +404,44 @@ class ScreenshotList(PathViewMixin, ListView):
             messages.success(
                 request,
                 gettext(
-                    "Screenshot has been uploaded, "
-                    "you can now assign it to source strings."
+                    "Screenshot has been uploaded. "
+                    "Search for source strings or find strings in the image."
                 ),
             )
-            return redirect(obj)
+            next_url = request.POST.get("next") or request.GET.get("next")
+            return redirect_next(next_url, obj)
         messages.error(
             request, gettext("Could not upload screenshot, please fix errors below.")
         )
         return self.get(request, **kwargs)
 
 
-class ScreenshotDetail(DetailView):
+class ScreenshotBaseView(DetailView):
     model = Screenshot
-    _edit_form = None
     request: AuthenticatedHttpRequest
+
+    def get_queryset(self):
+        return Screenshot.objects.filter_access(self.request.user)
 
     def get_object(self, *args, **kwargs):
         obj = super().get_object(*args, **kwargs)
         self.request.user.check_access_component(obj.translation.component)
         return obj
+
+
+class ScreenshotView(ScreenshotBaseView):
+    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> FileResponse:  # type: ignore[override]
+        obj = self.get_object()
+        # Django will automatically set Content-Type based on the filename
+        return FileResponse(
+            obj.image.open(),
+            as_attachment=False,
+            filename=os.path.basename(obj.image.name),
+        )
+
+
+class ScreenshotDetail(ScreenshotBaseView):
+    _edit_form = None
 
     def get_context_data(self, **kwargs):
         result = super().get_context_data(**kwargs)
@@ -275,7 +456,7 @@ class ScreenshotDetail(DetailView):
         result["search_query"] = ""
         return result
 
-    def post(self, request: AuthenticatedHttpRequest, **kwargs):
+    def post(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> HttpResponse:
         obj = self.get_object()
         if request.user.has_perm("screenshot.edit", obj.translation):
             self._edit_form = ScreenshotEditForm(
@@ -292,14 +473,14 @@ class ScreenshotDetail(DetailView):
                     )
                 self._edit_form.save()
             else:
-                return self.get(request, **kwargs)
+                return self.get(request, *args, **kwargs)
         return redirect(obj)
 
 
 @require_POST
 @login_required
 def delete_screenshot(request: AuthenticatedHttpRequest, pk):
-    obj = get_object_or_404(Screenshot, pk=pk)
+    obj = get_object_or_404(Screenshot.objects.filter_access(request.user), pk=pk)
     component = obj.translation.component
     if not request.user.has_perm("screenshot.delete", obj.translation):
         raise PermissionDenied
@@ -308,11 +489,14 @@ def delete_screenshot(request: AuthenticatedHttpRequest, pk):
 
     messages.success(request, gettext("Screenshot %s has been deleted.") % obj.name)
 
-    return redirect("screenshots", path=component.get_url_path())
+    return redirect_next(
+        request.POST.get("next"),
+        reverse("screenshots", kwargs={"path": component.get_url_path()}),
+    )
 
 
 def get_screenshot(request: AuthenticatedHttpRequest, pk):
-    obj = get_object_or_404(Screenshot, pk=pk)
+    obj = get_object_or_404(Screenshot.objects.filter_access(request.user), pk=pk)
     if not request.user.has_perm("screenshot.edit", obj.translation.component):
         raise PermissionDenied
     return obj
@@ -323,7 +507,13 @@ def get_screenshot(request: AuthenticatedHttpRequest, pk):
 def remove_source(request: AuthenticatedHttpRequest, pk):
     obj = get_screenshot(request, pk)
 
-    obj.units.remove(request.POST["source"])
+    try:
+        unit = obj.translation.unit_set.get(pk=int(request.POST["source"]))
+    except (Unit.DoesNotExist, ValueError):
+        messages.error(request, gettext("Invalid unit."))
+        return redirect(obj)
+
+    obj.remove_unit(unit, user=request.user)
 
     messages.success(request, gettext("Source has been removed."))
 
@@ -333,16 +523,26 @@ def remove_source(request: AuthenticatedHttpRequest, pk):
 def search_results(request: AuthenticatedHttpRequest, code, obj, units=None):
     if units is None:
         units = []
+        count = 0
     else:
         units = (
             units.exclude(id__in=obj.units.values_list("id", flat=True))
             .prefetch_full()
             .count_screenshots()
         )
+        count = len(units)
 
     return JsonResponse(
         data={
             "responseCode": code,
+            "count": count,
+            "summary": ngettext(
+                "%(count)s matching source string found.",
+                "%(count)s matching source strings found.",
+                count,
+            )
+            % {"count": count},
+            "empty": gettext("No new matching source strings found."),
             "results": render_to_string(
                 "screenshots/screenshot_sources_search.html",
                 {
@@ -365,34 +565,34 @@ def search_source(request: AuthenticatedHttpRequest, pk):
     form = SearchForm(request.POST)
     if not form.is_valid():
         return search_results(request, 400, obj)
+    filters, annotations = parse_query(
+        form.cleaned_data["q"], project=translation.component.project
+    )
     return search_results(
         request,
         200,
         obj,
-        translation.unit_set.filter(
-            parse_query(form.cleaned_data["q"], project=translation.component.project)
-        ),
+        translation.unit_set.annotate(**annotations).filter(filters),
     )
 
 
-def ocr_get_strings(api, image: str, resolution: int = 72):
-    from tesserocr import RIL, iterate_level
+def ocr_get_strings(api, *, image: Image.Image, filename: str, resolution: int = 72):
 
     try:
-        api.SetImageFile(image)
+        api.SetImage(image)
     except RuntimeError:
         pass
     else:
         api.SetSourceResolution(resolution)
 
-        with sentry_sdk.start_span(op="ocr.recognize", name=image):
+        with start_span(op="ocr.recognize", name=filename):
             api.Recognize()
 
-        with sentry_sdk.start_span(op="ocr.iterate", name=image):
+        with start_span(op="ocr.iterate", name=filename):
             iterator = api.GetIterator()
             level = RIL.TEXTLINE
             for r in iterate_level(iterator, level):
-                with sentry_sdk.start_span(op="ocr.text", name=image):
+                with start_span(op="ocr.text", name=filename):
                     try:
                         yield r.GetUTF8Text(level)
                     except RuntimeError:
@@ -401,17 +601,25 @@ def ocr_get_strings(api, image: str, resolution: int = 72):
         api.Clear()
 
 
-def ocr_extract(api, image: str, strings, resolution: int):
+def ocr_extract(
+    api,
+    *,
+    image: Image.Image,
+    filename: str,
+    strings: tuple[str, ...],
+    resolution: int,
+):
     """Extract closes matches from an image."""
-    for ocr_result in ocr_get_strings(api, image, resolution):
+    for ocr_result in ocr_get_strings(
+        api, image=image, filename=filename, resolution=resolution
+    ):
         parts = [ocr_result, *ocr_result.split("|"), *ocr_result.split()]
         for part in parts:
             yield from difflib.get_close_matches(part, strings, cutoff=0.9)
 
 
 @contextmanager
-def get_tesseract(language: Language) -> PyTessBaseAPI:
-    from tesserocr import OEM, PSM, PyTessBaseAPI
+def get_tesseract(language: Language) -> Generator[PyTessBaseAPI]:
 
     # Get matching language
     try:
@@ -425,7 +633,7 @@ def get_tesseract(language: Language) -> PyTessBaseAPI:
     ensure_tesseract_language(tess_language)
 
     with PyTessBaseAPI(
-        path=data_dir("cache", "tesseract") + "/",
+        path=f"{data_dir('cache', 'tesseract')}/",
         psm=PSM.SPARSE_TEXT_OSD,
         oem=OEM.LSTM_ONLY,
         lang=tess_language,
@@ -436,7 +644,6 @@ def get_tesseract(language: Language) -> PyTessBaseAPI:
 @login_required
 @require_POST
 def ocr_search(request: AuthenticatedHttpRequest, pk):
-    from PIL import Image
 
     obj = get_screenshot(request, pk)
     translation = obj.translation
@@ -446,12 +653,32 @@ def ocr_search(request: AuthenticatedHttpRequest, pk):
     strings = tuple(sources.keys())
 
     # Extract and match strings
-    with Image.open(obj.image.path), get_tesseract(translation.language) as api:
-        results = {
-            sources[match]
-            for resolution in (72, 300)
-            for match in ocr_extract(api, obj.image.path, strings, resolution)
-        }
+    try:
+        with Image.open(obj.image.path, formats=PIL_FORMATS) as image:
+            image.load()
+    except OSError as error:
+        LOGGER.warning(
+            "Skipping OCR for unreadable screenshot %s: %s", obj.image.path, error
+        )
+        return search_results(request, 200, obj)
+
+    ocr_image = cast("Image.Image", image)
+
+    try:
+        with get_tesseract(translation.language) as api:
+            results = {
+                sources[match]
+                for resolution in (72, 300)
+                for match in ocr_extract(
+                    api,
+                    image=ocr_image,
+                    filename=obj.image.path,
+                    strings=strings,
+                    resolution=resolution,
+                )
+            }
+    finally:
+        ocr_image.close()
 
     return search_results(
         request, 200, obj, translation.unit_set.filter(pk__in=results)
@@ -462,8 +689,7 @@ def ocr_search(request: AuthenticatedHttpRequest, pk):
 @require_POST
 def add_source(request: AuthenticatedHttpRequest, pk):
     obj = get_screenshot(request, pk)
-    result = try_add_source(request, obj)
-    return JsonResponse(data={"responseCode": 200, "status": result})
+    return JsonResponse(data={"responseCode": 200, **add_sources(request, obj)})
 
 
 @login_required

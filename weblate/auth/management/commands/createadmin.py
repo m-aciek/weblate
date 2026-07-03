@@ -1,6 +1,9 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from django.core.management.base import CommandError
 from django.db.models import Q
@@ -9,11 +12,14 @@ from weblate.auth.models import User
 from weblate.utils.backup import make_password
 from weblate.utils.management.base import BaseCommand
 
+if TYPE_CHECKING:
+    from django.core.management.base import CommandParser
+
 
 class Command(BaseCommand):
     help = "setups admin user with random password"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
             "--password",
             default=None,
@@ -85,13 +91,16 @@ class Command(BaseCommand):
 
         if user and options["update"]:
             self.stdout.write(f"Updating user {user.username}")
+            user.store_audit_state()
             user.email = email
             if password is not None and not user.check_password(password):
                 user.set_password(password)
         else:
             self.stdout.write(f"Creating user {username}")
             user = User.objects.create_user(username, email, password)
+            user.store_audit_state()
         user.full_name = options["name"]
         user.is_superuser = True
         user.is_active = True
         user.save()
+        user.log_audit_state(None)

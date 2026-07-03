@@ -16,8 +16,8 @@ containing all the translations without integration.
 
 .. seealso::
 
-   :ref:`adding-projects`,
-   :ref:`faq-submodule`
+   * :ref:`adding-projects`
+   * :ref:`faq-submodule`
 
 Fetching updated translations from Weblate
 ++++++++++++++++++++++++++++++++++++++++++
@@ -32,16 +32,17 @@ changes made in Weblate (see :ref:`lazy-commit`). This can be done from the user
 (in the :guilabel:`Repository maintenance`), or from the command-line using :ref:`wlc`.
 
 Pushing changes can be automated if you grant Weblate push access to your repository and
-configure :ref:`component-push` in the :ref:`component`, see :ref:`push-changes`.
+configure :ref:`component-push` in the :ref:`component`, see
+:ref:`code-hosting-push-options`.
 
 Alternatively, use :doc:`/api` to update translations
 so that they match the latest version from the upstream in your remote VCS repository.
 
 .. seealso::
 
-    :ref:`continuous-translation`,
-    :ref:`push-changes`,
-    :ref:`vcs-repos`
+   * :ref:`continuous-translation`
+   * :ref:`code-hosting-push-options`
+   * :ref:`vcs-repos`
 
 Fetching remote changes into Weblate
 ++++++++++++++++++++++++++++++++++++
@@ -59,8 +60,8 @@ the translations so that they match your codebase.
 
 .. seealso::
 
-    :ref:`continuous-translation`,
-    :ref:`vcs-repos`
+   * :ref:`continuous-translation`
+   * :ref:`vcs-repos`
 
 .. _adding-new-strings:
 
@@ -75,7 +76,7 @@ Any way of adding strings will be picked up, but consider using
 When translation files are separated from the code, the following ways can
 introduce new strings into Weblate.
 
-* Manually, using :guilabel:`Add new translation string` from :guilabel:`Tools`
+* Manually, using :guilabel:`Add new translation string` from :guilabel:`Operations`
   menu in the source language. You can choose between the radio buttons
   :guilabel:`Singular` and :guilabel:`Plural` inside the form. Select the
   appropriate form of the new translation string to be added.
@@ -101,9 +102,13 @@ the :ref:`addon-weblate.cleanup.generic` add-on, which handles
 cleanup according to your requirements.
 
 Weblate will also not try to update bilingual files when the source changes,
-so if you need :file:`po` files to be updated from :file:`pot`, do it yourself by
-using :guilabel:`Update source strings` :ref:`upload-method`, or by using
-the :ref:`addon-weblate.gettext.msgmerge` add-on.
+so if you need :file:`po` files to be updated from :file:`pot`, you have two options:
+
+* **Automatically with an add-on** (recommended for continuous updates):
+  Install the :ref:`addon-weblate.gettext.msgmerge` add-on, which automatically
+  runs :program:`msgmerge` to update all PO files whenever the POT file changes.
+* **Manually via upload**: Use the :guilabel:`Update source strings` :ref:`upload-method`
+  to upload your POT file, which will merge it with existing translations.
 
 .. hint::
 
@@ -111,11 +116,11 @@ the :ref:`addon-weblate.gettext.msgmerge` add-on.
 
 .. seealso::
 
-   :ref:`processing`,
-   :ref:`addon-weblate.cleanup.generic`,
-   :ref:`addon-weblate.cleanup.blank`,
-   :ref:`addon-weblate.resx.update`,
-   :ref:`addon-weblate.gettext.msgmerge`
+   * :ref:`processing`
+   * :ref:`addon-weblate.cleanup.generic`
+   * :ref:`addon-weblate.cleanup.blank`
+   * :ref:`addon-weblate.resx.update`
+   * :ref:`addon-weblate.gettext.msgmerge`
 
 
 .. _translations-update:
@@ -150,9 +155,9 @@ existing translations, see :ref:`updating-target-files`.
 
 .. seealso::
 
-   :ref:`updating-target-files`,
-   :doc:`/devel/gettext`,
-   :doc:`/devel/sphinx`
+   * :ref:`updating-target-files`
+   * :doc:`/devel/gettext`
+   * :doc:`/devel/sphinx`
 
 .. _manage-vcs:
 
@@ -162,7 +167,8 @@ Managing the local VCS repository
 Weblate stores all translations in its underlying version control repository.
 It is suggested to be connected to a remote one, but internal-only setup is
 also possible. The :guilabel:`Repository maintenance` allows
-controlling this repository.
+controlling this repository. For a detailed description of the available
+actions, see :ref:`repository-maintenance`.
 
 .. hint::
 
@@ -173,5 +179,6 @@ controlling this repository.
 
 .. seealso::
 
-   :doc:`/admin/continuous`,
-   :doc:`/vcs`
+   * :ref:`repository-maintenance`
+   * :doc:`/admin/continuous`
+   * :doc:`/vcs`

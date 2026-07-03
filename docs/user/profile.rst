@@ -60,7 +60,7 @@ User profile
 The user profile is accessible by clicking your user icon in the top-right of the top menu,
 then the :guilabel:`Settings` menu.
 
-The user profile contains your preferences. Name and e-mail address is used in VCS commits, so keep this info accurate.
+The user profile contains your preferences. Name and e-mail address are used in VCS commits, so keep this info accurate.
 
 
 .. note::
@@ -86,7 +86,7 @@ Translated languages
 ++++++++++++++++++++
 
 Choose which languages you prefer to translate, and they will be offered on the
-main page of watched projects, so that you have easier access to these all translations
+main page of watched projects, so that you have easier access to all these translations
 in each of those languages.
 
 .. image:: /screenshots/your-translations.webp
@@ -156,7 +156,7 @@ Special characters
 
 Additional special characters to include in the :ref:`visual-keyboard`.
 
-.. _subscriptions:
+.. _notifications:
 
 Notifications
 -------------
@@ -169,6 +169,10 @@ Some of the notifications are sent only for events in your languages (for
 example about new strings to translate), while some trigger at component level
 (for example merge errors). These two groups of notifications are visually
 separated in the settings.
+
+The :guilabel:`Translation activity summary` notification is digest-only and
+summarizes added, updated, translated, approved, needs editing, and unfinished
+strings.
 
 You can toggle notifications for watched projects and administered projects and it
 can be further tweaked (or muted) per project and component. Visit the component
@@ -222,6 +226,21 @@ Profile
 All of the fields on this page are optional and can be deleted at any time, and
 by filling them out, you're giving us consent to share this data wherever your
 user profile appears.
+
+Public profile URLs, such as :guilabel:`Website URL`, :guilabel:`Contact URL`,
+:guilabel:`Fediverse URL`, and :guilabel:`Code site URL`, should point to a
+website, contact, or profile page. Obvious direct file download links can be
+rejected, and public profile links show a warning before leaving Weblate where
+possible.
+
+The :guilabel:`Code site URL` should use common code hosting profile paths,
+such as ``/username`` or ``/~username``; existing repository-style links such
+as ``/username/project`` or ``/group/subgroup/project`` are also accepted. The
+:guilabel:`Fediverse URL`
+should use common profile paths, such as ``/username``, ``/@username``,
+``/web/@username``, ``/users/username``, ``/accounts/username``,
+``/channel/username``, ``/profile/username``, ``/u/username``, or
+``/people/identifier``.
 
 Avatar can be shown for each user (depending on :setting:`ENABLE_AVATARS`).
 These images are obtained using https://gravatar.com/.

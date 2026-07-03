@@ -39,6 +39,9 @@ class XlsxFormatTest(BaseFormatTest):
         self.assertEqual(len(newworkbook.worksheets), len(testworkbook.worksheets))
         self.assertIsNotNone(newworkbook.active)
         self.assertIsNotNone(testworkbook.active)
+        # To make type checker happy
+        if newworkbook.active is None or testworkbook.active is None:
+            raise TypeError
         self.assertEqual(
             list(newworkbook.active.values),
             list(testworkbook.active.values),
@@ -57,3 +60,8 @@ class XlsxFormatTest(BaseFormatTest):
         self.assertEqual(storage.all_units[0].target, "Traitement A")
         with tempfile.NamedTemporaryFile(suffix="xlsx") as temp_file:
             storage.save_atomic(temp_file.name, storage.save_content)
+
+    def test_encoding(self) -> None:
+        # check that the encoding is always utf-8
+        storage = self.format_class(XLSX_FILE)
+        self.assertEqual(storage.get_encoding(), "utf-8")

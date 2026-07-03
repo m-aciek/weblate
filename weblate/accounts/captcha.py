@@ -4,18 +4,22 @@
 
 """Simple mathematical captcha."""
 
+from __future__ import annotations
+
 import ast
-import base64
-import json
 import operator
 import time
-import urllib.parse
+from functools import cache
 from random import SystemRandom
+from typing import TYPE_CHECKING, Literal
 
-from altcha import Challenge, Solution, solve_challenge
+from altcha import Payload, solve_challenge
 from django.utils.html import format_html
 
 from weblate.utils.templatetags.icons import icon
+
+if TYPE_CHECKING:
+    from altcha import Challenge, Solution
 
 TIMEDELTA = 600
 
@@ -23,11 +27,26 @@ TIMEDELTA = 600
 OPERATORS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul}
 
 
+class InvalidOperatorError(ValueError):
+    """Invalid operator for display."""
+
+
+@cache
+def operator_display(name: Literal["+", "-", "*"]) -> str:
+    match name:
+        case "+":
+            return icon("plus.svg")
+        case "-":
+            return icon("minus.svg")
+        case "*":
+            return icon("close.svg")
+    raise InvalidOperatorError
+
+
 class MathCaptcha:
     """Simple match captcha object."""
 
     operators = ("+", "-", "*")
-    operators_display = {}
     interval = (1, 10)
 
     def __init__(self, question=None, timestamp=None) -> None:
@@ -39,12 +58,6 @@ class MathCaptcha:
             self.timestamp = time.time()
         else:
             self.timestamp = timestamp
-        if not self.operators_display:
-            self.operators_display = {
-                "+": icon("plus.svg"),
-                "-": icon("minus.svg"),
-                "*": icon("close.svg"),
-            }
 
     def generate_question(self):
         """Generate random question."""
@@ -57,7 +70,7 @@ class MathCaptcha:
         if operation == "-":
             first += self.interval[1]
 
-        return str(first) + " " + operation + " " + str(second)
+        return f"{first!s} {operation} {second!s}"
 
     @staticmethod
     def unserialize(value):
@@ -74,16 +87,14 @@ class MathCaptcha:
 
     @property
     def result(self):
-        """Return result."""
+        """Captcha result."""
         return eval_expr(self.question)
 
     @property
     def display(self):
-        """Get unicode for display."""
+        """Unicode for display."""
         parts = self.question.split()
-        return format_html(
-            "{} {} {}", parts[0], self.operators_display[parts[1]], parts[2]
-        )
+        return format_html("{} {} {}", parts[0], operator_display(parts[1]), parts[2])
 
 
 def eval_expr(expr):
@@ -112,28 +123,20 @@ def eval_node(node):
     raise ValueError(node)
 
 
-def solve_altcha(challenge: Challenge, number: int | None = None) -> str:
-    solution: Solution = solve_challenge(
-        challenge=challenge.challenge,
-        salt=challenge.salt,
-        algorithm=challenge.algorithm,
-        max_number=challenge.max_number,
-        start=0,
-    )
+def solve_altcha(challenge: Challenge, *, invalid: bool = False) -> str:
+    solution: Solution | None = solve_challenge(challenge)
+    if solution is None:
+        msg = "Unable to solve ALTCHA challenge"
+        raise ValueError(msg)
     # Make sure the challenge expiry is in past
-    split_salt = challenge.salt.split("?")
-    params = urllib.parse.parse_qs(split_salt[1])
-    expires = int(params["expires"][0])
+    expires = challenge.parameters.expires_at
     while time.time() == expires:
         time.sleep(0.1)
-    return base64.b64encode(
-        json.dumps(
-            {
-                "algorithm": challenge.algorithm,
-                "challenge": challenge.challenge,
-                "number": solution.number if number is None else number,
-                "salt": challenge.salt,
-                "signature": challenge.signature,
-            }
-        ).encode("utf-8")
-    ).decode("utf-8")
+    if invalid:
+        # Tampering with counter would raise struct.error (packed as uint32),
+        # so corrupt the derived key instead to force a verification failure.
+        solution.derived_key = "0" * len(solution.derived_key)
+    return Payload(
+        challenge=challenge,
+        solution=solution,
+    ).to_base64()

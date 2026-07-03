@@ -2,18 +2,33 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from celery.schedules import crontab
 from django.conf import settings
-from django.db.models import Count, Q
+from django.db import transaction
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from django.utils.translation import gettext
 
 from weblate.accounts.notifications import send_notification_email
-from weblate.billing.models import Billing
+from weblate.billing.models import Billing, BillingEvent
+from weblate.trans.models import Project
 from weblate.trans.tasks import project_removal
 from weblate.utils.celery import app
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+
+def filter_with_projects(queryset):
+    db = queryset.db
+    return queryset.filter(
+        Exists(Project.objects.using(db).filter(workspace_id=OuterRef("workspace_id")))
+    )
 
 
 @app.task(trail=False)
@@ -30,25 +45,30 @@ def billing_notify() -> None:
 
     limit = Billing.objects.get_out_of_limits()
     due = Billing.objects.get_unpaid()
-
-    with_project = Billing.objects.annotate(Count("projects")).filter(
-        projects__count__gt=0
+    inactive_recurring = list(
+        Billing.objects.filter(state=Billing.STATE_ACTIVE)
+        .filter(payment__has_key="recurring")
+        .filter(inactive_recurring_disable__isnull=False)
+        .prefetch()
     )
+
+    with_project = filter_with_projects(Billing.objects.all())
     toremove = with_project.exclude(removal=None).order_by("removal")
     trial = with_project.filter(removal=None, state=Billing.STATE_TRIAL).order_by(
         "expiry"
     )
 
-    if limit or due or toremove or trial:
+    if limit or due or toremove or trial or inactive_recurring:
         send_notification_email(
             "en",
-            [a[1] for a in settings.ADMINS] + settings.ADMINS_BILLING,
+            [*settings.ADMINS, *settings.ADMINS_BILLING],
             "billing_check",
             context={
                 "limit": limit,
                 "due": due,
                 "toremove": toremove,
                 "trial": trial,
+                "inactive_recurring": inactive_recurring,
             },
         )
 
@@ -56,14 +76,19 @@ def billing_notify() -> None:
 @app.task(trail=False)
 def notify_expired() -> None:
     # Notify about expired billings
-    possible_billings = Billing.objects.filter(
-        # Active without payment (checked later)
-        Q(state=Billing.STATE_ACTIVE)
-        # Scheduled removal
-        | Q(removal__isnull=False)
-        # Trials expiring soon
-        | Q(state=Billing.STATE_TRIAL, expiry__lte=timezone.now() + timedelta(days=7))
-    ).exclude(projects__isnull=True)
+    possible_billings = filter_with_projects(
+        Billing.objects.filter(
+            # Active without payment (checked later)
+            Q(state=Billing.STATE_ACTIVE)
+            # Scheduled removal
+            | Q(removal__isnull=False)
+            # Trials expiring soon
+            | Q(
+                state=Billing.STATE_TRIAL,
+                expiry__lte=timezone.now() + timedelta(days=7),
+            ),
+        )
+    )
     for bill in possible_billings:
         if bill.state == Billing.STATE_ACTIVE and bill.check_payment_status(now=True):
             continue
@@ -79,6 +104,9 @@ def notify_expired() -> None:
             )
 
         for user in bill.get_notify_users():
+            bill.billinglog_set.create(
+                event=BillingEvent.EMAIL, summary="Billing expired", user=user
+            )
             send_notification_email(
                 user.profile.language,
                 [user.email],
@@ -88,37 +116,122 @@ def notify_expired() -> None:
                     "payment_enabled": getattr(settings, "PAYMENT_ENABLED", False),
                     "unsubscribe_note": note,
                 },
-                info=bill,
+                info=str(bill),
+                user=user,
             )
 
 
+def notify_inactive_recurring(bill: Billing, status: dict[str, datetime]) -> None:
+    planned_disable = status["planned_disable"]
+    for user in bill.get_notify_users():
+        bill.billinglog_set.create(
+            event=BillingEvent.EMAIL,
+            summary="Inactive recurring payment warning",
+            user=user,
+            details=Billing.serialize_inactive_recurring_status(status),
+        )
+        send_notification_email(
+            user.profile.language,
+            [user.email],
+            "billing_inactive_recurring",
+            context={
+                "billing": bill,
+                "planned_disable": planned_disable,
+                **status,
+                "payment_enabled": getattr(settings, "PAYMENT_ENABLED", False),
+            },
+            info=str(bill),
+            user=user,
+        )
+
+
 @app.task(trail=False)
+def inactive_recurring_check() -> None:
+    now = timezone.now()
+    for billing_id in (
+        Billing.objects.filter(
+            Q(
+                state=Billing.STATE_ACTIVE,
+                payment__has_key="recurring",
+                plan__yearly_price__gt=0,
+            )
+            | Q(inactive_recurring_notification__isnull=False)
+            | Q(inactive_recurring_latest_commit__isnull=False)
+            | Q(inactive_recurring_oldest_pending_change__isnull=False)
+            | Q(inactive_recurring_repository_changes__isnull=False)
+            | Q(inactive_recurring_push_failure__isnull=False)
+            | Q(inactive_recurring_disable__isnull=False)
+        )
+        .values_list("pk", flat=True)
+        .distinct()
+    ):
+        with transaction.atomic():
+            bill = (
+                Billing.objects.select_for_update()
+                .select_related("plan")
+                .prefetch_related("workspace__projects")
+                .get(pk=billing_id)
+            )
+            status = bill.get_inactive_recurring_status(now)
+            if status is None:
+                bill.clear_inactive_recurring_status()
+                continue
+
+            planned_disable = status["planned_disable"]
+            if planned_disable <= now:
+                bill.disable_inactive_recurring(status)
+                continue
+
+            if bill.inactive_recurring_notification is not None:
+                continue
+
+            bill.mark_inactive_recurring(status, now=now)
+            notify_inactive_recurring(bill, status)
+
+
+@app.task(trail=False)
+@transaction.atomic
 def schedule_removal() -> None:
     removal = timezone.now() + timedelta(days=settings.BILLING_REMOVAL_PERIOD)
-    for bill in Billing.objects.filter(state=Billing.STATE_ACTIVE, removal=None):
+    for bill in Billing.objects.filter(
+        state=Billing.STATE_ACTIVE, removal=None
+    ).select_for_update():
         if bill.check_payment_status():
             continue
+        bill.billinglog_set.create(
+            event=BillingEvent.UNPAID,
+            summary=f"Scheduled removal at {removal.isoformat()}",
+        )
         bill.removal = removal
         bill.save(update_fields=["removal"])
 
 
 @app.task(trail=False)
+@transaction.atomic
 def remove_single_billing(billing_id: int) -> None:
-    bill = Billing.objects.get(pk=billing_id)
+    bill = Billing.objects.select_for_update().get(pk=billing_id)
     for user in bill.get_notify_users():
+        bill.billinglog_set.create(
+            event=BillingEvent.EMAIL, summary="Billing removed", user=user
+        )
         send_notification_email(
             user.profile.language,
             [user.email],
             "billing_expired",
             context={"billing": bill, "final_removal": True},
-            info=bill,
+            info=str(bill),
+            user=user,
         )
-    for prj in bill.projects.iterator():
+    for prj in bill.get_projects_queryset().iterator():
+        bill.billinglog_set.create(
+            event=BillingEvent.REMOVED, summary=f"Removed project {prj}"
+        )
         prj.log_warning("removing due to unpaid billing")
         project_removal(prj.id, None)
     bill.removal = None
     bill.state = Billing.STATE_TERMINATED
     bill.save()
+    bill.billinglog_set.create(event=BillingEvent.REMOVED, summary="Terminated billing")
 
 
 @app.task(trail=False)
@@ -149,4 +262,9 @@ def setup_periodic_tasks(sender, **kwargs) -> None:
         crontab(hour=2, minute=30, day_of_week="mon,thu"),
         notify_expired.s(),
         name="notify-expired",
+    )
+    sender.add_periodic_task(
+        crontab(hour=2, minute=45),
+        inactive_recurring_check.s(),
+        name="inactive-recurring-check",
     )

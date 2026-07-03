@@ -15,7 +15,9 @@ Windows RC files
 RC files are language files used to localize translatable text, dialogs, menus,
 for Windows applications.
 
-.. seealso:: :doc:`tt:formats/rc`
+.. seealso::
+
+   :doc:`tt:formats/rc`
 
 Example files
 +++++++++++++
@@ -24,6 +26,8 @@ Example Windows RC file:
 
 .. literalinclude:: ../../weblate/trans/tests/data/cs-CZ.rc
     :language: c
+
+.. include:: /snippets/format-features/rc-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

@@ -11,7 +11,7 @@ from logging.handlers import SysLogHandler
 
 from weblate.api.spectacular import (
     get_drf_settings,
-    get_drf_standardized_errors_sertings,
+    get_drf_standardized_errors_settings,
     get_spectacular_settings,
 )
 
@@ -25,7 +25,7 @@ SITE_DOMAIN = ""
 ENABLE_HTTPS = False
 
 # Site URL
-SITE_URL = "{}://{}".format("https" if ENABLE_HTTPS else "http", SITE_DOMAIN)
+SITE_URL = f"{'https' if ENABLE_HTTPS else 'http'}://{SITE_DOMAIN}"
 
 #
 # Django settings for Weblate project.
@@ -33,22 +33,21 @@ SITE_URL = "{}://{}".format("https" if ENABLE_HTTPS else "http", SITE_DOMAIN)
 
 DEBUG = True
 
-ADMINS: tuple[tuple[str, str], ...] = (
-    # ("Your Name", "your_email@example.com"),
+ADMINS: tuple[str, ...] = (
+    # "Your Name <your_email@example.com>",
 )
 
 MANAGERS = ADMINS
 
 DATABASES = {
     "default": {
-        # Use "postgresql" or "mysql".
         "ENGINE": "django.db.backends.postgresql",
         # Database name.
         "NAME": "weblate",
         # Database user.
         "USER": "weblate",
         # Name of role to alter to set parameters in PostgreSQL,
-        # use in case role name is different than user used for authentication.
+        # use in case role name is different than the user used for authentication.
         # "ALTER_ROLE": "weblate",
         # Database password.
         "PASSWORD": "",
@@ -57,17 +56,7 @@ DATABASES = {
         # Set to empty string for default.
         "PORT": "",
         # Customizations for databases.
-        "OPTIONS": {
-            # In case of using an older MySQL server,
-            # which has MyISAM as a default storage
-            # "init_command": "SET storage_engine=INNODB",
-            # Uncomment for MySQL older than 5.7:
-            # "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
-            # Set emoji capable charset for MySQL:
-            # "charset": "utf8mb4",
-            # Change connection timeout in case you get MySQL gone away error:
-            # "connect_timeout": 28800,
-        },
+        "OPTIONS": {},
         # Persistent connections
         "CONN_MAX_AGE": None,
         "CONN_HEALTH_CHECKS": True,
@@ -94,7 +83,7 @@ LANGUAGE_CODE = "en-us"
 LANGUAGES = (
     ("ar", "العربية"),
     ("az", "Azərbaycan"),
-    ("ba", "башҡорт теле"),
+    ("ba", "башҡорт теле"),  # codespell:ignore
     ("be", "Беларуская"),
     ("be-latn", "Biełaruskaja"),
     ("bg", "Български"),
@@ -139,6 +128,7 @@ LANGUAGES = (
     ("th", "ไทย"),
     ("tr", "Türkçe"),
     ("uk", "Українська"),
+    ("vi", "Tiếng việt"),
     ("zh-hans", "简体中文"),
     ("zh-hant", "正體中文"),
 )
@@ -160,10 +150,6 @@ URL_PREFIX = ""
 
 # Absolute filesystem path to the directory that will hold user-uploaded files.
 MEDIA_ROOT = os.path.join(DATA_DIR, "media")
-
-# URL that handles the media served from MEDIA_ROOT. Make sure to use a
-# trailing slash.
-MEDIA_URL = f"{URL_PREFIX}/media/"
 
 # Absolute path to the directory static files should be collected to.
 # Don't put anything in this directory yourself; store your static files
@@ -305,13 +291,12 @@ SOCIAL_AUTH_PIPELINE = (
     "weblate.accounts.pipeline.verify_username",
     "social_core.pipeline.user.create_user",
     "social_core.pipeline.social_auth.associate_user",
+    "weblate.accounts.pipeline.handle_invite",
     "social_core.pipeline.social_auth.load_extra_data",
     "weblate.accounts.pipeline.second_factor",
-    "weblate.accounts.pipeline.cleanup_next",
     "weblate.accounts.pipeline.user_full_name",
     "weblate.accounts.pipeline.store_email",
     "weblate.accounts.pipeline.notify_connect",
-    "weblate.accounts.pipeline.handle_invite",
     "weblate.accounts.pipeline.password_reset",
 )
 SOCIAL_AUTH_DISCONNECT_PIPELINE = (
@@ -322,7 +307,6 @@ SOCIAL_AUTH_DISCONNECT_PIPELINE = (
     "weblate.accounts.pipeline.adjust_primary_mail",
     "weblate.accounts.pipeline.notify_disconnect",
     "social_core.pipeline.disconnect.disconnect",
-    "weblate.accounts.pipeline.cleanup_next",
 )
 
 # Custom authentication strategy
@@ -383,6 +367,27 @@ PASSWORD_HASHERS = [
 # Allow new user registrations
 REGISTRATION_OPEN = True
 
+# Allow registration with disposable e-mail domains
+REGISTRATION_ALLOW_DISPOSABLE_EMAILS = False
+
+# Project website restriction allowlist
+# PROJECT_WEB_RESTRICT_ALLOWLIST = {"trusted-project"}
+
+# Restrict private webhook targets
+# WEBHOOK_RESTRICT_PRIVATE = True
+
+# Restrict private asset targets
+# ASSET_RESTRICT_PRIVATE = True
+
+# Restrict private VCS repository targets
+# VCS_RESTRICT_PRIVATE = True
+
+# Private webhook target allowlist
+# WEBHOOK_PRIVATE_ALLOWLIST = [".internal.example", "hooks.internal.example"]
+
+# Private asset target allowlist
+# ASSET_PRIVATE_ALLOWLIST = [".internal.example", "assets.internal.example"]
+
 # Shortcut for login required setting
 REQUIRE_LOGIN = False
 
@@ -395,15 +400,21 @@ MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "weblate.accounts.middleware.AuthenticationMiddleware",
-    "django_otp.middleware.OTPMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "social_django.middleware.SocialAuthExceptionMiddleware",
-    "weblate.accounts.middleware.RequireLoginMiddleware",
     "weblate.api.middleware.ThrottlingMiddleware",
     "weblate.middleware.SecurityMiddleware",
     "weblate.wladmin.middleware.ManageMiddleware",
 ]
+
+if REQUIRE_LOGIN:
+    # Use Django 5.1's LoginRequiredMiddleware to enforce authentication
+    # All public views are marked with @login_not_required decorator
+    MIDDLEWARE.insert(
+        MIDDLEWARE.index("weblate.api.middleware.ThrottlingMiddleware"),
+        "django.contrib.auth.middleware.LoginRequiredMiddleware",
+    )
 
 ROOT_URLCONF = "weblate.urls"
 
@@ -413,9 +424,11 @@ INSTALLED_APPS = [
     "weblate.addons",
     "weblate.auth",
     "weblate.checks",
+    "weblate_fonts",
     "weblate.formats",
     "weblate.glossary",
     "weblate.machinery",
+    "weblate.workspaces",
     "weblate.trans",
     "weblate.lang",
     "weblate_language_data",
@@ -438,12 +451,13 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.admin",
+    "django.contrib.postgres",
     "django.contrib.sitemaps",
     "django.contrib.humanize",
     # Third party Django modules
     "social_django",
     "crispy_forms",
-    "crispy_bootstrap3",
+    "crispy_bootstrap5",
     "compressor",
     "rest_framework",
     "rest_framework.authtoken",
@@ -555,10 +569,6 @@ LOGGING: dict = {
             # Toggle to DEBUG to log all database queries
             "level": "CRITICAL",
         },
-        "redis_lock": {
-            "handlers": [*DEFAULT_LOG],
-            "level": DEFAULT_LOGLEVEL,
-        },
         "weblate": {
             "handlers": [*DEFAULT_LOG],
             "level": DEFAULT_LOGLEVEL,
@@ -583,6 +593,11 @@ LOGGING: dict = {
             "handlers": [*DEFAULT_LOG],
             "level": DEFAULT_LOGLEVEL,
         },
+        # Fedora messaging
+        "fedora_messaging": {
+            "handlers": [*DEFAULT_LOG],
+            "level": DEFAULT_LOGLEVEL,
+        },
     },
 }
 
@@ -599,7 +614,7 @@ if HAVE_SYSLOG:
         "facility": SysLogHandler.LOG_LOCAL2,
     }
 
-# Configure GELF integration if presetn
+# Configure GELF integration if present
 if WEBLATE_LOG_GELF_HOST:
     LOGGING["formatters"]["gelf"] = {
         "()": "logging_gelf.formatters.GELFFormatter",
@@ -641,10 +656,16 @@ SESSION_COOKIE_AGE_AUTHENTICATED = 1209600
 SESSION_COOKIE_SAMESITE = "Lax"
 # Increase allowed upload size
 DATA_UPLOAD_MAX_MEMORY_SIZE = 50000000
+# Maximum allowed uploaded translation file size
+TRANSLATION_UPLOAD_MAX_SIZE = 50000000
+# Maximum allowed uploaded component ZIP file size
+COMPONENT_ZIP_UPLOAD_MAX_SIZE = 50000000
+# Maximum allowed uploaded project backup ZIP file size
+PROJECT_BACKUP_UPLOAD_MAX_SIZE = 512 * 1024 * 1024
 # Allow more fields for case with a lot of subscriptions in profile
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 2000
 
-# Apply session coookie settings to language cookie as well with exception
+# Apply session cookie settings to language cookie as well with exception
 # of SameSite as we want language to be honored in CSRF error messages.
 LANGUAGE_COOKIE_SECURE = SESSION_COOKIE_SECURE
 LANGUAGE_COOKIE_HTTPONLY = SESSION_COOKIE_HTTPONLY
@@ -673,9 +694,6 @@ LOGOUT_URL = f"{URL_PREFIX}/accounts/logout/"
 # Default location for login
 LOGIN_REDIRECT_URL = f"{URL_PREFIX}/"
 
-# Opt-in for Django 6.0 default
-FORMS_URLFIELD_ASSUME_HTTPS = True
-
 # Anonymous user name
 ANONYMOUS_USER_NAME = "anonymous"
 
@@ -702,12 +720,13 @@ LIMIT_TRANSLATION_LENGTH_BY_SOURCE_LENGTH = True
 SIMPLIFY_LANGUAGES = True
 
 # Render forms using bootstrap
-CRISPY_ALLOWED_TEMPLATE_PACKS = "bootstrap3"
-CRISPY_TEMPLATE_PACK = "bootstrap3"
+CRISPY_ALLOWED_TEMPLATE_PACKS = "bootstrap5"
+CRISPY_TEMPLATE_PACK = "bootstrap5"
 
 # List of quality checks
 # CHECK_LIST = (
 #     "weblate.checks.same.SameCheck",
+#     "weblate.checks.chars.AcceleratorKeyCheck",
 #     "weblate.checks.chars.BeginNewlineCheck",
 #     "weblate.checks.chars.EndNewlineCheck",
 #     "weblate.checks.chars.BeginSpaceCheck",
@@ -721,6 +740,7 @@ CRISPY_TEMPLATE_PACK = "bootstrap3"
 #     "weblate.checks.chars.EndEllipsisCheck",
 #     "weblate.checks.chars.EndSemicolonCheck",
 #     "weblate.checks.chars.MaxLengthCheck",
+#     "weblate.checks.chars.MultipleCapitalCheck",
 #     "weblate.checks.chars.KashidaCheck",
 #     "weblate.checks.chars.PunctuationSpacingCheck",
 #     "weblate.checks.chars.KabyleCharactersCheck",
@@ -735,6 +755,7 @@ CRISPY_TEMPLATE_PACK = "bootstrap3"
 #     "weblate.checks.format.ObjectPascalFormatCheck",
 #     "weblate.checks.format.SchemeFormatCheck",
 #     "weblate.checks.format.CSharpFormatCheck",
+#     "weblate.checks.format.LaravelFormatCheck",
 #     "weblate.checks.format.JavaFormatCheck",
 #     "weblate.checks.format.JavaMessageFormatCheck",
 #     "weblate.checks.format.PercentPlaceholdersCheck",
@@ -760,6 +781,7 @@ CRISPY_TEMPLATE_PACK = "bootstrap3"
 #     "weblate.checks.render.MaxSizeCheck",
 #     "weblate.checks.markup.XMLValidityCheck",
 #     "weblate.checks.markup.XMLTagsCheck",
+#     "weblate.checks.markup.XMLCharsAroundTagsCheck",
 #     "weblate.checks.markup.MarkdownRefLinkCheck",
 #     "weblate.checks.markup.MarkdownLinkCheck",
 #     "weblate.checks.markup.MarkdownSyntaxCheck",
@@ -768,6 +790,7 @@ CRISPY_TEMPLATE_PACK = "bootstrap3"
 #     "weblate.checks.markup.RSTReferencesCheck",
 #     "weblate.checks.markup.RSTSyntaxCheck",
 #     "weblate.checks.placeholders.PlaceholderCheck",
+#     "weblate.checks.mdx.SafeMDXCheck",
 #     "weblate.checks.placeholders.RegexCheck",
 #     "weblate.checks.duplicate.DuplicateCheck",
 #     "weblate.checks.source.OptionalPluralCheck",
@@ -792,6 +815,7 @@ CRISPY_TEMPLATE_PACK = "bootstrap3"
 #     "weblate.trans.autofixes.chars.RemoveZeroSpace",
 #     "weblate.trans.autofixes.chars.RemoveControlChars",
 #     "weblate.trans.autofixes.chars.DevanagariDanda",
+#     "weblate.trans.autofixes.chars.PunctuationSpacing",
 #     "weblate.trans.autofixes.html.BleachHTML",
 # )
 
@@ -801,10 +825,14 @@ CRISPY_TEMPLATE_PACK = "bootstrap3"
 #     "weblate.addons.gettext.UpdateLinguasAddon",
 #     "weblate.addons.gettext.UpdateConfigureAddon",
 #     "weblate.addons.gettext.MsgmergeAddon",
-#     "weblate.addons.gettext.GettextCustomizeAddon",
+#     "weblate.addons.gettext.XgettextAddon",
+#     "weblate.addons.gettext.MesonAddon",
+#     "weblate.addons.gettext.DjangoAddon",
+#     "weblate.addons.gettext.SphinxAddon",
 #     "weblate.addons.gettext.GettextAuthorComments",
 #     "weblate.addons.cleanup.CleanupAddon",
 #     "weblate.addons.cleanup.RemoveBlankAddon",
+#     "weblate.addons.cleanup.ResetAddon",
 #     "weblate.addons.consistency.LanguageConsistencyAddon",
 #     "weblate.addons.discovery.DiscoveryAddon",
 #     "weblate.addons.autotranslate.AutoTranslateAddon",
@@ -812,21 +840,21 @@ CRISPY_TEMPLATE_PACK = "bootstrap3"
 #     "weblate.addons.flags.TargetEditAddon",
 #     "weblate.addons.flags.SameEditAddon",
 #     "weblate.addons.flags.BulkEditAddon",
+#     "weblate.addons.flags.TargetRepoUpdateAddon",
 #     "weblate.addons.generate.GenerateFileAddon",
 #     "weblate.addons.generate.PseudolocaleAddon",
 #     "weblate.addons.generate.PrefillAddon",
 #     "weblate.addons.generate.FillReadOnlyAddon",
-#     "weblate.addons.json.JSONCustomizeAddon",
-#     "weblate.addons.xml.XMLCustomizeAddon",
 #     "weblate.addons.properties.PropertiesSortAddon",
 #     "weblate.addons.git.GitSquashAddon",
 #     "weblate.addons.removal.RemoveComments",
 #     "weblate.addons.removal.RemoveSuggestions",
 #     "weblate.addons.resx.ResxUpdateAddon",
-#     "weblate.addons.yaml.YAMLCustomizeAddon",
 #     "weblate.addons.cdn.CDNJSAddon",
+#     "weblate.addons.cdn.CDNFilesAddon",
 #     "weblate.addons.webhooks.WebhookAddon",
 #     "weblate.addons.webhooks.SlackWebhookAddon",
+#     "weblate.addons.fedora_messaging.FedoraMessagingAddon",
 # )
 
 # E-mail address that error messages come from.
@@ -842,7 +870,7 @@ ALLOWED_HOSTS = ["*"]
 # Configuration for caching
 CACHES = {
     "default": {
-        "BACKEND": "redis_lock.django_cache.RedisCache",
+        "BACKEND": "django_redis.cache.RedisCache",
         "LOCATION": "redis://127.0.0.1:6379/1",
         # If redis is running on same host as Weblate, you might
         # want to use unix sockets instead:
@@ -875,8 +903,14 @@ REST_FRAMEWORK = get_drf_settings(
     anon_throttle="100/day",
     user_throttle="5000/hour",
 )
-DRF_STANDARDIZED_ERRORS = get_drf_standardized_errors_sertings()
-SPECTACULAR_SETTINGS = get_spectacular_settings(INSTALLED_APPS, SITE_URL, SITE_TITLE)
+DRF_STANDARDIZED_ERRORS = get_drf_standardized_errors_settings()
+SPECTACULAR_SETTINGS = get_spectacular_settings(
+    INSTALLED_APPS,
+    SITE_URL,
+    SITE_TITLE,
+    legal_hidden_documents=globals().get("LEGAL_HIDDEN_DOCUMENTS", ()),
+    legal_url=globals().get("LEGAL_URL"),
+)
 
 # Fonts CDN URL
 FONTS_CDN_URL = None
@@ -886,33 +920,19 @@ COMPRESS_OFFLINE = False
 COMPRESS_OFFLINE_CONTEXT = "weblate.utils.compress.offline_context"
 COMPRESS_CSS_HASHING_METHOD = "content"
 
-# Require login for all URLs
-if REQUIRE_LOGIN:
-    LOGIN_REQUIRED_URLS = (r"/(.*)$",)
-
-# In such case you will want to include some of the exceptions
-# LOGIN_REQUIRED_URLS_EXCEPTIONS = (
-#    rf"{URL_PREFIX}/accounts/(.*)$",  # Required for login
-#    rf"{URL_PREFIX}/admin/login/(.*)$",  # Required for admin login
-#    rf"{URL_PREFIX}/static/(.*)$",  # Required for development mode
-#    rf"{URL_PREFIX}/widget/(.*)$",  # Allowing public access to widgets
-#    rf"{URL_PREFIX}/data/(.*)$",  # Allowing public access to data exports
-#    rf"{URL_PREFIX}/hooks/(.*)$",  # Allowing public access to notification hooks
-#    rf"{URL_PREFIX}/healthz/$",  # Allowing public access to health check
-#    rf"{URL_PREFIX}/api/(.*)$",  # Allowing access to API
-#    rf"{URL_PREFIX}/js/i18n/$",  # JavaScript localization
-#    rf"{URL_PREFIX}/css/custom\.css$",  # Custom CSS support
-#    rf"{URL_PREFIX}/contact/$",  # Optional for contact form
-#    rf"{URL_PREFIX}/legal/(.*)$",  # Optional for legal app
-#    rf"{URL_PREFIX}/avatar/(.*)$",  # Optional for avatars
-#    rf"{URL_PREFIX}/site.webmanifest$",  # The request for the manifest is made without credentials
-# )
+# Note: When REQUIRE_LOGIN is enabled, Django's LoginRequiredMiddleware is used.
+# Public views are marked with @login_not_required decorator in the code.
+# The LOGIN_REQUIRED_URLS and LOGIN_REQUIRED_URLS_EXCEPTIONS settings are no longer used.
 
 # Silence some of the Django system checks
 SILENCED_SYSTEM_CHECKS = [
     # We have modified django.contrib.auth.middleware.AuthenticationMiddleware
     # as weblate.accounts.middleware.AuthenticationMiddleware
     "admin.E408",
+    # Using custom authentication middleware with LoginRequiredMiddleware
+    "auth.E013",
+    # pytest overrides string_if_invalid with a non-string value
+    "templates.E002",
     # Silence drf_spectacular until these are addressed
     "drf_spectacular.W001",
     "drf_spectacular.W002",
@@ -957,10 +977,21 @@ AUTO_UPDATE = False
 # PGP commits signing
 WEBLATE_GPG_IDENTITY = None
 
+# Website availability checks
+# Set to False to disable broken website alerts
+WEBSITE_ALERTS_ENABLED = True
+
 # Third party services integration
 MATOMO_SITE_ID = None
 MATOMO_URL = None
 GOOGLE_ANALYTICS_ID = None
 SENTRY_DSN = None
 SENTRY_ENVIRONMENT = SITE_DOMAIN
-AKISMET_API_KEY = None
+GOOGLE_CLOUD_ERROR_REPORTING = None
+OPENTELEMETRY_ENABLED = False
+OPENTELEMETRY_SERVICE_NAME = "weblate"
+OPENTELEMETRY_EXPORTER_OTLP_ENDPOINT = None
+OPENTELEMETRY_EXPORTER_OTLP_HEADERS = {}
+OPENTELEMETRY_TRACES_SAMPLE_RATE = 0
+OPENTELEMETRY_EXTRA_RESOURCE_ATTRIBUTES = {}
+PASSWORD_RESET_URL = None

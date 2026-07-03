@@ -23,20 +23,22 @@ from django.views.generic.edit import FormView
 
 from weblate.configuration.models import Setting, SettingCategory
 from weblate.machinery.base import (
-    BatchMachineTranslation,
     MachineTranslationError,
-    SettingsDict,
 )
 from weblate.machinery.models import MACHINERY
-from weblate.trans.models import Project, Translation, Unit
+from weblate.trans.models import Project, Unit
 from weblate.trans.templatetags.translations import format_language_string
-from weblate.utils.diff import Differ
 from weblate.utils.errors import report_error
 from weblate.utils.views import parse_path
 from weblate.wladmin.views import MENU as MANAGE_MENU
 
 if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest
+    from weblate.machinery.base import (
+        BatchMachineTranslation,
+        SettingsDict,
+    )
+    from weblate.trans.models import Translation
 
 
 class MachineryMixin:
@@ -66,6 +68,7 @@ class MachineryGlobalMixin(MachineryMixin):
 class DeprecatedMachinery:
     is_available = False
     settings_form: None = None
+    sends_data_to_third_party = False
 
     def __init__(self, identifier: str) -> None:
         self.identifier = self.name = identifier
@@ -126,7 +129,7 @@ class MachineryConfiguration:
 class ListMachineryView(TemplateView):
     template_name = "machinery/list.html"
 
-    def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:
+    def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:  # type: ignore[override]
         super().setup(request, *args, **kwargs)
         self.project = None
         self.post_setup(request, kwargs)
@@ -197,7 +200,7 @@ class ListMachineryProjectView(MachineryProjectMixin, ListMachineryView):
                     machinery, configuration, sitewide=True, project=self.project
                 )
 
-    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):
+    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         if not request.user.has_perm("project.edit", self.project):
             raise PermissionDenied
         return super().dispatch(request, *args, **kwargs)
@@ -213,7 +216,7 @@ class EditMachineryView(FormView):
 
     machinery: DeprecatedMachinery | BatchMachineTranslation
 
-    def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:
+    def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:  # type: ignore[override]
         super().setup(request, *args, **kwargs)
         self.machinery_id = kwargs["machinery"]
         try:
@@ -229,7 +232,12 @@ class EditMachineryView(FormView):
     def get_form_kwargs(self):
         result = super().get_form_kwargs()
         result["machinery"] = self.machinery
+        result["allow_private_targets"] = self.allow_private_targets
         return result
+
+    @property
+    def allow_private_targets(self) -> bool:
+        return True
 
     @cached_property
     def settings_dict(self) -> dict[str, SettingsDict]:
@@ -246,6 +254,9 @@ class EditMachineryView(FormView):
         result["machinery_id"] = self.machinery.get_identifier()
         result["machinery_name"] = self.machinery.name
         result["machinery_doc_anchor"] = self.machinery.get_doc_anchor()
+        result["machinery_sends_data_to_third_party"] = (
+            self.machinery.sends_data_to_third_party
+        )
         return result
 
     def install_service(self) -> None:
@@ -269,7 +280,7 @@ class EditMachineryView(FormView):
             return reverse("machinery-list", kwargs={"project": self.project.slug})
         return reverse("manage-machinery")
 
-    def post(self, request: AuthenticatedHttpRequest, *args, **kwargs):
+    def post(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         if "delete" in request.POST:
             self.delete_service()
             return HttpResponseRedirect(self.get_success_url())
@@ -289,7 +300,7 @@ class EditMachineryView(FormView):
             return HttpResponseRedirect(self.get_success_url())
         return super().post(request, *args, **kwargs)
 
-    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):
+    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         if not self.machinery.is_available:
             msg = "Invalid service specified"
             raise Http404(msg)
@@ -317,13 +328,17 @@ class EditMachineryGlobalView(MachineryGlobalMixin, EditMachineryView):
         self.save_settings(form.cleaned_data)
         return super().form_valid(form)
 
-    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):
+    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         if not request.user.has_perm("machinery.edit"):
             raise PermissionDenied
         return super().dispatch(request, *args, **kwargs)
 
 
 class EditMachineryProjectView(MachineryProjectMixin, EditMachineryView):
+    @property
+    def allow_private_targets(self) -> bool:
+        return False
+
     def save_settings(self, data: SettingsDict | None) -> None:
         self.project.machinery_settings[self.machinery_id] = data
         self.project.save(update_fields=["machinery_settings"])
@@ -338,11 +353,11 @@ class EditMachineryProjectView(MachineryProjectMixin, EditMachineryView):
         del self.project.machinery_settings[self.machinery_id]
         self.project.save(update_fields=["machinery_settings"])
 
-    def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:
+    def setup(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> None:  # type: ignore[override]
         super().setup(request, *args, **kwargs)
         self.project = parse_path(request, [kwargs["project"]], (Project,))
 
-    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):
+    def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         if not request.user.has_perm("project.edit", self.project):
             raise PermissionDenied
         return super().dispatch(request, *args, **kwargs)
@@ -374,6 +389,30 @@ def format_results_helper(
     item["html"] = format_string_helper(item["text"], translation)
 
 
+def get_machinery_translations(
+    request: AuthenticatedHttpRequest,
+    translation_service,
+    unit: Unit,
+    search: str | None,
+    targets: list[str],
+    translation: Translation,
+    source_translation: Translation,
+) -> list[dict]:
+    if search:
+        translations = translation_service.search(unit, search, request.user)
+        for item in translations:
+            format_results_helper(item, targets, 0, translation, source_translation)
+        return translations
+
+    translations = translation_service.translate(unit, request.user)
+    for plural_form, possible_translations in enumerate(translations):
+        for item in possible_translations:
+            format_results_helper(
+                item, targets, plural_form, translation, source_translation
+            )
+    return list(chain.from_iterable(translations))
+
+
 def handle_machinery(request: AuthenticatedHttpRequest, service, unit, search=None):
     translation = unit.translation
     component = translation.component
@@ -398,7 +437,6 @@ def handle_machinery(request: AuthenticatedHttpRequest, service, unit, search=No
     }
 
     machinery_settings = component.project.get_machinery_settings()
-    Differ()
     targets = unit.get_target_plurals()
 
     try:
@@ -407,20 +445,15 @@ def handle_machinery(request: AuthenticatedHttpRequest, service, unit, search=No
         response["responseDetails"] = gettext("Service is currently not available.")
     else:
         try:
-            if search:
-                translations = translation_service.search(unit, search, request.user)
-                for item in translations:
-                    format_results_helper(
-                        item, targets, 0, translation, source_translation
-                    )
-            else:
-                translations = translation_service.translate(unit, request.user)
-                for plural_form, possible_translations in enumerate(translations):
-                    for item in possible_translations:
-                        format_results_helper(
-                            item, targets, plural_form, translation, source_translation
-                        )
-                translations = list(chain.from_iterable(translations))
+            translations = get_machinery_translations(
+                request,
+                translation_service,
+                unit,
+                search,
+                targets,
+                translation,
+                source_translation,
+            )
             response["translations"] = translations
             response["responseStatus"] = 200
         except MachineTranslationError as exc:
@@ -430,7 +463,9 @@ def handle_machinery(request: AuthenticatedHttpRequest, service, unit, search=No
             response["responseDetails"] = f"{error.__class__.__name__}: {error}"
 
     if response["responseStatus"] != 200:
-        translation.log_info("machinery failed: %s", response["responseDetails"])
+        translation.log_info(
+            "machinery %s failed: %s", service, response["responseDetails"]
+        )
 
     return JsonResponse(data=response)
 

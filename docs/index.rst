@@ -74,6 +74,7 @@ Learn more about :ref:`contributing`.
     :hidden:
 
     devel/starting
+    devel/migration
     devel/integration
     devel/gettext
     devel/mobile
@@ -86,6 +87,7 @@ Learn more about :ref:`contributing`.
     devel/review
     devel/share
     devel/reporting
+    devel/success-stories
 
 
 .. toctree::
@@ -99,9 +101,11 @@ Learn more about :ref:`contributing`.
     admin/backup
     admin/auth
     admin/access
+    admin/workspaces
     admin/projects
     admin/languages
     admin/continuous
+    admin/code-hosting
     admin/licensing
     admin/translating
     admin/checks
@@ -117,7 +121,6 @@ Learn more about :ref:`contributing`.
     admin/customize
     admin/admin
     admin/support
-    legal
 
 .. toctree::
     :caption: Contributor docs
@@ -138,7 +141,9 @@ Learn more about :ref:`contributing`.
     contributing/schemas
     contributing/release
     contributing/modules
+    contributing/submodules
     contributing/about
+    contributing/code_of_conduct
     contributing/license
     contributing/trademark
 
@@ -148,6 +153,10 @@ Learn more about :ref:`contributing`.
    :hidden:
 
    security/index
+   security/product-information
+   security/governance
+   security/releases
+   security/release-artifacts
    security/dependencies
    security/issues
    security/incident-response-plan
@@ -155,6 +164,9 @@ Learn more about :ref:`contributing`.
    security/disaster-recovery-plan
    security/threat-model
    security/privacy-compliance
+   security/us-compliance
+   security/localization-threat
+   security/data-residency
 
 .. toctree::
    :caption: File formats
@@ -171,6 +183,7 @@ Learn more about :ref:`contributing`.
     :hidden:
 
     changes
+    changes/v5
     changes/v4
     changes/v3
     changes/v2

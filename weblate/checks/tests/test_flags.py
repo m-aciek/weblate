@@ -4,9 +4,39 @@
 
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase
+from django.utils.translation import override
+from lxml import etree
 
-from weblate.checks.flags import TYPED_FLAGS, TYPED_FLAGS_ARGS, Flags, FlagsValidator
+from weblate.checks.flags import (
+    TYPED_FLAGS,
+    TYPED_FLAGS_ARGS,
+    Flags,
+    FlagsValidator,
+    get_auto_flag_names,
+    get_flag_choices,
+)
+from weblate.formats.helpers import NamedBytesIO
+from weblate.formats.ttkit import PoFormat
 from weblate.trans.defines import VARIANT_KEY_LENGTH
+
+PO_HEADER = r"""
+msgid ""
+msgstr ""
+"Project-Id-Version: Weblate Hello World 2012\n"
+"Report-Msgid-Bugs-To: <noreply@example.net>\n"
+"POT-Creation-Date: 2012-03-14 15:54+0100\n"
+"PO-Revision-Date: 2013-08-25 15:23+0200\n"
+"Last-Translator: testuser <>\n"
+"Language-Team: Czech <http://example.com/projects/test/test/cs/>\n"
+"Language: cs\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2;\n"
+"X-Generator: Weblate 1.7-dev\n"
+
+
+"""
 
 
 class FlagTest(SimpleTestCase):
@@ -31,6 +61,38 @@ class FlagTest(SimpleTestCase):
         self.assertTrue(flags.has_any({"bar", "foo"}))
         self.assertTrue(flags.has_any({"bar", "baz"}))
 
+    def test_is_active(self) -> None:
+        flags = Flags("safe-html")
+        self.assertTrue(flags.is_active("safe-html", "source"))
+        self.assertEqual(get_auto_flag_names("safe-html"), ("auto-safe-html",))
+
+        flags = Flags("java-format")
+        self.assertTrue(flags.is_active("java-format", "source"))
+        self.assertEqual(
+            get_auto_flag_names("java-format"), ("auto-java-messageformat",)
+        )
+
+        flags = Flags("auto-safe-html")
+        self.assertTrue(flags.is_active("safe-html", "Plain text"))
+        self.assertFalse(
+            flags.is_active(
+                "safe-html",
+                "<TOCInline toc={toc.filter((node)) => node.level === 2)} />",
+            )
+        )
+
+        flags = Flags("auto-safe-html,ignore-safe-html")
+        self.assertFalse(flags.is_active("safe-html", "Plain text"))
+
+        flags = Flags("auto-java-messageformat")
+        self.assertTrue(flags.is_active("java-format", "{0} strings"))
+        self.assertTrue(flags.is_active("java-format", "{0,number} strings"))
+        self.assertFalse(flags.is_active("java-format", "Plain text"))
+        self.assertFalse(flags.is_active("java-format", "{0 strings"))
+
+        flags = Flags("auto-java-messageformat,ignore-java-format")
+        self.assertFalse(flags.is_active("java-format", "{0} strings"))
+
     def test_parse_empty(self) -> None:
         self.assertEqual(Flags("").items(), set())
 
@@ -43,6 +105,15 @@ class FlagTest(SimpleTestCase):
     def test_values(self) -> None:
         flags = Flags("placeholders:bar:baz")
         self.assertEqual(flags.get_value("placeholders"), ["bar", "baz"])
+
+    def test_get_value_raw(self) -> None:
+        flags = Flags("placeholders:bar:baz")
+        self.assertEqual(flags.get_value_raw("placeholders"), ("bar", "baz"))
+
+    def test_get_value_raw_without_value(self) -> None:
+        flags = Flags("foo")
+        with self.assertRaises(KeyError):
+            flags.get_value_raw("foo")
 
     def test_quoted_values(self) -> None:
         flags = Flags(r"""placeholders:"bar: \"value\"":'baz \'value\''""")
@@ -59,10 +130,34 @@ class FlagTest(SimpleTestCase):
         flags = Flags(r"""placeholders:"\n" """)
         self.assertEqual(flags.get_value("placeholders"), ["\n"])
 
+    def test_set_values(self) -> None:
+        flags = Flags()
+        flags.set_values("placeholders", "$URL$", "$COUNT$")
+        self.assertEqual(flags.get_value("placeholders"), ["$URL$", "$COUNT$"])
+        self.assertEqual(flags.format(), "placeholders:$URL$:$COUNT$")
+
+    def test_set_values_empty(self) -> None:
+        flags = Flags()
+        with self.assertRaises(ValueError):
+            flags.set_values("placeholders")
+
     def test_validate_value(self) -> None:
         with self.assertRaises(ValidationError):
             Flags("max-length:x").validate()
         Flags("max-length:30").validate()
+
+    def test_validate_accelerator_value(self) -> None:
+        Flags("accelerator:&").validate()
+        Flags("accelerator:_").validate()
+        Flags("accelerator:~").validate()
+        with self.assertRaises(ValidationError):
+            Flags("accelerator").validate()
+        with self.assertRaises(ValidationError):
+            Flags("accelerator:").validate()
+        with self.assertRaises(ValidationError):
+            Flags("accelerator:&&").validate()
+        with self.assertRaises(ValidationError):
+            Flags("accelerator:a").validate()
 
     def test_validate_name(self) -> None:
         with self.assertRaises(ValidationError):
@@ -88,6 +183,16 @@ class FlagTest(SimpleTestCase):
         flags = Flags("regex:,bar")
         regex = flags.get_value("regex")
         self.assertEqual(regex.pattern, "")
+
+    def test_empty_placeholder_value(self) -> None:
+        for value in (
+            "placeholders:",
+            'placeholders:""',
+            'placeholders:r""',
+            "placeholders:$URL$:",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                FlagsValidator(value).validate()
 
     def test_regex(self) -> None:
         flags = Flags("regex:.*")
@@ -208,3 +313,72 @@ class FlagTest(SimpleTestCase):
             flags.validate()
         flags = FlagsValidator("discard:ignore-same")
         flags.validate()
+
+    def test_equals(self) -> None:
+
+        flags = Flags("foo:foo, bar:bar")
+        self.assertEqual(flags, Flags("bar:bar, foo:foo"))
+        self.assertEqual(flags, Flags(Flags("bar:bar, foo:foo")))
+        self.assertEqual(flags, Flags("bar:bar, foo:foo"))
+
+        flags_xml = etree.fromstring(
+            """<flags weblate-flags="bar:bar, foo:foo"></flags>"""
+        )
+        self.assertEqual(flags, Flags(flags_xml))
+
+        flags = Flags(None)
+        self.assertEqual(flags, Flags())
+        self.assertEqual(flags, Flags(""))
+        self.assertEqual(flags, Flags(None))
+
+    def test_automatic_location_flags(self) -> None:
+        def check_location_flags(content: str, expected_flags: set[str]) -> None:
+            fileformat = PoFormat(NamedBytesIO("", content.encode()))
+            # ruff: ignore[unnecessary-iterable-allocation-for-first-element]
+            flags = list(fileformat.all_units)[0].flags
+            self.assertEqual(set(flags), expected_flags)
+
+        # test rst-text flag
+        content = f'{PO_HEADER}#: ../../path/file.rst:24 ../../path/file.rst:52#: ../../path/file.rst:63msgid "Hello, world!"msgstr "Nazdar svete!"'
+        check_location_flags(content, {"rst-text"})
+
+        # test md-text flag
+        content = f'{PO_HEADER}#: ../../path/file.md:24 ../../path/file.md:52msgid "Hello, world!"msgstr "Nazdar svete!"'
+        check_location_flags(content, {"md-text"})
+
+        # test md-text flag for MDX
+        content = f'{PO_HEADER}#: ../../path/file.mdx:24 ../../path/file.mdx:52msgid "Hello, world!"msgstr "Nazdar svete!"'
+        check_location_flags(content, {"md-text", "safe-mdx"})
+
+    def test_get_flag_choices(self) -> None:
+        choices = get_flag_choices()
+        # Catalog is non-empty and every entry has the expected keys
+        self.assertGreater(len(choices), 0)
+        for entry in choices:
+            self.assertIn("name", entry)
+            self.assertIn("label", entry)
+            self.assertIn("category", entry)
+            self.assertIn("has_value", entry)
+        names = {entry["name"] for entry in choices}
+        # A few representative flags from each category are exposed
+        self.assertIn("read-only", names)
+        self.assertIn("max-length", names)
+        self.assertIn("md-text", names)
+        # Typed flags are marked as such
+        max_length = next(e for e in choices if e["name"] == "max-length")
+        self.assertTrue(max_length["has_value"])
+        read_only = next(e for e in choices if e["name"] == "read-only")
+        self.assertFalse(read_only["has_value"])
+        # Names are unique (no duplicates across categories)
+        self.assertEqual(len(names), len(choices))
+
+    def test_get_flag_choices_per_language(self) -> None:
+        with override("en"):
+            en_choices = get_flag_choices()
+        with override("cs"):
+            cs_choices = get_flag_choices()
+        with override("en"):
+            en_choices_again = get_flag_choices()
+
+        self.assertIsNot(en_choices, cs_choices)
+        self.assertIs(en_choices, en_choices_again)

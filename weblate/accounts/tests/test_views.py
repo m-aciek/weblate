@@ -6,27 +6,50 @@
 
 from __future__ import annotations
 
+from time import sleep
+from types import SimpleNamespace
 from unittest import mock
 
 from django.conf import settings
 from django.core import mail
-from django.core.signing import TimestampSigner
 from django.test.utils import modify_settings, override_settings
 from django.urls import reverse
 from jsonschema import validate
+from requests.exceptions import HTTPError
+from rest_framework.authtoken.models import Token
+from social_core.exceptions import (
+    AuthCanceled,
+    AuthFailed,
+    AuthForbidden,
+    AuthMissingParameter,
+    AuthStateMissing,
+    AuthTokenError,
+    InvalidEmail,
+)
 from weblate_schemas import load_schema
 
+from weblate.accounts.forms import ProfileForm
 from weblate.accounts.models import Profile, Subscription
-from weblate.accounts.notifications import NotificationFrequency, NotificationScope
-from weblate.auth.models import User
+from weblate.accounts.notifications import (
+    NOTIFICATIONS,
+    NotificationFrequency,
+    NotificationScope,
+)
+from weblate.accounts.views import log_handled_auth_failure
+from weblate.auth.models import Group, User
+from weblate.billing.models import Billing, Plan
 from weblate.lang.models import Language
+from weblate.trans.actions import ActionEvents
 from weblate.trans.tests.test_models import RepoTestCase
 from weblate.trans.tests.test_views import FixtureTestCase
 from weblate.trans.tests.utils import (
+    create_test_billing,
     social_core_modify_settings,
     social_core_override_settings,
 )
 from weblate.utils.ratelimit import reset_rate_limit
+from weblate.utils.state import STATE_TRANSLATED
+from weblate.workspaces.models import Workspace
 
 CONTACT_DATA = {
     "name": "Test",
@@ -53,13 +76,63 @@ class ViewTest(RepoTestCase):
         user.save()
         return user
 
+    @staticmethod
+    def get_backend(name: str = "github") -> mock.Mock:
+        backend = mock.Mock()
+        backend.name = name
+        return backend
+
+    def assert_social_complete_result(
+        self,
+        error: Exception,
+        *,
+        expected_text: str,
+        backend: str = "github",
+        session_updates: dict[str, object] | None = None,
+        reportable: bool,
+    ) -> None:
+        session = self.client.session
+        if session_updates is not None:
+            for key, value in session_updates.items():
+                session[key] = value
+            session.save()
+
+        with (
+            mock.patch("weblate.accounts.views.complete", side_effect=error),
+            mock.patch("weblate.accounts.views.report_error") as mocked_report_error,
+            mock.patch(
+                "weblate.accounts.views.log_handled_auth_failure"
+            ) as mocked_handled_error,
+        ):
+            response = self.client.get(
+                reverse("social:complete", args=(backend,)), follow=True
+            )
+
+        self.assertRedirects(response, reverse("login"))
+        self.assertContains(response, expected_text)
+        if reportable:
+            mocked_report_error.assert_called_once()
+            mocked_handled_error.assert_not_called()
+        else:
+            mocked_report_error.assert_not_called()
+            mocked_handled_error.assert_called_once()
+
     @override_settings(
-        REGISTRATION_CAPTCHA=False, ADMINS=(("Weblate test", "noreply@weblate.org"),)
+        REGISTRATION_CAPTCHA=False, ADMINS=("Weblate test <noreply@weblate.org>",)
     )
     def test_contact(self) -> None:
         """Test for contact form."""
-        # Basic get
+        # Topic chooser is shown by default
         response = self.client.get(reverse("contact"))
+        self.assertNotContains(response, 'id="id_message"')
+        self.assertContains(response, "?topic=server")
+
+        # Form is shown after picking the server topic
+        response = self.client.get(reverse("contact"), {"topic": "server"})
+        self.assertContains(response, 'id="id_message"')
+
+        # Form is also shown for known subject deep-links
+        response = self.client.get(reverse("contact"), {"t": "trial"})
         self.assertContains(response, 'id="id_message"')
 
         # Sending message
@@ -69,7 +142,7 @@ class ViewTest(RepoTestCase):
         # Verify message
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].subject, "[Weblate] Message from dark side")
-        self.assertEqual(mail.outbox[0].to, ["noreply@weblate.org"])
+        self.assertEqual(mail.outbox[0].to, list(settings.ADMINS))
 
     @override_settings(
         REGISTRATION_CAPTCHA=False, ADMINS_CONTACT=["noreply@example.com"]
@@ -100,14 +173,26 @@ class ViewTest(RepoTestCase):
         response = self.client.post(reverse("contact"), CONTACT_DATA)
         self.assertContains(response, "Too many messages sent, please try again later.")
 
-    @override_settings(RATELIMIT_MESSAGE_ATTEMPTS=1, RATELIMIT_WINDOW=0)
+    @override_settings(RATELIMIT_MESSAGE_ATTEMPTS=1, RATELIMIT_WINDOW=1)
     def test_contact_rate_window(self) -> None:
         """Test for contact form rate limiting."""
         message = "Too many messages sent, please try again later."
         response = self.client.post(reverse("contact"), CONTACT_DATA)
         self.assertNotContains(response, message)
+        sleep(1)
         response = self.client.post(reverse("contact"), CONTACT_DATA)
         self.assertNotContains(response, message)
+
+    @override_settings(CONTACT_FORM="disabled")
+    def test_contact_disabled(self) -> None:
+        """Test for disabled contact form."""
+        # Test GET request
+        response = self.client.get(reverse("contact"))
+        self.assertEqual(response.status_code, 404)
+
+        # Test POST request
+        response = self.client.post(reverse("contact"), CONTACT_DATA)
+        self.assertEqual(response.status_code, 404)
 
     @override_settings(OFFER_HOSTING=False)
     def test_hosting_disabled(self) -> None:
@@ -120,8 +205,6 @@ class ViewTest(RepoTestCase):
     @override_settings(OFFER_HOSTING=True)
     def test_libre(self) -> None:
         """Test for hosting form with enabled hosting."""
-        from weblate.billing.models import Plan
-
         self.get_user()
         self.client.login(username="testuser", password="testpassword")
 
@@ -146,8 +229,6 @@ class ViewTest(RepoTestCase):
     @modify_settings(INSTALLED_APPS={"append": "weblate.billing"})
     def test_trial(self) -> None:
         """Test for trial form with disabled hosting."""
-        from weblate.billing.models import Plan
-
         Plan.objects.create(price=1, slug="640k")
         user = self.get_user()
         self.client.login(username="testuser", password="testpassword")
@@ -155,12 +236,12 @@ class ViewTest(RepoTestCase):
         self.assertContains(response, "640k")
         response = self.client.post(reverse("trial"), follow=True)
         self.assertContains(response, "Create project")
-        billing = user.billing_set.get()
+        billing = Billing.objects.get(workspace__defined_groups__memberships__user=user)
         self.assertTrue(billing.is_trial)
 
         # Repeated attempt should fail
         response = self.client.get(reverse("trial"))
-        self.assertRedirects(response, reverse("contact") + "?t=trial")
+        self.assertRedirects(response, f"{reverse('contact')}?t=trial")
 
     def test_contact_subject(self) -> None:
         # With set subject
@@ -171,7 +252,7 @@ class ViewTest(RepoTestCase):
         user = self.get_user()
         # Login
         self.client.login(username=user.username, password="testpassword")
-        response = self.client.get(reverse("contact"))
+        response = self.client.get(reverse("contact"), {"topic": "server"})
         self.assertContains(response, 'value="First Second"')
         self.assertContains(response, user.email)
 
@@ -201,6 +282,30 @@ class ViewTest(RepoTestCase):
         response = self.client.get(user.get_absolute_url())
         self.assertContains(response, "table-activity")
 
+    @modify_settings(INSTALLED_APPS={"remove": "weblate.billing"})
+    def test_user_without_billing(self) -> None:
+        """Test user pages without billing."""
+        user = self.get_user()
+
+        self.client.login(username=user.username, password="testpassword")
+        response = self.client.get(user.get_absolute_url())
+
+        self.assertContains(response, "table-activity")
+        self.assertEqual(response.context["page_user_billings"], [])
+
+    def test_user_billing_tab(self) -> None:
+        """Test billing tab on user pages."""
+        user = self.get_user()
+        user.is_superuser = True
+        user.save()
+        billing = create_test_billing(user, invoice=False)
+
+        self.client.login(username=user.username, password="testpassword")
+        response = self.client.get(user.get_absolute_url())
+
+        self.assertEqual(response.context["page_user_billings"], [billing])
+        self.assertContains(response, 'data-bs-target="#billing"')
+
     def test_suggestions(self) -> None:
         """Test user pages."""
         # Setup user
@@ -224,7 +329,7 @@ class ViewTest(RepoTestCase):
         response = self.client.get(
             reverse("user_contributions", kwargs={"user": user.username})
         )
-        self.assertContains(response, "Translations with contribution")
+        self.assertContains(response, "Translates")
 
     def test_login(self) -> None:
         user = self.get_user()
@@ -246,6 +351,37 @@ class ViewTest(RepoTestCase):
         # Logout
         response = self.client.post(reverse("logout"))
         self.assertContains(response, "Thank you for using Weblate")
+
+    def test_login_next_redirect(self) -> None:
+        user = self.get_user()
+
+        response = self.client.post(
+            reverse("login"),
+            {
+                "username": user.username,
+                "password": "testpassword",
+                "next": f"{reverse('profile')}#account",
+            },
+        )
+
+        self.assertRedirects(response, f"{reverse('profile')}#account")
+
+    def test_login_rejects_unsafe_next(self) -> None:
+        user = self.get_user()
+
+        for next_url in ("https://evil.example/", "////evil.example"):
+            with self.subTest(next_url=next_url):
+                self.client.logout()
+                response = self.client.post(
+                    reverse("login"),
+                    {
+                        "username": user.username,
+                        "password": "testpassword",
+                        "next": next_url,
+                    },
+                )
+
+                self.assertRedirects(response, reverse("home"))
 
     @social_core_override_settings(
         AUTHENTICATION_BACKENDS=(
@@ -276,6 +412,147 @@ class ViewTest(RepoTestCase):
             response, "This username/password combination was not found."
         )
 
+    @social_core_override_settings(
+        AUTHENTICATION_BACKENDS=(
+            "django.contrib.auth.backends.ModelBackend",
+            "weblate.accounts.auth.WeblateUserBackend",
+        ),
+        REGISTRATION_OPEN=False,
+        PASSWORD_RESET_URL="https://id.example.net/password-reset",
+    )
+    def test_login_password_reset_url(self) -> None:
+        response = self.client.get(reverse("login"))
+        self.assertContains(response, 'href="https://id.example.net/password-reset"')
+
+    @social_core_override_settings(
+        AUTHENTICATION_BACKENDS=(
+            "django.contrib.auth.backends.ModelBackend",
+            "weblate.accounts.auth.WeblateUserBackend",
+        ),
+        REGISTRATION_OPEN=False,
+        PASSWORD_RESET_URL=None,
+    )
+    def test_login_without_configured_password_reset_url(self) -> None:
+        response = self.client.get(reverse("login"))
+        self.assertNotContains(response, reverse("password_reset"))
+
+    @social_core_override_settings(
+        AUTHENTICATION_BACKENDS=(
+            "social_core.backends.email.EmailAuth",
+            "weblate.accounts.auth.WeblateUserBackend",
+        ),
+        REGISTRATION_OPEN=False,
+        PASSWORD_RESET_URL=None,
+    )
+    def test_login_uses_internal_password_reset_url(self) -> None:
+        response = self.client.get(reverse("login"))
+        self.assertContains(response, f'href="{reverse("password_reset")}"')
+
+    def test_social_complete_logs_missing_provider_email(self) -> None:
+        self.assert_social_complete_result(
+            AuthMissingParameter(self.get_backend(), "email"),
+            expected_text=(
+                "Got no e-mail address from third party authentication service."
+            ),
+            reportable=False,
+        )
+
+    def test_social_complete_logs_disabled_registration(self) -> None:
+        self.assert_social_complete_result(
+            AuthMissingParameter(self.get_backend(), "disabled"),
+            expected_text="New registrations are turned off.",
+            reportable=False,
+        )
+
+    def test_social_complete_logs_invalid_email_for_reset(self) -> None:
+        self.assert_social_complete_result(
+            InvalidEmail(self.get_backend("email")),
+            expected_text=(
+                "Try resetting your password again to verify your identity, "
+                "the confirmation link probably expired."
+            ),
+            backend="email",
+            session_updates={"password_reset": True},
+            reportable=False,
+        )
+
+    def test_social_complete_logs_missing_state(self) -> None:
+        self.assert_social_complete_result(
+            AuthStateMissing(self.get_backend()),
+            expected_text="Could not authenticate due to invalid session state.",
+            reportable=False,
+        )
+
+    def test_social_complete_logs_expired_provider_code(self) -> None:
+        self.assert_social_complete_result(
+            AuthFailed(
+                self.get_backend(),
+                "The code passed is incorrect or expired.",
+            ),
+            expected_text=(
+                "Could not authenticate, probably due to an expired token "
+                "or connection error."
+            ),
+            reportable=False,
+        )
+
+    def test_social_complete_reports_token_error(self) -> None:
+        self.assert_social_complete_result(
+            AuthTokenError(self.get_backend(), "Invalid key/secret, perhaps expired"),
+            expected_text=(
+                "Authentication failed: Token error: Invalid key/secret, "
+                "perhaps expired"
+            ),
+            reportable=True,
+        )
+
+    def test_social_complete_reports_auth_forbidden(self) -> None:
+        self.assert_social_complete_result(
+            AuthForbidden(self.get_backend()),
+            expected_text="The server does not allow authentication.",
+            reportable=True,
+        )
+
+    def test_social_complete_reports_provider_http_error(self) -> None:
+        self.assert_social_complete_result(
+            HTTPError(
+                "401 Client Error: Unauthorized for url: https://api.github.com/user"
+            ),
+            expected_text="The authentication provider could not be reached.",
+            reportable=True,
+        )
+
+    def test_social_complete_logs_auth_canceled(self) -> None:
+        self.assert_social_complete_result(
+            AuthCanceled(self.get_backend(), "access_denied"),
+            expected_text="Authentication cancelled.",
+            reportable=False,
+        )
+
+    def test_log_handled_auth_failure_uses_string_reason(self) -> None:
+        request = self.client.get(reverse("login")).wsgi_request
+        request.session["password_reset"] = True
+
+        with mock.patch(
+            "weblate.accounts.views.log_handled_exception"
+        ) as mocked_log_handled_exception:
+            log_handled_auth_failure(
+                request,
+                "github",
+                AuthFailed(
+                    self.get_backend(),
+                    "The code passed is incorrect or expired.",
+                ),
+            )
+
+        mocked_log_handled_exception.assert_called_once_with(
+            "Handled auth failure",
+            extra_log=(
+                "backend=github, action=reset, path=/accounts/login/, "
+                "reason=The code passed is incorrect or expired."
+            ),
+        )
+
     @override_settings(RATELIMIT_ATTEMPTS=20, AUTH_LOCK_ATTEMPTS=5)
     def test_login_ratelimit(self, login=False) -> None:
         if login:
@@ -302,7 +579,8 @@ class ViewTest(RepoTestCase):
 
     def test_password(self) -> None:
         # Create user
-        self.get_user()
+        user = self.get_user()
+        old_token = user.auth_token.key
         # Login
         self.client.login(username="testuser", password="testpassword")
         # Change without data
@@ -327,13 +605,34 @@ class ViewTest(RepoTestCase):
                 "password": "testpassword",
                 "new_password1": "1pa$$word!",
                 "new_password2": "1pa$$word!",
+                "regenerate_api_key": "on",
             },
         )
 
-        self.assertRedirects(response, reverse("profile") + "#account")
-        self.assertTrue(
-            User.objects.get(username="testuser").check_password("1pa$$word!")
+        self.assertRedirects(response, f"{reverse('profile')}#account")
+        updated_user = User.objects.get(username="testuser")
+        self.assertTrue(updated_user.check_password("1pa$$word!"))
+        self.assertNotEqual(updated_user.auth_token.key, old_token)
+        self.assertFalse(Token.objects.filter(key=old_token).exists())
+
+    def test_password_keeps_api_key(self) -> None:
+        user = self.get_user()
+        old_token = user.auth_token.key
+
+        self.client.login(username="testuser", password="testpassword")
+        response = self.client.post(
+            reverse("password"),
+            {
+                "password": "testpassword",
+                "new_password1": "1pa$$word!",
+                "new_password2": "1pa$$word!",
+            },
         )
+
+        self.assertRedirects(response, f"{reverse('profile')}#account")
+        updated_user = User.objects.get(username="testuser")
+        self.assertTrue(updated_user.check_password("1pa$$word!"))
+        self.assertEqual(updated_user.auth_token.key, old_token)
 
     def test_api_key(self) -> None:
         # Create user
@@ -347,15 +646,21 @@ class ViewTest(RepoTestCase):
 
         # API key reset
         response = self.client.post(reverse("reset-api-key"))
-        self.assertRedirects(response, reverse("profile") + "#api")
+        self.assertRedirects(response, f"{reverse('profile')}#api")
 
         # API key reset without token
         user.auth_token.delete()
         response = self.client.post(reverse("reset-api-key"))
-        self.assertRedirects(response, reverse("profile") + "#api")
+        self.assertRedirects(response, f"{reverse('profile')}#api")
 
 
 class ProfileTest(FixtureTestCase):
+    @staticmethod
+    def get_muted_subscription_count() -> int:
+        return sum(
+            1 for notification in NOTIFICATIONS if not notification.ignore_watched
+        )
+
     def test_profile(self) -> None:
         # Get profile page
         response = self.client.get(reverse("profile"))
@@ -390,6 +695,213 @@ class ProfileTest(FixtureTestCase):
             },
         )
         self.assertRedirects(response, reverse("profile"))
+
+    def test_profile_group_display_uses_scoped_team_queryset(self) -> None:
+        workspace = Workspace.objects.create(name="Profile workspace")
+        project_group = Group.objects.create(
+            name="Profile project team", defining_project=self.project
+        )
+        workspace_group = Group.objects.create(
+            name="Profile workspace team", defining_workspace=workspace
+        )
+        self.user.groups.add(project_group, workspace_group)
+
+        response = self.client.get(reverse("profile"))
+        user_groups = response.context["user_groups"]
+        sql = str(user_groups.query)
+
+        self.assertIn("trans_project", sql)
+        self.assertIn("workspaces_workspace", sql)
+        self.assertIn(project_group, user_groups)
+        self.assertIn(workspace_group, user_groups)
+
+    def test_profile_inherited_license_display(self) -> None:
+        self.project.license = "MIT"
+        self.project.save(update_fields=["license"])
+        self.component.license = ""
+        self.component.inherit_license = True
+        self.component.save(update_fields=["license", "inherit_license"])
+        unit = self.get_unit()
+        unit.change_set.create(
+            action=ActionEvents.CHANGE, user=self.user, author=self.user
+        )
+
+        response = self.client.get(reverse("profile"))
+
+        self.assertContains(response, "MIT License")
+        self.assertContains(response, 'class="license badge">MIT</span>')
+
+    def test_profile_contact_rejects_direct_download(self) -> None:
+        form = ProfileForm(
+            {"contact": "https://example.org/file.zip"},
+            instance=self.user.profile,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("not directly to a file download", form.errors["contact"][0])
+
+    def test_profile_contact_rejects_userinfo(self) -> None:
+        form = ProfileForm(
+            {"contact": "https://user@example.org/contact"},
+            instance=self.user.profile,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("username or password credentials", form.errors["contact"][0])
+
+    def test_profile_contact_rejects_private_target(self) -> None:
+        form = ProfileForm(
+            {"contact": "https://127.0.0.1/contact"},
+            instance=self.user.profile,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("internal or non-public address", form.errors["contact"][0])
+
+    def test_profile_url_fields_reject_direct_download(self) -> None:
+        for field in ("website", "codesite", "fediverse"):
+            with self.subTest(field=field):
+                form = ProfileForm(
+                    {field: "https://example.org/file.zip"},
+                    instance=self.user.profile,
+                )
+
+                self.assertFalse(form.is_valid())
+                self.assertIn("not directly to a file download", form.errors[field][0])
+
+    def test_profile_url_fields_reject_userinfo(self) -> None:
+        for field in ("website", "codesite", "fediverse"):
+            with self.subTest(field=field):
+                form = ProfileForm(
+                    {field: "https://user@example.org/profile"},
+                    instance=self.user.profile,
+                )
+
+                self.assertFalse(form.is_valid())
+                self.assertIn("username or password credentials", form.errors[field][0])
+
+    def test_profile_url_fields_reject_private_target(self) -> None:
+        for field in ("website", "codesite", "fediverse"):
+            with self.subTest(field=field):
+                form = ProfileForm(
+                    {field: "https://127.0.0.1/profile"},
+                    instance=self.user.profile,
+                )
+
+                self.assertFalse(form.is_valid())
+                self.assertIn("internal or non-public address", form.errors[field][0])
+
+    def test_profile_url_fields_reject_non_profile_paths(self) -> None:
+        for field, url, message in (
+            (
+                "codesite",
+                "https://codeberg.org/explore/repos",
+                "profile or repository page on a code hosting site",
+            ),
+            (
+                "fediverse",
+                "https://mastodon.example/tags/weblate",
+                "Fediverse user profile",
+            ),
+        ):
+            with self.subTest(field=field):
+                form = ProfileForm({field: url}, instance=self.user.profile)
+
+                self.assertFalse(form.is_valid())
+                self.assertIn(message, form.errors[field][0])
+
+    def test_profile_url_fields_accept_common_legacy_or_platform_paths(self) -> None:
+        for field, url in (
+            ("codesite", "https://codeberg.org/user/project"),
+            ("codesite", "https://gitlab.example/group/subgroup/project"),
+            ("fediverse", "https://peertube.example/accounts/example"),
+            ("fediverse", "https://hubzilla.example/channel/example"),
+            ("fediverse", "https://social.example/example"),
+            ("fediverse", "https://social.example/web/@example"),
+        ):
+            with self.subTest(field=field, url=url):
+                form = ProfileForm({field: url}, instance=self.user.profile)
+
+                self.assertTrue(form.is_valid())
+
+    def test_user_profile_link_warning(self) -> None:
+        profile = self.anotheruser.profile
+        profile.website = (
+            "https://example.org/users/profile-with-a-very-long-path-name-that-"
+            "should-not-be-shortened-on-warning-page"
+        )
+        profile.contact = "https://example.org/contact"
+        profile.codesite = "https://codeberg.org/example"
+        profile.fediverse = "https://mastodon.example/@example"
+        profile.save(update_fields=["website", "contact", "codesite", "fediverse"])
+
+        response = self.client.get(
+            reverse("user_page", kwargs={"user": self.anotheruser.username})
+        )
+
+        for link, url in (
+            ("website", profile.website),
+            ("contact", "https://example.org/contact"),
+            ("codesite", "https://codeberg.org/example"),
+        ):
+            with self.subTest(link=link):
+                warning_url = reverse(
+                    "user_profile_link",
+                    kwargs={"user": self.anotheruser.username, "link": link},
+                )
+                self.assertContains(response, f'href="{warning_url}"')
+                self.assertNotContains(response, f'href="{url}"')
+
+                warning_response = self.client.get(warning_url)
+                self.assertContains(warning_response, "External profile link")
+                self.assertContains(warning_response, f"Destination: {url}")
+                self.assertContains(warning_response, f'href="{url}"')
+
+        self.assertContains(response, 'href="https://mastodon.example/@example"')
+        self.assertContains(response, 'rel="ugc me"')
+        self.assertNotContains(
+            response,
+            reverse(
+                "user_profile_link",
+                kwargs={"user": self.anotheruser.username, "link": "fediverse"},
+            ),
+        )
+
+    def test_user_profile_link_missing(self) -> None:
+        for link in ("website", "contact", "codesite", "fediverse"):
+            with self.subTest(link=link):
+                response = self.client.get(
+                    reverse(
+                        "user_profile_link",
+                        kwargs={"user": self.anotheruser.username, "link": link},
+                    )
+                )
+
+                self.assertEqual(response.status_code, 404)
+
+    def test_user_profile_link_redirects_legacy_invalid_values(self) -> None:
+        profile_url = reverse("user_page", kwargs={"user": self.anotheruser.username})
+
+        for link, url in (
+            ("website", "https://example.org/file.zip"),
+            ("contact", "https://user@example.org/contact"),
+            ("codesite", "https://127.0.0.1/profile"),
+        ):
+            with self.subTest(link=link):
+                warning_url = reverse(
+                    "user_profile_link",
+                    kwargs={"user": self.anotheruser.username, "link": link},
+                )
+                Profile.objects.filter(pk=self.anotheruser.profile.pk).update(
+                    **{link: url}
+                )
+
+                response = self.client.get(warning_url, follow=True)
+
+                self.assertRedirects(response, profile_url)
+                self.assertContains(
+                    response, "This profile link is no longer available."
+                )
 
     def test_profile_dashboard(self) -> None:
         # Save profile with invalid settings
@@ -495,7 +1007,41 @@ class ProfileTest(FixtureTestCase):
         self.assertNotContains(response, "Project: Test")
         self.assertNotContains(response, "Component: Test/Test")
 
+    def test_subscription_additional_form_defaults_to_active_scope(self) -> None:
+        initial_response = self.client.get(
+            f"{reverse('profile')}?notify_project={self.project.pk}"
+        )
+        existing_indexes = [
+            int(form.prefix.split("__", 1)[1])
+            for form in initial_response.context["all_forms"]
+            if form.prefix and form.prefix.startswith("notifications__")
+        ]
+        extra_index = max(existing_indexes) + 5
+
+        response = self.client.post(
+            f"{reverse('profile')}?notify_project={self.project.pk}",
+            {
+                "username": "",
+                f"notifications__{extra_index}-scope": "",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        form = next(
+            (
+                item
+                for item in response.context["all_forms"]
+                if item.prefix == f"notifications__{extra_index}"
+            ),
+            None,
+        )
+        if form is None:
+            self.fail(f"Expected extra notification form notifications__{extra_index}")
+        self.assertEqual(form.initial["scope"], NotificationScope.SCOPE_PROJECT)
+        self.assertEqual(form.initial["project"], self.project)
+
     def test_watch(self) -> None:
+        muted_subscription_count = self.get_muted_subscription_count()
         self.assertEqual(self.user.profile.watched.count(), 0)
         self.assertEqual(self.user.subscription_set.count(), 10)
 
@@ -509,13 +1055,15 @@ class ProfileTest(FixtureTestCase):
         # Mute notifications for component
         self.client.post(reverse("mute", kwargs=self.kw_component))
         self.assertEqual(
-            self.user.subscription_set.filter(component=self.component).count(), 20
+            self.user.subscription_set.filter(component=self.component).count(),
+            muted_subscription_count,
         )
 
         # Mute notifications for project
         self.client.post(reverse("mute", kwargs={"path": self.project.get_url_path()}))
         self.assertEqual(
-            self.user.subscription_set.filter(project=self.project).count(), 20
+            self.user.subscription_set.filter(project=self.project).count(),
+            muted_subscription_count,
         )
 
         # Unwatch project
@@ -532,6 +1080,7 @@ class ProfileTest(FixtureTestCase):
         self.assertEqual(self.user.subscription_set.count(), 10)
 
     def test_watch_component(self) -> None:
+        muted_subscription_count = self.get_muted_subscription_count()
         self.assertEqual(self.user.profile.watched.count(), 0)
         self.assertEqual(self.user.subscription_set.count(), 10)
 
@@ -540,7 +1089,8 @@ class ProfileTest(FixtureTestCase):
         self.assertEqual(self.user.profile.watched.count(), 1)
         # All project notifications should be muted
         self.assertEqual(
-            self.user.subscription_set.filter(project=self.project).count(), 20
+            self.user.subscription_set.filter(project=self.project).count(),
+            muted_subscription_count,
         )
         # Only default notifications should be enabled
         self.assertEqual(
@@ -549,16 +1099,16 @@ class ProfileTest(FixtureTestCase):
 
     def test_unsubscribe(self) -> None:
         response = self.client.get(reverse("unsubscribe"), follow=True)
-        self.assertRedirects(response, reverse("profile") + "#notifications")
+        self.assertRedirects(response, f"{reverse('profile')}#notifications")
 
         response = self.client.get(reverse("unsubscribe"), {"i": "x"}, follow=True)
-        self.assertRedirects(response, reverse("profile") + "#notifications")
+        self.assertRedirects(response, f"{reverse('profile')}#notifications")
         self.assertContains(response, "notification change link is no longer valid")
 
         response = self.client.get(
-            reverse("unsubscribe"), {"i": TimestampSigner().sign("-1")}, follow=True
+            reverse("unsubscribe"), {"i": Subscription.sign_id("-1")}, follow=True
         )
-        self.assertRedirects(response, reverse("profile") + "#notifications")
+        self.assertRedirects(response, f"{reverse('profile')}#notifications")
         self.assertContains(response, "notification change link is no longer valid")
 
         subscription = Subscription.objects.create(
@@ -569,10 +1119,10 @@ class ProfileTest(FixtureTestCase):
         )
         response = self.client.get(
             reverse("unsubscribe"),
-            {"i": TimestampSigner().sign(f"{subscription.pk}")},
+            {"i": subscription.get_signed_id()},
             follow=True,
         )
-        self.assertRedirects(response, reverse("profile") + "#notifications")
+        self.assertRedirects(response, f"{reverse('profile')}#notifications")
         self.assertContains(response, "Notification settings adjusted")
         subscription.refresh_from_db()
         self.assertEqual(subscription.frequency, NotificationFrequency.FREQ_NONE)
@@ -629,6 +1179,8 @@ class EditUserTest(FixtureTestCase):
         self.assertRedirects(response, user.get_absolute_url())
         self.assertTrue(user.is_active)
         self.assertFalse(user.is_superuser)
+        audit = user.auditlog_set.get(activity="superuser-revoked")
+        self.assertEqual(audit.params["username"], self.user.username)
         # No permissions now
         response = self.client.post(
             self.user.get_absolute_url(),
@@ -640,3 +1192,108 @@ class EditUserTest(FixtureTestCase):
             },
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_add_team_with_language_limit(self) -> None:
+        target = User.objects.create_user(
+            username="team-target", password="testpassword"
+        )
+        group = Group.objects.create(name="Translate", defining_project=self.project)
+        language = Language.objects.get(code="cs")
+
+        response = self.client.post(
+            target.get_absolute_url(),
+            {"add_group": group.pk, "limit_languages": [language.code]},
+        )
+        self.assertRedirects(response, f"{target.get_absolute_url()}#groups")
+
+        membership = target.team_memberships.get(group=group)
+        self.assertEqual(
+            list(membership.limit_languages.values_list("code", flat=True)), ["cs"]
+        )
+
+        response = self.client.post(target.get_absolute_url(), {"add_group": group.pk})
+        self.assertRedirects(response, f"{target.get_absolute_url()}#groups")
+        self.assertFalse(membership.limit_languages.exists())
+        audit = target.auditlog_set.get(activity="team-change")
+        self.assertEqual(audit.params["team"], group.name)
+        self.assertEqual(audit.params["username"], self.user.username)
+        self.assertEqual(audit.params["previous_limit_languages"], ["cs"])
+        self.assertEqual(audit.params["limit_languages"], [])
+
+        response = self.client.get(target.get_absolute_url())
+        self.assertContains(response, "No language limit")
+
+
+class AdminUserRevertTest(FixtureTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.user.is_superuser = True
+        self.user.save()
+        self.target_user = User.objects.create_user(
+            username="sitewide-target", password="testpassword"
+        )
+
+    def test_revert_user_edits(self) -> None:
+        unit = self.get_unit()
+        self.change_unit("Nazdar svete!\n", user=self.target_user)
+
+        with mock.patch(
+            "weblate.accounts.views.revert_user_edits_task.delay",
+            return_value=SimpleNamespace(id="task-1"),
+        ) as mocked_delay:
+            response = self.client.post(
+                self.target_user.get_absolute_url(),
+                {"revert_user_edits": "1"},
+                follow=True,
+            )
+
+        mocked_delay.assert_called_once_with(
+            target_user_id=self.target_user.id,
+            acting_user_id=self.user.id,
+            sitewide=True,
+        )
+        self.assertContains(
+            response, "Reverting edits by sitewide-target site-wide was scheduled."
+        )
+        unit.refresh_from_db()
+        self.assertEqual(unit.target, "Nazdar svete!\n")
+        self.assertEqual(unit.state, STATE_TRANSLATED)
+
+    def test_revert_user_edits_cleanup_options(self) -> None:
+        with (
+            mock.patch(
+                "weblate.accounts.views.revert_user_edits_task.delay",
+                return_value=SimpleNamespace(id="task-revert"),
+            ) as mocked_revert,
+            mock.patch(
+                "weblate.accounts.views.cleanup_user_contributions_task.delay",
+                return_value=SimpleNamespace(id="task-cleanup"),
+            ) as mocked_cleanup,
+        ):
+            response = self.client.post(
+                self.target_user.get_absolute_url(),
+                {
+                    "cleanup_user_contributions": "1",
+                    "revert_edits": "on",
+                    "reject_suggestions": "on",
+                    "delete_comments": "on",
+                },
+                follow=True,
+            )
+
+        mocked_revert.assert_called_once_with(
+            target_user_id=self.target_user.id,
+            acting_user_id=self.user.id,
+            sitewide=True,
+        )
+        mocked_cleanup.assert_called_once_with(
+            target_user_id=self.target_user.id,
+            acting_user_id=self.user.id,
+            sitewide=True,
+            reject_suggestions=True,
+            delete_comments=True,
+        )
+        self.assertContains(
+            response,
+            "Cleaning up contributions by sitewide-target site-wide was scheduled.",
+        )

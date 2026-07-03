@@ -8,4 +8,5 @@ from weblate.utils.validators import validate_re
 
 
 class RegexField(CharField):
+    # ruff: ignore[mutable-class-default]
     default_validators = [validate_re]

@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from django.conf import settings
+from django.contrib.postgres import indexes as postgres_indexes
 from django.db import models
 from django.utils import timezone
 from weblate_language_data.utils import gettext_noop
@@ -15,12 +16,13 @@ from weblate.trans.actions import ActionEvents
 from weblate.trans.mixins import UserDisplayMixin
 from weblate.utils.antispam import report_spam
 from weblate.utils.request import get_ip_address, get_user_agent_raw
-from weblate.utils.state import STATE_FUZZY
+from weblate.utils.state import STATE_NEEDS_CHECKING, STATE_NEEDS_REWRITING
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from weblate.auth.models import AuthenticatedHttpRequest, Unit, User
+    from weblate.auth.models import AuthenticatedHttpRequest, User
+    from weblate.trans.models.unit import Unit
 
 
 class CommentManager(models.Manager):
@@ -71,19 +73,31 @@ class CommentManager(models.Manager):
                     unit_scope.translate(
                         user,
                         unit_scope.target,
-                        STATE_FUZZY,
+                        STATE_NEEDS_CHECKING
+                        if unit_scope.is_source
+                        else STATE_NEEDS_REWRITING,
                         change_action=ActionEvents.MARKED_EDIT,
                     )
             else:
                 label = component.project.label_set.get_or_create(
                     name=gettext_noop("Source needs review"), defaults={"color": "red"}
                 )[0]
-                unit_scope.labels.add(label)
+                if not unit_scope.labels.filter(pk=label.pk).exists():
+                    unit_scope.labels.add(label)
+                    unit_scope.change_set.create(
+                        action=ActionEvents.LABEL_ADD,
+                        user=user,
+                        author=user,
+                        details={"label": label.name},
+                    )
 
         return new_comment
 
 
-class CommentQuerySet(models.QuerySet):
+class CommentQuerySet(models.QuerySet["Comment", "Comment"]):
+    def prefetch(self):
+        return self.select_related("user")
+
     def order(self):
         return self.order_by("timestamp")
 
@@ -107,11 +121,17 @@ class Comment(models.Model, UserDisplayMixin):
         app_label = "trans"
         verbose_name = "string comment"
         verbose_name_plural = "string comments"
+        # ruff: ignore[mutable-class-default]
+        indexes = [
+            postgres_indexes.GinIndex(
+                postgres_indexes.OpClass(models.F("comment"), name="gin_trgm_ops"),
+                models.F("unit"),
+                name="comment_comment_fulltext",
+            ),
+        ]
 
     def __str__(self) -> str:
-        return "comment for {} by {}".format(
-            self.unit, self.user.username if self.user else "unknown"
-        )
+        return f"comment for {self.unit} by {self.user.username if self.user else 'unknown'}"
 
     def report_spam(self) -> None:
         report_spam(
@@ -129,6 +149,7 @@ class Comment(models.Model, UserDisplayMixin):
         self.resolved = True
         self.save(update_fields=["resolved"])
 
+    # pylint: disable-next=arguments-renamed
     def delete(self, user=None, using=None, keep_parents=False) -> None:
         self.unit.change_set.create(
             action=ActionEvents.COMMENT_DELETE,

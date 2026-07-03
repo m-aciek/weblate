@@ -42,6 +42,11 @@ created. It is always permitted for users with the :guilabel:`Add new projects`
 permission, and if your instance uses billing (e.g. like
 https://hosted.weblate.org/ see :ref:`billing`), you can also create those
 based on your plans allowance from the user account that manages billing.
+Projects can also be created in a workspace by users who have the
+:guilabel:`Add projects to workspace` permission in that workspace. Creating a
+project without selecting a workspace requires the site-wide
+:guilabel:`Add new projects` permission. See
+:ref:`workspace-project-creation` for details.
 
 .. hint::
 
@@ -97,9 +102,9 @@ As a last step, you review the translation component info and fill in optional d
 
 .. seealso::
 
-      :ref:`admin-interface`,
-      :ref:`project`,
-      :ref:`component`
+   * :ref:`admin-interface`
+   * :ref:`project`
+   * :ref:`component`
 
 .. _project:
 
@@ -147,9 +152,11 @@ This is a required parameter unless turned off by :setting:`WEBSITE_REQUIRED`.
 
 .. seealso::
 
-   :setting:`PROJECT_WEB_RESTRICT_HOST`,
-   :setting:`PROJECT_WEB_RESTRICT_NUMERIC`,
-   :setting:`PROJECT_WEB_RESTRICT_RE`
+   * :setting:`PROJECT_WEB_RESTRICT_HOST`
+   * :setting:`PROJECT_WEB_RESTRICT_ALLOWLIST`
+   * :setting:`PROJECT_WEB_RESTRICT_NUMERIC`
+   * :setting:`PROJECT_WEB_RESTRICT_PRIVATE`
+   * :setting:`PROJECT_WEB_RESTRICT_RE`
 
 .. _project-instructions:
 
@@ -159,13 +166,30 @@ Translation instructions
 Text describing localization process in the project, and any other information
 useful for translators. Markdown can be used for text formatting or inserting links.
 
-.. _project-set_language_team:
+.. _project-license:
 
-Set "Language-Team" header
-++++++++++++++++++++++++++
+Translation license
++++++++++++++++++++
 
-Whether Weblate should manage the ``Language-Team`` header (this is a
-:ref:`gettext` only feature right now).
+Default translation license for components in this project.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+   * :ref:`component-license`
+
+.. _project-agreement:
+
+Contributor license agreement
++++++++++++++++++++++++++++++
+
+Default contributor license agreement for components in this project. Markdown
+can be used for text formatting or inserting links.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+   * :ref:`component-agreement`
 
 .. _project-use_shared_tm:
 
@@ -190,6 +214,47 @@ The default value can be changed by :setting:`DEFAULT_SHARED_TM`.
 .. note::
 
     This option is unavailable on Hosted Weblate, it is toggled together with :ref:`project-use_shared_tm`.
+
+.. _project-use-workspace-tm:
+
+Use workspace translation memory
+++++++++++++++++++++++++++++++++
+
+Whether to use translation memory shared by projects in the same workspace,
+see :ref:`memory-scopes` for more details. The workspace has to allow workspace
+translation memory as well.
+
+.. _project-contribute-workspace-tm:
+
+Contribute to workspace translation memory
+++++++++++++++++++++++++++++++++++++++++++
+
+Whether to contribute translations to the translation memory shared by
+projects in the same workspace. The workspace has to allow contribution as
+well.
+
+.. note::
+
+    This option is unavailable on Hosted Weblate, it is toggled together with :ref:`project-use-workspace-tm`.
+
+.. _project-autoclean_tm:
+
+Autoclean translation memory
++++++++++++++++++++++++++++++
+
+.. versionadded:: 5.13
+
+Whether to replace older automatically created translation memory entries when a
+translation becomes active.
+
+Matching is based on the same source string, component, context, and
+source/target language pair. Uploaded translation memory files are not
+affected.
+
+.. seealso::
+
+   * :ref:`memory-status`
+   * :ref:`autoclean-tm`
 
 .. _project-access_control:
 
@@ -219,7 +284,8 @@ Enable review workflow for translations, see :ref:`reviews`.
 
 .. seealso::
 
-   :ref:`workflow-customization`
+   * :setting:`DEFAULT_TRANSLATION_REVIEW`
+   * :ref:`workflow-customization`
 
 .. _project-source_review:
 
@@ -230,8 +296,29 @@ Enable review workflow for source strings, see :ref:`source-reviews`.
 
 .. seealso::
 
-   :ref:`report-source`,
-   :ref:`user-comments`
+   * :setting:`DEFAULT_SOURCE_REVIEW`
+   * :ref:`report-source`
+   * :ref:`user-comments`
+
+.. _project-commit_policy:
+
+Translation quality filter
+++++++++++++++++++++++++++
+
+.. versionadded:: 5.13
+
+The commit policy determines which translations are included when committing changes
+to the version control system. This setting is available at the project level and
+supports the following options:
+
+* **Commit all translations regardless of quality**: All translations will be committed,
+  including those marked as needing editing or not reviewed.
+* **Skip translations marked as needing editing**: Only translations that don't have the
+  "needs editing", "needs rewriting" or "needs checking" state will be committed.
+* **Only include approved translations**: Only translations that have been approved by a
+  reviewer will be committed. This option requires :ref:`project-translation_review`
+  to be enabled.
+
 
 .. _project-enable_hooks:
 
@@ -242,10 +329,10 @@ Whether unauthenticated :ref:`hooks` are to be used for this repository.
 
 .. seealso::
 
-   :ref:`component-intermediate`,
-   :ref:`source-quality-gateway`,
-   :ref:`bimono`,
-   :ref:`languages`
+   * :ref:`component-intermediate`
+   * :ref:`source-quality-gateway`
+   * :ref:`bimono`
+   * :ref:`languages`
 
 .. _project-language_aliases:
 
@@ -271,9 +358,35 @@ Using non standard code: ``ia_FOO:ia``
 
 .. seealso::
 
-    :ref:`adding-translation`,
-    :ref:`language-code`,
-    :ref:`language-parsing-codes`
+   * :ref:`adding-translation`
+   * :ref:`language-code`
+   * :ref:`language-parsing-codes`
+
+.. _project-new-lang:
+
+Adding new translation
+++++++++++++++++++++++
+
+Default behavior for requests to create new translations in components in this
+project.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+   * :ref:`component-new_lang`
+
+.. _project-language-code-style:
+
+Language code style
++++++++++++++++++++
+
+Default language code style for translations created by Weblate in components
+in this project.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+   * :ref:`component-language_code_style`
 
 .. _project-secondary_language:
 
@@ -288,8 +401,9 @@ Optionally, it can be also used as a source for the machine translation.
 
 .. seealso::
 
-   :ref:`secondary-languages`,
-   :ref:`mt-sources`
+   * :ref:`workspace-inherited-settings`
+   * :ref:`secondary-languages`
+   * :ref:`mt-sources`
 
 .. _project-check_flags:
 
@@ -299,6 +413,40 @@ Translation flags
 .. versionadded:: 5.11
 
 Customization of quality checks and other Weblate behavior, see :ref:`custom-checks`.
+
+Workspace, project, component, and translation flags are merged.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+
+.. _project-commit-message:
+.. _project-add-message:
+.. _project-delete-message:
+.. _project-merge-message:
+.. _project-addon-message:
+.. _project-pull-message:
+
+Commit, add, delete, merge, add-on, and merge request messages
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Default commit and merge request message templates for components in this
+project.
+
+The default values can be changed by :setting:`DEFAULT_ADD_MESSAGE`,
+:setting:`DEFAULT_ADDON_MESSAGE`, :setting:`DEFAULT_COMMIT_MESSAGE`,
+:setting:`DEFAULT_DELETE_MESSAGE`, :setting:`DEFAULT_MERGE_MESSAGE`,
+:setting:`DEFAULT_PULL_MESSAGE`.
+
+The built-in defaults follow Conventional Commits and include
+Weblate links where available. Use :guilabel:`Restore site default` next to a
+message editor to restore the current installation default for that message;
+for inherited values, this also disables inheritance for that message.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+   * :ref:`markup`
 
 
 .. _component:
@@ -363,7 +511,7 @@ VCS to use, see :ref:`vcs` for details.
 
 .. seealso::
 
-   :ref:`push-changes`
+   :ref:`code-hosting-push-options`
 
 .. _component-repo:
 
@@ -389,14 +537,15 @@ Repository push URL
 
 Repository URL used for pushing. The behavior of this depends on
 :ref:`component-vcs`, and this is in more detail covered in
-:ref:`push-changes`.
+:ref:`code-hosting-push-options`.
 
 For linked repositories, this is not used and setting from linked component applies.
 
 .. seealso::
 
    See :ref:`vcs-repos` for more details on how to specify a repository URL and
-   :ref:`push-changes` for more details on pushing changes from Weblate.
+   :ref:`code-hosting-push-options` for more details on pushing changes from
+   Weblate.
 
 .. _component-repoweb:
 
@@ -413,6 +562,10 @@ In case your paths are relative to different folder (path contains ``..``), you
 might want to strip leading directory by ``parentdir`` filter (see
 :ref:`markup`):
 ``https://github.com/WeblateOrg/hello/blob/{{branch}}/{{filename|parentdir}}#L{{line}}``
+
+.. seealso::
+
+   * :setting:`PROJECT_WEB_RESTRICT_PRIVATE`
 
 .. _component-git_export:
 
@@ -431,7 +584,7 @@ Repository branch
 
 Which branch to checkout from the VCS, and where to look for translations.
 
-For linked repositories, this is not used and setting from linked component applies.
+.. include:: /snippets/linked-repository-setting.rst
 
 .. _component-push_branch:
 
@@ -440,16 +593,22 @@ Push branch
 
 Branch for pushing changes, leave empty to use :ref:`component-branch`.
 
-For linked repositories, this is not used and setting from linked component applies.
+.. include:: /snippets/linked-repository-setting.rst
 
 .. note::
 
-   This is currently only supported for Git, GitLab and GitHub, it is ignored
-   for other VCS integrations.
+   This setting is ignored for Mercurial and Subversion.
+
+   For Gerrit, this selects the target branch for the review request. Leave it
+   empty to review against :ref:`component-branch`. Use the short branch name,
+   not ``refs/heads/<branch>`` or ``refs/for/<branch>``. Gerrit push options
+   can be appended after ``%`` in either setting, for example
+   ``main%topic=l10n``; Gerrit interprets them as the configured Weblate Gerrit
+   account.
 
 .. seealso::
 
-   :ref:`push-changes`
+   :ref:`code-hosting-push-options`
 
 .. _component-filemask:
 
@@ -469,8 +628,8 @@ to be escaped as ``[[]`` or ``[]]``.
 
 .. seealso::
 
-   :ref:`bimono`,
-   :ref:`faq-duplicate-files`
+   * :ref:`bimono`
+   * :ref:`faq-duplicate-files`
 
 .. _component-screenshot_filemask:
 
@@ -504,6 +663,13 @@ This means any PNG images under docs in component_A can be discovered and update
 So, if you want to update ``image1.png``, the new screenshot you provide should be named ``image1.png``,
 matching the existing ``filename``, and stored under ``component_A/docs/``.
 
+For Android projects using Fastlane metadata, a source-language screenshot mask
+can point to the metadata screenshot folder, for example
+``fastlane/metadata/android/en-US/images/phoneScreenshots/*.png``. Weblate will
+discover matching screenshots on repository update. The discovered screenshots
+still need to be associated with source strings in the screenshot management
+interface; use OCR or source string search there to assign them in bulk.
+
 .. _component-template:
 
 Monolingual base language file
@@ -513,8 +679,8 @@ Base file containing string definitions for :ref:`monolingual`.
 
 .. seealso::
 
-   :ref:`bimono`,
-   :ref:`faq-duplicate-files`
+   * :ref:`bimono`
+   * :ref:`faq-duplicate-files`
 
 .. _component-edit_template:
 
@@ -525,10 +691,10 @@ Whether to allow editing strings in the :ref:`component-template`.
 
 .. seealso::
 
-   :ref:`bimono`,
-   :ref:`monolingual`,
-   :ref:`faq-duplicate-files`,
-   :ref:`component-manage_units`
+   * :ref:`bimono`
+   * :ref:`monolingual`
+   * :ref:`faq-duplicate-files`
+   * :ref:`component-manage_units`
 
 .. _component-intermediate:
 
@@ -546,9 +712,9 @@ provides :ref:`source-quality-gateway`.
 
 .. seealso::
 
-   :ref:`source-quality-gateway`,
-   :ref:`bimono`,
-   :ref:`faq-duplicate-files`
+   * :ref:`source-quality-gateway`
+   * :ref:`bimono`
+   * :ref:`faq-duplicate-files`
 
 .. _component-new_base:
 
@@ -573,10 +739,10 @@ Base file used to generate new translations.
 
 .. seealso::
 
-   :ref:`adding-translation`,
-   :ref:`component-new_lang`,
-   :ref:`bimono`,
-   :ref:`faq-duplicate-files`
+   * :ref:`adding-translation`
+   * :ref:`component-new_lang`
+   * :ref:`bimono`
+   * :ref:`faq-duplicate-files`
 
 .. _component-file_format:
 
@@ -584,6 +750,13 @@ File format
 +++++++++++
 
 Translation file format, see also :ref:`formats`.
+
+.. _component-file_format_params:
+
+File format parameters
+++++++++++++++++++++++
+
+Parameters used to configure how translation files are processed, see also :ref:`file_format_params`.
 
 .. _component-report_source_bugs:
 
@@ -595,6 +768,24 @@ notification about any source string comments made in Weblate.
 
 With the :ref:`gettext` format, this address is also saved by Weblate in the
 :mailheader:`Report-Msgid-Bugs-To` header of the file.
+
+.. _component-hide_glossary_matches:
+
+Do not show glossary matches
+++++++++++++++++++++++++++++
+
+Hides the glossary panel and its matches in the translation editor for this component.
+When enabled, glossary suggestions for this component are not computed, and the Glossary
+panel (including its “Add term to glossary” action) is hidden in the editor.
+
+.. note::
+
+   Glossary self-references are always excluded from matches even when this option is disabled.
+
+.. seealso::
+
+   * :ref:`glossary`
+   * :ref:`component-is_glossary`
 
 .. _component-allow_translation_propagation:
 
@@ -654,18 +845,22 @@ Translation flags
 
 Customization of quality checks and other Weblate behavior, see :ref:`custom-checks`.
 
+Workspace, project, component, and translation flags are merged.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+
 .. _component-enforced_checks:
 
 Enforced checks
 +++++++++++++++
 
-List of checks which can not be ignored, see :ref:`enforcing-checks`.
+List of checks which can not be dismissed.
 
-.. note::
+.. seealso::
 
-   Enforcing the check does not automatically enable it, you still should
-   enabled it using :ref:`custom-checks` in :ref:`component-check_flags` or
-   :ref:`additional`.
+   :ref:`enforcing-checks`
 
 .. _component-license:
 
@@ -673,6 +868,10 @@ Translation license
 +++++++++++++++++++
 
 License of the translation (does not need to be the same as the source code license).
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
 
 .. _component-agreement:
 
@@ -683,6 +882,10 @@ Contributor license agreement which needs to be approved before a user can
 translate this component.
 
 Markdown can be used for text formatting or inserting links.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
 
 .. _component-new_lang:
 
@@ -713,8 +916,9 @@ Disable adding new translations
 
 .. seealso::
 
-   :ref:`adding-translation`,
-   :ref:`component-new_base`
+   * :ref:`workspace-inherited-settings`
+   * :ref:`adding-translation`
+   * :ref:`component-new_base`
 
 .. _component-manage_units:
 
@@ -744,9 +948,9 @@ the translation files once they are translated.
 
 .. seealso::
 
-   :ref:`bimono`,
-   :ref:`adding-new-strings`,
-   :http:post:`/api/translations/(string:project)/(string:component)/(string:language)/units/`
+   * :ref:`bimono`
+   * :ref:`adding-new-strings`
+   * :http:post:`/api/translations/(string:project)/(string:component)/(string:language)/units/`
 
 .. _component-language_code_style:
 
@@ -799,10 +1003,11 @@ Linux style, lower cased
 
 .. seealso::
 
-    :ref:`adding-translation`,
-    :ref:`language-code`,
-    :ref:`language-parsing-codes`,
-    :ref:`project-language_aliases`
+   * :ref:`workspace-inherited-settings`
+   * :ref:`adding-translation`
+   * :ref:`language-code`
+   * :ref:`language-parsing-codes`
+   * :ref:`project-language_aliases`
 
 .. _component-merge_style:
 
@@ -851,6 +1056,15 @@ The default value can be changed by :setting:`DEFAULT_ADD_MESSAGE`,
 :setting:`DEFAULT_DELETE_MESSAGE`, :setting:`DEFAULT_MERGE_MESSAGE`,
 :setting:`DEFAULT_PULL_MESSAGE`.
 
+The built-in defaults follow Conventional Commits and include
+Weblate links where available. Use :guilabel:`Restore site default` next to a
+message editor to restore the current installation default for that message;
+for inherited values, this also disables inheritance for that message.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+
 .. _component-push_on_commit:
 
 Push on commit
@@ -862,6 +1076,8 @@ changes to its underlying repository (see :ref:`lazy-commit`). To actually
 enable pushing :guilabel:`Repository push URL` has to be configured as
 well.
 
+.. include:: /snippets/linked-repository-setting.rst
+
 .. _component-commit_pending_age:
 
 Age of changes to commit
@@ -871,6 +1087,8 @@ Sets how old (in hours) changes have to be before they are committed by
 background task or the :wladmin:`commit_pending` management command. All
 changes in a component are committed once there is at least one change
 older than this period.
+
+.. include:: /snippets/linked-repository-setting.rst
 
 The default value can be changed by :setting:`COMMIT_PENDING_HOURS`.
 
@@ -890,6 +1108,8 @@ This avoids adding another conflicts, which would have to be resolved manually.
 
 The component will be automatically unlocked once there are no repository
 errors left.
+
+.. include:: /snippets/linked-repository-setting.rst
 
 .. _component-source_language:
 
@@ -982,7 +1202,8 @@ Regular expression used to determine the variants of a string, see
 
 .. seealso::
 
-   :ref:`faq-vcs`, :ref:`alerts`
+   * :ref:`faq-vcs`
+   * :ref:`alerts`
 
 .. _component-secondary_language:
 
@@ -995,14 +1216,15 @@ Additional language to show together with the source language while translating.
 
 Optionally, it can be also used as a source for the machine translation.
 
-.. hint::
+.. note::
 
-   This setting is inherited from the project if left empty.
+   This setting can be inherited from the project.
 
 .. seealso::
 
-   :ref:`secondary-languages`,
-   :ref:`mt-sources`
+   * :ref:`workspace-inherited-settings`
+   * :ref:`secondary-languages`
+   * :ref:`mt-sources`
 
 .. _component-priority:
 
@@ -1103,6 +1325,25 @@ Category
 
 Categories are there to give structure to components within a project. You can
 nest them to achieve a more complex structure.
+
+.. _category-settings:
+
+Category settings
++++++++++++++++++
+
+Categories can override the same inherited settings as projects and components,
+including translation license, contributor agreement, adding new translations,
+secondary language, translation flags, and commit messages.
+
+Nested categories inherit from their parent category by default. Top-level
+categories inherit from the project. Components in a category inherit from that
+category by default.
+
+.. seealso::
+
+   * :ref:`workspace-inherited-settings`
+   * :ref:`project-license`
+   * :ref:`component-license`
 
 .. _markup:
 
@@ -1267,5 +1508,5 @@ components and then run :wladmin:`import_project` or
 
 .. seealso::
 
-   :ref:`manage`,
-   :ref:`addon-weblate.discovery.discovery`
+   * :ref:`manage`
+   * :ref:`addon-weblate.discovery.discovery`

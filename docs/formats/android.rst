@@ -62,10 +62,12 @@ Weblate does following escaping of strings:
 
 .. seealso::
 
-   `Android string resources documentation <https://developer.android.com/guide/topics/resources/string-resource>`_,
-   :doc:`/formats/compose-multiplatform-resources`,
-   :doc:`/formats/moko-resources`,
-   :doc:`tt:formats/android`
+   * `Android string resources documentation <https://developer.android.com/guide/topics/resources/string-resource>`_
+   * :doc:`/formats/compose-multiplatform-resources`
+   * :doc:`/formats/moko-resources`
+   * :doc:`tt:formats/android`
+
+.. include:: /snippets/format-features/aresource-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

@@ -17,20 +17,26 @@ middleware here, or combine a Django application with an application of another
 framework.
 """
 
+from __future__ import annotations
+
 import os
+from typing import TYPE_CHECKING
 
 from django.core.wsgi import get_wsgi_application
 
+if TYPE_CHECKING:
+    from django.urls import URLPattern, URLResolver
 
-def preload_url_patterns():
+
+def preload_url_patterns() -> list[URLPattern | URLResolver]:
     """
     Ensure Django URL resolver is loaded.
 
     This avoids expensive load with a first request and makes memory sharing work
     better between uwsgi workers.
     """
-    from django.conf import settings
-    from django.urls import get_resolver
+    from django.conf import settings  # ruff: ignore[import-outside-top-level, unsorted-imports]
+    from django.urls import get_resolver  # ruff: ignore[import-outside-top-level]
 
     return get_resolver(settings.ROOT_URLCONF).url_patterns
 

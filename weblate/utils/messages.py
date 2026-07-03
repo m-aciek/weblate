@@ -16,16 +16,16 @@ from django.contrib.messages import add_message as django_add_message
 from django.contrib.messages import constants
 
 if TYPE_CHECKING:
-    from weblate.auth.models import AuthenticatedHttpRequest
+    from django.http import HttpRequest
 
 
-def get_request(request: AuthenticatedHttpRequest):
+def get_request(request: HttpRequest):
     """Return Django request object even for DRF requests."""
     return getattr(request, "_request", request)
 
 
 def add_message(
-    request: AuthenticatedHttpRequest | None,
+    request: HttpRequest | None,
     level: int,
     message: str,
     extra_tags: str = "",
@@ -41,7 +41,7 @@ def add_message(
 
 
 def debug(
-    request: AuthenticatedHttpRequest | None,
+    request: HttpRequest | None,
     message: str,
     extra_tags: str = "",
 ) -> None:
@@ -50,7 +50,7 @@ def debug(
 
 
 def info(
-    request: AuthenticatedHttpRequest | None,
+    request: HttpRequest | None,
     message: str,
     extra_tags: str = "",
 ) -> None:
@@ -59,7 +59,7 @@ def info(
 
 
 def success(
-    request: AuthenticatedHttpRequest | None,
+    request: HttpRequest | None,
     message: str,
     extra_tags: str = "",
 ) -> None:
@@ -68,7 +68,7 @@ def success(
 
 
 def warning(
-    request: AuthenticatedHttpRequest | None,
+    request: HttpRequest | None,
     message: str,
     extra_tags: str = "",
 ) -> None:
@@ -77,7 +77,7 @@ def warning(
 
 
 def error(
-    request: AuthenticatedHttpRequest | None,
+    request: HttpRequest | None,
     message: str,
     extra_tags: str = "",
 ) -> None:

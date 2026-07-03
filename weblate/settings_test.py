@@ -10,35 +10,13 @@ import os
 import warnings
 from tempfile import TemporaryDirectory
 
-from weblate.settings_example import *  # noqa: F403
+# ruff: ignore[undefined-local-with-import-star]
+from weblate.settings_example import *
 
-CI_DATABASE = os.environ.get("CI_DATABASE", "")
-
-default_user = "weblate"
+default_user = "postgres"
 default_name = "weblate"
-if CI_DATABASE in {"mysql", "mariadb"}:
-    DATABASES["default"]["ENGINE"] = "django.db.backends.mysql"
-    default_user = "root"
-    DATABASES["default"]["OPTIONS"] = {
-        "init_command": (
-            "SET NAMES utf8mb4, "
-            "wait_timeout=28800, "
-            "default_storage_engine=INNODB, "
-            'sql_mode="STRICT_TRANS_TABLES"'
-        ),
-        "charset": "utf8",
-        "isolation_level": "read committed",
-    }
-elif CI_DATABASE == "postgresql":
-    DATABASES["default"]["ENGINE"] = "django.db.backends.postgresql"
-    default_user = "postgres"
-else:
-    if not CI_DATABASE:
-        msg = "Missing CI_DATABASE configuration in the environment"
-        raise ValueError(msg)
-    msg = f"Not supported database: {CI_DATABASE}"
-    raise ValueError(msg)
 
+DATABASES["default"]["ENGINE"] = "django.db.backends.postgresql"
 DATABASES["default"]["HOST"] = os.environ.get("CI_DB_HOST", "")
 DATABASES["default"]["NAME"] = os.environ.get("CI_DB_NAME", default_name)
 DATABASES["default"]["USER"] = os.environ.get("CI_DB_USER", default_user)
@@ -46,10 +24,11 @@ DATABASES["default"]["PASSWORD"] = os.environ.get("CI_DB_PASSWORD", "")
 DATABASES["default"]["PORT"] = os.environ.get("CI_DB_PORT", "")
 
 # Configure admins
-ADMINS = (("Weblate test", "noreply@weblate.org"),)
+ADMINS = ("Weblate test <noreply@weblate.org>",)
 
 # The secret key is needed for tests
-SECRET_KEY = "secret key used for tests only"  # noqa: S105
+# ruff: ignore[hardcoded-password-string]
+SECRET_KEY = "secret key used for tests only"
 
 SITE_DOMAIN = "example.com"
 OTP_WEBAUTHN_RP_NAME = SITE_DOMAIN
@@ -83,7 +62,8 @@ CELERY_RESULT_BACKEND = None
 STATS_LAZY = True
 
 VCS_API_DELAY = 0
-VCS_FILE_PROTOCOL = True
+# Allow file protocol for tests
+VCS_ALLOW_SCHEMES = {"https", "ssh", "file"}
 
 # Localize CDN addon
 LOCALIZE_CDN_URL = "https://cdn.example.com/"
@@ -128,9 +108,7 @@ CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"
 if "CI_REDIS_HOST" in os.environ:
     CACHES["avatar"] = {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": "redis://{}:{}/0".format(
-            os.environ["CI_REDIS_HOST"], os.environ.get("CI_REDIS_PORT", "6379")
-        ),
+        "LOCATION": f"redis://{os.environ['CI_REDIS_HOST']}:{os.environ.get('CI_REDIS_PORT', '6379')}/0",
     }
 
 # Selenium can not clear HttpOnly cookies in MSIE
@@ -151,6 +129,7 @@ AUTHENTICATION_BACKENDS = (
 
 # Disable random admin checks trigger
 BACKGROUND_ADMIN_CHECKS = False
+
 
 # Use weak password hasher for testing
 PASSWORD_HASHERS = [

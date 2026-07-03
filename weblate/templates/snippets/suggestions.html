@@ -3,7 +3,7 @@
 <div class="container-fluid container-gapped">
   {% for suggestion in suggestions %}
     <div class="row history-row">
-      <div class="col-xs-2 history-event">
+      <div class="col-sm-2 history-event">
         <strong>{{ suggestion.get_user_display }}</strong>
         <p class="text-muted">{% translate "Suggestion added" %}</p>
         {% if user_can_vote_suggestion %}
@@ -12,17 +12,17 @@
           </p>
         {% endif %}
       </div>
-      <div class="col-xs-10 history-data">
+      <div class="col-sm-10 history-data">
         {% if multi_unit %}
-          <div class="btn-float pull-right flip">
+          <div class="btn-float">
             <a href="{{ suggestion.unit.get_absolute_url }}#suggestions"
                class="btn btn-link green"
                title="{% translate "View details" %}">{% icon "magnify-plus-outline.svg" %}</a>
           </div>
         {% else %}
           {% perm 'suggestion.delete' suggestion as user_can_delete_suggestion %}
-          {% if user_can_vote_suggestion or user_can_accept_suggestion or user_can_delete_suggestion %}
-            <div class="btn-float pull-right flip">
+          {% if user_can_vote_suggestion or user_can_accept_suggestion or user_can_delete_suggestion or user_can_suggest %}
+            <div class="btn-float">
               {% if user_can_vote_suggestion %}
                 <button type="submit"
                         class="btn btn-link green"
@@ -35,7 +35,29 @@
                         value="{{ suggestion.id }}"
                         title="{% translate "Vote against" %}">{% icon "thumb-down.svg" %}</button>
               {% endif %}
+              {# Copy suggestion feature #}
+              {% if user_can_suggest %}
+                <button type="button"
+                        class="btn btn-link green js-copy-suggestion"
+                        title="{% translate "Clone to translation" %}"
+                        aria-label="{% translate "Clone to translation" %}"
+                        {% for text in suggestion.target_list %}data-text-{{ forloop.counter0 }}="{{ text|force_escape }}"{% endfor %}>
+                  {% icon "clone.svg" %}
+                </button>
+              {% endif %}
               {% if user_can_accept_suggestion %}
+                {# Bulk accept suggestions feature #}
+                {% if suggestion.user and not suggestion.user.is_anonymous %}
+                  {% ifchanged suggestion.user.username %}
+                    <button type="button"
+                            class="aa-accept-all-btn btn btn-link green"
+                            data-username="{{ suggestion.user.username }}"
+                            data-translation-url="{% url 'bulk-accept-user-suggestions' path=suggestion.unit.translation.get_url_path %}"
+                            title="{% blocktranslate with username=suggestion.user.username %}Accept all suggestions from {{ username }}{% endblocktranslate %}">
+                      {% icon "account-check.svg" %}
+                    </button>
+                  {% endifchanged %}
+                {% endif %}
                 <button type="submit"
                         class="btn btn-link green"
                         name="accept"
@@ -56,6 +78,7 @@
               {% endif %}
               {% if user_can_delete_suggestion %}
                 {% if has_antispam and suggestion.user != user %}
+
                   <button type="submit"
                           class="btn btn-link red"
                           name="spam"
@@ -91,13 +114,13 @@
           {% with suggestion_checks=suggestion.get_checks %}
             {% if suggestion_checks %}
               <p class="help-block">{% translate "Failing checks:" context "String state" %}</p>
-              {% for check in suggestion.get_checks %}
+              {% for check in suggestion_checks %}
                 <span class="badge badge-danger" title="{{ check.get_description }}">{{ check.get_name }}</span>
               {% endfor %}
             {% endif %}
           {% endwith %}
 
-          <span class="pull-right flip text-muted">{{ suggestion.timestamp|naturaltime }}</span>
+          <span class="float-end text-muted">{{ suggestion.timestamp|naturaltime }}</span>
           <div class="clearfix"></div>
         </div>
       </div>

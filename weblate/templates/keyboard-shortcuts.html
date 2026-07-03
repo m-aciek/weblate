@@ -1,7 +1,7 @@
 {% load i18n %}
 
 <!-- Modal that shows available keyboard shortcuts  -->
-<div class="modal fade "
+<div class="modal fade"
      id="shortcuts-modal"
      tabindex="-1"
      role="dialog"
@@ -9,20 +9,18 @@
   <div class="modal-dialog" role="document">
     <div class="modal-content">
       <div class="modal-header">
+        <h5 id="shortcutsModal" class="modal-title">{% translate "Keyboard shortcuts" %}</h5>
         <button type="button"
-                class="close"
-                data-dismiss="modal"
-                aria-label="{% translate "Close" %}">
-          <span aria-hidden="true">×</span>
-        </button>
-        <h4 id="shortcutsModal" class="panel-title">{% translate "Keyboard shortcuts" %}</h4>
+                class="btn-close float-end"
+                data-bs-dismiss="modal"
+                aria-label="{% translate "Close" %}"></button>
       </div>
       <div class="modal-body" id="shortcuts-table-container">
         <table class="table table-striped">
           <thead class="thead-dark">
             <tr>
-              <th scope="col" id="t-head">{% translate "Shortcut" %}</th>
-              <th scope="col" id="t-head">{% translate "Action" %}</th>
+              <th scope="col">{% translate "Shortcut" %}</th>
+              <th scope="col">{% translate "Action" %}</th>
             </tr>
           </thead>
           <tbody>
@@ -55,7 +53,7 @@
                 <kbd>Cmd</kbd> + <kbd>↑</kbd> {% translate "or" context "between keyboard shortcuts" %}
                 <br>
               </td>
-              <td>{% translate "Navigate to the last translation in the current search." %}</td>
+              <td>{% translate "Navigate to the previous translation in the current search." %}</td>
             </tr>
             <tr>
               <td>
@@ -204,7 +202,7 @@
         </table>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-primary" data-dismiss="modal">{% translate "Close" %}</button>
+        <button type="button" class="btn btn-primary" data-bs-dismiss="modal">{% translate "Close" %}</button>
       </div>
     </div>
   </div>

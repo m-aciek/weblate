@@ -3,7 +3,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 (() => {
-  Mousetrap.bindGlobal("?", (event) => {
+  function showShortcutsModal() {
+    const modal = document.getElementById("shortcuts-modal");
+    if (modal !== null) {
+      bootstrap.Modal.getOrCreateInstance(modal).show();
+    }
+  }
+
+  // Match the "?" character directly rather than binding via hotkeys-js
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "?") {
+      return;
+    }
     const target = event.target || event.srcElement;
     const tagName = target.tagName.toLowerCase();
     if (
@@ -11,13 +22,13 @@
       tagName === "textarea" ||
       target.isContentEditable
     ) {
-      return true;
+      return;
     }
-    $("#shortcuts-modal").modal("show");
-    return false;
+    event.preventDefault();
+    showShortcutsModal();
   });
 
-  $("#shortcuts-btn").on("click", () => {
-    $("#shortcuts-modal").modal("show");
-  });
+  document
+    .getElementById("shortcuts-btn")
+    ?.addEventListener("click", showShortcutsModal);
 })();

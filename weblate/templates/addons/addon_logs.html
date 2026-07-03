@@ -5,28 +5,38 @@
 {% block breadcrumbs %}
   {% if object %}
     {% path_object_breadcrumbs object %}
-    <li>
+    <li class="breadcrumb-item">
       <a href="{% url 'addons' path=object.get_url_path %}">{% translate "Add-ons" %}</a>
     </li>
   {% else %}
-    <li>
+    <li class="breadcrumb-item">
       <a href="{% url 'manage-addons' %}">{% translate "Add-ons" %}</a>
     </li>
   {% endif %}
-  <li>
+  <li class="breadcrumb-item">
     {% if instance %}
-      <a href="{% url 'addon-detail' pk=instance.pk %}">{{ addon.verbose }}</a>
+      <a href="{% url 'addon-detail' pk=instance.pk %}">
+        {% if addon %}
+          {{ addon.verbose }}
+        {% else %}
+          {{ addon_name }}
+        {% endif %}
+      </a>
     {% else %}
-      {{ addon.verbose }}
+      {% if addon %}
+        {{ addon.verbose }}
+      {% else %}
+        {{ addon_name }}
+      {% endif %}
     {% endif %}
   </li>
 {% endblock breadcrumbs %}
 
 {% block content %}
 
-  <div class="panel panel-default">
-    <div class="panel-heading">
-      <h4 class="panel-title">{% translate "Add-on Activity Logs" %}</h4>
+  <div class="card">
+    <div class="card-header">
+      <h4 class="card-title">{% translate "Add-on Activity Logs" %}</h4>
     </div>
     <table class="table table-striped">
       <thead>
@@ -41,7 +51,7 @@
         {% for log in addon_activity_log %}
           <tr>
             <td>
-              {% if log.details.error_occurred %}
+              {% if log.details.error %}
                 <!-- This is a warning sign -->
                 <span class="text-danger">⚠</span>
               {% else %}
@@ -63,7 +73,7 @@
 
     <!-- Pagination -->
     {% if addon_activity_log.has_other_pages %}
-      <div class="panel-footer">
+      <div class="card-footer">
         <div class="text-center">
           <nav>
             <ul class="pagination">

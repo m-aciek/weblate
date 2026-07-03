@@ -1,14 +1,19 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
 import os
+from contextlib import suppress
 from functools import partial
+from typing import TYPE_CHECKING
 
 from django.db import transaction
+from django.db.models import Q
 from django.db.models.signals import m2m_changed, post_delete, post_save, pre_delete
 from django.dispatch import receiver
 
+from weblate.trans.alerts.base import AlertSeverity
 from weblate.trans.models._conf import WeblateConf
 from weblate.trans.models.agreement import ContributorAgreement
 from weblate.trans.models.alert import Alert
@@ -16,29 +21,38 @@ from weblate.trans.models.announcement import Announcement
 from weblate.trans.models.category import Category
 from weblate.trans.models.change import Change
 from weblate.trans.models.comment import Comment
-from weblate.trans.models.component import Component
+from weblate.trans.models.component import Component, ComponentLink
 from weblate.trans.models.componentlist import AutoComponentList, ComponentList
 from weblate.trans.models.label import Label
-from weblate.trans.models.project import Project
+from weblate.trans.models.pending import PendingUnitChange
+from weblate.trans.models.project import CommitPolicyChoices, Project
 from weblate.trans.models.suggestion import Suggestion, Vote
 from weblate.trans.models.translation import Translation
 from weblate.trans.models.unit import Unit
 from weblate.trans.models.variant import Variant
 from weblate.trans.models.workflow import WorkflowSetting
+from weblate.trans.removal import get_current_removal_batch
 from weblate.trans.signals import user_pre_delete
 from weblate.utils.decorators import disable_for_loaddata
 from weblate.utils.files import remove_tree
 
+if TYPE_CHECKING:
+    from weblate.auth.models import User
+
 __all__ = [
     "Alert",
+    "AlertSeverity",
     "Announcement",
     "Category",
     "Change",
     "Comment",
+    "CommitPolicyChoices",
     "Component",
+    "ComponentLink",
     "ComponentList",
     "ContributorAgreement",
     "Label",
+    "PendingUnitChange",
     "Project",
     "Suggestion",
     "Translation",
@@ -50,56 +64,115 @@ __all__ = [
 ]
 
 
-def delete_object_dir(instance) -> None:
+def delete_object_dir(instance: Project | Component) -> None:
     """Remove path if it exists."""
     project_path = instance.full_path
     if os.path.exists(project_path):
         remove_tree(project_path)
 
 
+@receiver(pre_delete, sender=Project)
+def project_pre_delete(sender, instance: Project, **kwargs) -> None:
+    # ruff: ignore[import-outside-top-level]
+    from weblate.memory.models import Memory, MemoryScope
+
+    Memory.objects.using("default").delete_scope(
+        Q(
+            scope__in=(MemoryScope.SCOPE_PROJECT, MemoryScope.SCOPE_PROJECT_FILE),
+            project=instance,
+        )
+        | Q(
+            scope__in=(MemoryScope.SCOPE_SHARED, MemoryScope.SCOPE_WORKSPACE),
+            source_project=instance,
+        ),
+        delete_legacy=False,
+    )
+
+
 @receiver(post_delete, sender=Project)
-def project_post_delete(sender, instance, **kwargs) -> None:
+def project_post_delete(sender, instance: Project, **kwargs) -> None:
     """
     Project deletion hook.
 
     - delete project directory
     - update stats
     """
-    # Update stats
-    transaction.on_commit(instance.stats.update_parents)
+    batch = get_current_removal_batch()
+    if batch is None:
+        transaction.on_commit(instance.stats.update_parents)
+    else:
+        batch.collect_stats(instance.stats.get_update_objects())
     instance.stats.delete()
 
     # Remove directory
     delete_object_dir(instance)
 
+    # Project-scoped memory rows are owned by MemoryScope. Once the project FK
+    # cascade removes those scopes, cleanup can delete scope-less rows in the
+    # background without delaying project deletion. By post_delete the scope rows
+    # are gone, and project-file memory origins are upload names rather than
+    # component paths, so a project path prefix would miss them.
+    # ruff: ignore[import-outside-top-level]
+    from weblate.memory.tasks import cleanup_orphaned_memory
+
+    cleanup_orphaned_memory.delay_on_commit()
+
 
 @receiver(pre_delete, sender=Component)
-def component_pre_delete(sender, instance, **kwargs) -> None:
+def component_pre_delete(sender, instance: Component, **kwargs) -> None:
+    instance.memory_full_slug = instance.full_slug
+    instance.memory_workspace_id = instance.project.workspace_id
+    batch = instance.removal_batch or get_current_removal_batch()
+    if batch is not None:
+        batch.collect_stats(instance.stats.get_update_objects())
+        return
     # Collect list of stats to update, this can't be done after removal
     instance.stats.collect_update_objects()
 
 
 @receiver(post_delete, sender=Component)
-def component_post_delete(sender, instance, **kwargs) -> None:
+def component_post_delete(sender, instance: Component, **kwargs) -> None:
     """
     Component deletion hook.
 
     - delete component directory
     - update stats, this is accompanied by component_pre_delete
     """
-    # Update stats
-    transaction.on_commit(instance.stats.update_parents)
+    batch = instance.removal_batch or get_current_removal_batch()
+    if batch is None:
+        transaction.on_commit(instance.stats.update_parents)
     instance.stats.delete()
 
     # Do not delete linked components
     if not instance.is_repo_link:
         delete_object_dir(instance)
 
+    memory_full_slug = getattr(instance, "memory_full_slug", None)
+    if memory_full_slug is not None:
+        instance.delete_automatic_memory_scopes(
+            memory_full_slug,
+            instance.project_id,
+            getattr(instance, "memory_workspace_id", None),
+        )
+
+    if batch is None:
+        instance.cleanup_conflicting_repository_setup_alerts()
+
 
 @receiver(post_delete, sender=Translation)
-def translation_post_delete(sender, instance, **kwargs) -> None:
+def translation_post_delete(sender, instance: Translation, **kwargs) -> None:
     """Delete translation stats on translation deletion."""
     transaction.on_commit(instance.stats.delete)
+
+
+@receiver(post_save, sender=ComponentLink)
+@receiver(post_delete, sender=ComponentLink)
+@disable_for_loaddata
+def component_links_updated(sender, instance, **kwargs) -> None:
+    # ruff: ignore[import-outside-top-level]
+    from weblate.utils.tasks import update_project_stats_link
+
+    update_project_stats_link.delay_on_commit(instance.project_id)
 
 
 @receiver(m2m_changed, sender=Unit.labels.through)
@@ -117,7 +190,7 @@ def change_labels(sender, instance, action, pk_set, **kwargs) -> None:
 
 
 @receiver(pre_delete, sender=Label)
-def label_pre_delete(sender, instance, **kwargs) -> None:
+def label_pre_delete(sender, instance: Label, **kwargs) -> None:
     instance.project.collect_label_cleanup(instance)
 
 
@@ -130,7 +203,7 @@ def label_post_delete(sender, instance, **kwargs) -> None:
 
 
 @receiver(user_pre_delete)
-def user_commit_pending(sender, instance, **kwargs) -> None:
+def user_commit_pending(sender, instance: User, **kwargs) -> None:
     """Commit pending changes for user on account removal."""
     # All user changes
     all_changes = Change.objects.last_changes(instance).filter(user=instance)
@@ -181,12 +254,14 @@ def auto_component_list(sender, instance, **kwargs) -> None:
 @receiver(post_delete, sender=Component)
 @disable_for_loaddata
 def post_delete_linked(sender, instance, **kwargs) -> None:
+    batch = instance.removal_batch or get_current_removal_batch()
+    if batch is not None:
+        batch.collect_linked_component(instance.linked_component_id)
+        return
     # When removing project, the linked component might be already deleted now
-    try:
+    with suppress(Component.DoesNotExist):
         if instance.linked_component:
             instance.linked_component.update_alerts()
-    except Component.DoesNotExist:
-        pass
 
 
 @receiver(post_save, sender=Comment)

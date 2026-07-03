@@ -3,7 +3,7 @@
 {% if simple %}
   <span lang="{{ language.code }}"
         dir="{{ language.direction }}"
-        {% if wrap and items.0.content|length > 25 %}class="wrap-text"{% endif %}>{{ items.0.content }}</span>
+        class="bidi-isolate{% if wrap and items.0.content|length > 25 %} wrap-text{% endif %}">{{ items.0.content }}</span>
 {% elif has_content %}
   <div class="list-group">
     {% for item in items %}
@@ -13,17 +13,17 @@
             <strong>{{ item.title }}</strong>
           </h5>
         {% endif %}
-        <div class="list-group-item-text"
+        <div class="list-group-item-text bidi-isolate"
              lang="{{ language.code }}"
              dir="{{ language.direction }}">
           {% if unit and item.copy %}
             <button type="button"
-                    class="btn btn-link btn-xs pull-right flip"
+                    class="btn btn-link btn-xs float-end"
                     data-clipboard-value="{{ item.copy }}"
                     title="{% translate "Copy to clipboard" %}"
                     tabindex="-1">{% icon "copy.svg" %}</button>
             <button type="button"
-                    class="btn btn-link btn-xs btn-sidebar pull-right flip"
+                    class="btn btn-link btn-xs btn-sidebar float-end"
                     data-clone-value="{{ item.copy }}"
                     title="{% translate "Clone to translation" %}"
                     tabindex="-1">{% icon "clone.svg" %}</button>

@@ -17,8 +17,8 @@ or only to a certain group of translators.
 
 .. seealso::
 
-   :ref:`access-control`,
-   :ref:`workflows`
+   * :ref:`access-control`
+   * :ref:`workflows`
 
 Translation projects
 --------------------
@@ -42,6 +42,8 @@ to find a specific string or term.
 
 .. image:: /screenshots/strings-to-check.webp
 
+.. _suggestions:
+
 Suggestions
 -----------
 
@@ -51,10 +53,20 @@ Suggestions
 
 Anonymous users (by default) can only forward suggestions. Doing so is still
 available to signed-in users, in cases where uncertainty about a translation
-arises, prompting other translators to review it.
+arises, prompting other translators to review it. Any user can clone an existing
+suggestion into the translation fields, including plural forms, and use it
+as the basis for a new suggestion or translation.
 
 All suggestions are scanned on a daily basis to remove duplicates and
 those matching current translations.
+
+If you have the :guilabel:`Accept suggestions` permission, you can bulk accept
+all suggestions from a specific user by clicking the account check icon next
+to their suggestion. This is useful for quickly processing suggestions from
+trusted contributors. Suggestions failing quality checks are skipped and
+remain for manual review. Weblate shows the number of matching suggestions for
+confirmation and processes the acceptance in the background. If you can review
+the translation, you can accept and approve the suggestions in the same step.
 
 .. _user-comments:
 
@@ -77,9 +89,9 @@ users by using ``@username``.
 
 .. seealso::
 
-   :ref:`report-source`,
-   :ref:`source-reviews`,
-   :ref:`project-source_review`
+   * :ref:`report-source`
+   * :ref:`source-reviews`
+   * :ref:`project-source_review`
 
 Variants
 --------
@@ -90,8 +102,8 @@ depending on the size of a screen or window.
 
 .. seealso::
 
-   :ref:`variants`,
-   :ref:`glossary-variants`
+   * :ref:`variants`
+   * :ref:`glossary-variants`
 
 Labels
 ------
@@ -128,8 +140,64 @@ Various bits of extra info can be shown on this page, most of which coming from 
 Translation fields for any secondary languages translators select in the preferences will be shown
 (see :ref:`secondary-languages`) above the source string.
 
-Below the translation, translators will find suggestion made by others, to be
-accepted (✓), accepted with changes (✏️), or deleted (🗑).
+Below the translation, translators will find suggestions made by others, to be accepted (✓),
+accepted with changes (✏️), bulk accepted for a specific user (👤✓),
+cloned into the translation fields (📑) or deleted (🗑).
+
+.. _translating-special-text:
+
+Translating special text safely
++++++++++++++++++++++++++++++++
+
+Some source strings contain text that the application interprets at runtime.
+Translate the human-readable parts, but keep technical markers intact unless
+the project instructions say otherwise.
+
+Placeholders and format strings
+    Keep variables such as ``%s``, ``%1$d``, ``%(name)s``, ``{count}``,
+    ``{{ value }}``, or similar markers in the translation. Named placeholders
+    describe the inserted value, but the names themselves are not translated.
+    You can usually reorder numbered or named placeholders to fit the target
+    language. Use the placeable copy shortcuts to insert them without typing
+    mistakes.
+Markup
+    Keep HTML and XML tags, tag names, and attribute names unchanged. Translate
+    the visible text between tags and any attribute value that is meant for
+    users, for example alternative text or a tooltip, when it appears as part
+    of the translatable string. Make sure opening and closing tags still match
+    after reordering the sentence.
+Program syntax
+    Leave function names, commands, environment variables, spreadsheet
+    functions, SQL keywords, and similar program syntax untranslated unless the
+    project explicitly documents a localized form.
+Punctuation and whitespace
+    Preserve punctuation and spaces that affect the interface, such as
+    trailing colons, ellipses, leading or trailing spaces, and punctuation next
+    to placeholders. Follow the target language's typography when it differs
+    from the source, and use comments when a source punctuation choice looks
+    wrong.
+Accelerators
+    Menu labels can mark keyboard accelerators with characters such as ``&``,
+    ``_``, or ``~``. When the source has an accelerator, keep one in the
+    translation. Choose a readable key in the translated label and avoid
+    obvious conflicts with nearby menu items or buttons.
+Plural forms
+    Translate each plural field Weblate shows. Do not combine forms into a
+    single construction such as ``file(s)`` unless that is correct for the
+    target language and project. If the source string uses an ambiguous plural,
+    report it with a source string comment or review.
+
+Weblate quality checks catch many technical mistakes in placeholders, markup,
+punctuation, whitespace, and plural forms. They do not replace translator
+judgment, so use :ref:`source-context`, :doc:`/user/glossary`, and
+:ref:`user-comments` when the source text needs clarification.
+
+.. seealso::
+
+   * :doc:`/user/checks`
+   * :ref:`plurals`
+   * :ref:`source-context`
+   * :ref:`user-comments`
 
 .. _plurals:
 
@@ -294,9 +362,15 @@ This contextual description provides related info about the current string.
 
 String attributes
     Things like message ID, context (``msgctxt``) or location in source code.
+Explanation
+    Further clarification can be provided in Weblate via :ref:`additional-explanation`.
 Screenshots
-    Screenshots can be uploaded to Weblate to better inform translators
-    of where and how the string is used, see :ref:`screenshots`.
+    Screenshots can be uploaded directly from this panel using
+    :guilabel:`Add screenshot`, or managed elsewhere in Weblate to better
+    inform translators of where and how the string is used. Source-language
+    screenshots are shown for every translation of the string, while
+    translation-specific screenshots are shown only for that translation; see
+    :ref:`screenshots`.
 Nearby strings
     Displays neighbouring strings from the translation file.
     These are usually also used in a similar context and prove
@@ -362,15 +436,23 @@ Automatic translation
 
 You can use automatic translation to bootstrap translation based on external
 sources. This tool is called :guilabel:`Automatic translation` accessible in
-the :guilabel:`Tools` menu, once you have selected a component and a language:
+the :guilabel:`Operations` menu, once you have selected a component and a language:
 
 .. image:: /screenshots/automatic-translation.webp
+
+A similar operation :guilabel:`Batch automatic translation` is available if you have
+selected a project language, a component or a category.
 
 Two modes of operation are possible:
 
 - Using other Weblate components as a source for translations.
 - Using selected machine translation services with translations above a certain
   quality threshold.
+
+When using other components as the source, Weblate applies translations only
+when plural forms are compatible. If the source component uses different plural
+rules, pluralized strings are skipped and Weblate shows a warning, while
+single-form strings are still translated.
 
 You can also choose which strings are to be auto-translated.
 
@@ -401,7 +483,7 @@ operations like searching, sending contact forms, or translating.
 If affected by it, you are blocked for a certain period, until you can
 perform the operation again.
 
-Default limits and fine-tuning is described in the administrative manual,
+Default limits and fine-tuning are described in the administrative manual,
 see :ref:`rate-limit`.
 
 .. _search-replace:
@@ -410,12 +492,16 @@ Search and replace
 ------------------
 
 Change terminology effectively or perform bulk fixing of the
-strings using :guilabel:`Search and replace` in the :guilabel:`Tools` menu.
+strings using :guilabel:`Search and replace` in the :guilabel:`Operations` menu.
+
+.. image:: /screenshots/search-replace.webp
 
 .. hint::
 
     Don't worry about messing up the strings, as it is a two-step process.
     A preview of edited strings is shown before confirming the change.
+    You can adjust the search parameters from the preview and update it before
+    applying the replacement.
 
 .. _bulk-edit:
 
@@ -433,7 +519,9 @@ Supported operations:
 .. hint::
 
     This tool is called :guilabel:`Bulk edit`, accessible in the
-    :guilabel:`Tools` menu of each project, component or translation.
+    :guilabel:`Operations` menu of each project, component or translation.
+
+.. image:: /screenshots/bulk-edit.webp
 
 
 
@@ -445,12 +533,14 @@ Matrix View
 -----------
 
 You can compare different languages efficiently using this view.
-It is available on every component page, from the :guilabel:`Tools` menu.
+It is available on every component page, from the :guilabel:`Operations` menu.
 First select all languages you want to compare, confirm your selection,
 then click on any translation to open and edit it.
 
 The matrix view is also a very good starting point to find missing
 translations in different languages, and quickly add them from one view.
+
+.. image:: /screenshots/matrix-view.webp
 
 .. _zen-mode:
 
@@ -466,3 +556,5 @@ You can select the Zen editor as your default editor using the
 You can also choose there between having translations listed
 :guilabel:`Top to bottom` or :guilabel:`Side by side`,
 depending on your personal preference.
+
+.. image:: /screenshots/zen-mode.webp

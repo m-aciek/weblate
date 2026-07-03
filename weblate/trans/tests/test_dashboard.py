@@ -8,10 +8,11 @@ from django.urls import reverse
 from weblate.accounts.models import Profile
 from weblate.lang.models import Language
 from weblate.trans.models import Announcement, ComponentList, Project
-from weblate.trans.tests.test_views import ViewTestCase
+from weblate.trans.tests.test_views import FixtureTestCase
+from weblate.utils.state import STATE_APPROVED
 
 
-class DashboardTest(ViewTestCase):
+class DashboardTest(FixtureTestCase):
     """Test for home/index view."""
 
     def setUp(self) -> None:
@@ -30,6 +31,47 @@ class DashboardTest(ViewTestCase):
     def test_view_projects(self) -> None:
         response = self.client.get(reverse("projects"))
         self.assertContains(response, "Test")
+        self.assertNotContains(response, "Unreviewed")
+
+    def test_view_projects_review_columns(self) -> None:
+        no_review = Project.objects.create(name="No review", slug="no-review")
+        self.create_po(project=no_review, name="Other")
+        self.project.translation_review = True
+        self.project.save(update_fields=["translation_review"])
+        self.change_unit("Nazdar svete!\n", state=STATE_APPROVED)
+
+        response = self.client.get(reverse("projects"))
+
+        self.assertContains(response, "Approved")
+        self.assertContains(response, "Unreviewed")
+        self.assertContains(response, "No review")
+
+        content = response.content.decode()
+        marker = 'href="/projects/no-review/"'
+        row_start = content.rfind("<tr", 0, content.index(marker))
+        row_end = content.index("</tr>", row_start)
+        no_review_row = content[row_start:row_end]
+        self.assertIn('class="number zero-width-540" data-value="0"', no_review_row)
+        self.assertIn('class="number zero-width-640" data-value="0"', no_review_row)
+        self.assertNotIn("q=state:translated ", no_review_row)
+
+        response = self.client.get(reverse("projects"), {"sort_by": "unreviewed"})
+        self.assertEqual(
+            [project.slug for project in response.context["projects"]],
+            ["no-review", "test"],
+        )
+
+        response = self.client.get(reverse("projects"), {"sort_by": "approved"})
+        self.assertEqual(
+            [project.slug for project in response.context["projects"]],
+            ["no-review", "test"],
+        )
+
+        response = self.client.get(reverse("projects"), {"sort_by": "-approved"})
+        self.assertEqual(
+            [project.slug for project in response.context["projects"]],
+            ["test", "no-review"],
+        )
 
     def test_view_projects_slash(self) -> None:
         response = self.client.get("/projects")
@@ -59,14 +101,24 @@ class DashboardTest(ViewTestCase):
         self.assertEqual(len(response.context["componentlists"]), 1)
 
     def test_component_list_ghost(self) -> None:
+        new_component = self.create_po_new_base(
+            project=self.component.project, name="New component", new_lang="add"
+        )
         clist = ComponentList.objects.create(name="TestCL", slug="testcl")
-        clist.components.add(self.component)
+        clist.components.add(new_component)
+
+        response = self.client.get(reverse("home"))
+        self.assertNotContains(response, "Spanish")
 
         self.user.profile.languages.add(Language.objects.get(code="es"))
 
-        response = self.client.get(reverse("home"))
-
-        self.assertContains(response, "Spanish")
+        response = self.client.get(
+            reverse("component-list-dashboard", kwargs={"name": "testcl"})
+        )
+        # testing for language name in text is insufficient as profile languages name
+        # is always present in the languages drop down in the top bar and hence, it would
+        # pass the test even if the ghost translation was not added.
+        self.assertContains(response, f"{new_component} — Spanish")
 
     def test_user_component_list(self) -> None:
         clist = ComponentList.objects.create(name="TestCL", slug="testcl")
@@ -103,6 +155,47 @@ class DashboardTest(ViewTestCase):
         self.user.profile.watched.add(self.project)
         response = self.client.get(reverse("home"))
         self.assertEqual(len(response.context["usersubscriptions"]), 1)
+
+    def test_watched_translations_show_inherited_license_badge(self) -> None:
+        self.project.license = "MIT"
+        self.project.save(update_fields=["license"])
+        self.component.license = ""
+        self.component.inherit_license = True
+        self.component.save(update_fields=["license", "inherit_license"])
+        self.user.profile.watched.add(self.project)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(response, "MIT License")
+        self.assertContains(response, 'class="license badge">MIT</span>')
+
+    def test_watched_translations_include_category(self) -> None:
+        category = self.create_category(self.project)
+        self.component.category = category
+        self.component.save(update_fields=["category"])
+        self.user.profile.watched.add(self.project)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertContains(
+            response,
+            f'<a href="{category.get_absolute_url()}">{category.name}</a>/'
+            f'<a href="{self.component.get_absolute_url()}">{self.component.name}</a>',
+        )
+
+    def test_watched_translations_are_sorted_by_language(self) -> None:
+        self.user.profile.languages.add(Language.objects.get(code="de"))
+        self.user.profile.watched.add(self.project)
+
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(
+            [
+                translation.language.code
+                for translation in response.context["usersubscriptions"]
+            ],
+            ["cs", "de"],
+        )
 
     def test_user_nolang(self) -> None:
         self.user.profile.languages.clear()

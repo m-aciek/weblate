@@ -4,11 +4,11 @@
 
 """Tests for review workflow."""
 
-from weblate.trans.tests.test_views import ViewTestCase
+from weblate.trans.tests.test_views import FixtureTestCase
 from weblate.utils.state import STATE_APPROVED
 
 
-class ReviewTest(ViewTestCase):
+class ReviewTest(FixtureTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.project.translation_review = True
@@ -55,6 +55,6 @@ class ReviewTest(ViewTestCase):
         self.edit_unit("Hello, world!\n", "", accept_edit=suggestion)
         self.check_result(fail)
 
-    def test_suggest_reviewr(self) -> None:
+    def test_suggest_reviewer(self) -> None:
         self.make_manager()
         self.test_suggest(False)

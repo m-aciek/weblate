@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from django.contrib.auth.decorators import login_not_required
+from django.core.serializers.json import DjangoJSONEncoder
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -103,7 +105,8 @@ def widgets(request: AuthenticatedHttpRequest, path: list[str]):
                     ],
                     "translation_status": gettext("Translation status"),
                     "widgets": widgets_json,
-                }
+                },
+                cls=DjangoJSONEncoder,
             ),
         },
     )
@@ -113,6 +116,7 @@ class WidgetRedirectView(RedirectView):
     permanent = True
     query_string = True
 
+    # pylint: disable=arguments-differ
     def get_redirect_url(
         self,
         project: str,
@@ -144,6 +148,7 @@ class WidgetRedirectView(RedirectView):
 
 
 @vary_on_cookie
+@login_not_required
 @cache_control(max_age=3600)
 def render_widget(
     request: AuthenticatedHttpRequest,
@@ -154,10 +159,9 @@ def render_widget(
 ):
     # We intentionally skip ACL here to allow widget sharing
     obj = parse_path(
-        request,
+        None,
         path,
         (Component, ProjectLanguage, Project, Translation, Language, None),
-        skip_acl=True,
     )
     lang = set_lang = None
     if isinstance(obj, Language):

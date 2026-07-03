@@ -9,7 +9,7 @@ import logging
 import re
 from datetime import timedelta
 from ipaddress import IPv6Network, ip_network
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from urllib.parse import urlparse
 
 from appconf import AppConf
@@ -17,6 +17,7 @@ from django.conf import settings
 from django.contrib import admin
 from django.contrib.auth.signals import user_logged_in
 from django.core.exceptions import ValidationError
+from django.core.signing import TimestampSigner
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import F, Q
@@ -27,11 +28,15 @@ from django.utils import timezone
 from django.utils.functional import cached_property
 from django.utils.html import format_html
 from django.utils.timezone import now
-from django.utils.translation import get_language, gettext, gettext_lazy, pgettext_lazy
+from django.utils.translation import (
+    get_language,
+    gettext,
+    gettext_lazy,
+    pgettext_lazy,
+)
 from django_otp.plugins.otp_static.models import StaticDevice
 from django_otp.plugins.otp_totp.models import TOTPDevice
 from django_otp_webauthn.models import WebAuthnCredential
-from rest_framework.authtoken.models import Token
 from social_django.models import UserSocialAuth
 from unidecode import unidecode
 
@@ -43,10 +48,10 @@ from weblate.accounts.notifications import (
     NotificationScope,
 )
 from weblate.accounts.tasks import notify_auditlog
-from weblate.auth.models import AuthenticatedHttpRequest, User
+from weblate.auth.models import User
 from weblate.lang.models import Language
 from weblate.trans.defines import EMAIL_LENGTH
-from weblate.trans.models import Change, ComponentList, Translation, Unit
+from weblate.trans.models import Change, ComponentList, Translation
 from weblate.trans.models.translation import GhostTranslation
 from weblate.utils import messages
 from weblate.utils.decorators import disable_for_loaddata
@@ -56,17 +61,33 @@ from weblate.utils.render import validate_editor
 from weblate.utils.request import get_ip_address, get_user_agent
 from weblate.utils.stats import (
     CategoryLanguageStats,
+    GhostCategoryLanguageStats,
     GhostProjectLanguageStats,
     ProjectLanguageStats,
 )
-from weblate.utils.token import get_token
-from weblate.utils.validators import EMAIL_BLACKLIST, WeblateURLValidator
+from weblate.utils.validators import (
+    EMAIL_BLACKLIST,
+    WeblateURLValidator,
+    validate_code_site_url,
+    validate_contact_url,
+    validate_fediverse_url,
+    validate_profile_url,
+)
 from weblate.wladmin.models import get_support_status
+
+from . import defaults
+from .types import ThemeChoices
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from django.http.request import HttpRequest
     from django_otp.models import Device
+    from django_stubs_ext import StrOrPromise
+
+    from weblate.accounts.types import DeviceType
+    from weblate.auth.models import AuthenticatedHttpRequest
+    from weblate.trans.models import Unit
 
 LOGGER = logging.getLogger("weblate.audit")
 
@@ -75,72 +96,74 @@ class WeblateAccountsConf(AppConf):
     """Accounts settings."""
 
     # Disable avatars
-    ENABLE_AVATARS = True
+    ENABLE_AVATARS = defaults.DEFAULT_ENABLE_AVATARS
 
     # Avatar URL prefix
-    AVATAR_URL_PREFIX = "https://www.gravatar.com/"
+    AVATAR_URL_PREFIX = defaults.DEFAULT_AVATAR_URL_PREFIX
 
     # Avatar fallback image
     # See http://en.gravatar.com/site/implement/images/ for available choices
-    AVATAR_DEFAULT_IMAGE = "identicon"
+    AVATAR_DEFAULT_IMAGE = defaults.DEFAULT_AVATAR_DEFAULT_IMAGE
 
     # Enable registrations
-    REGISTRATION_OPEN = True
+    REGISTRATION_OPEN = defaults.DEFAULT_REGISTRATION_OPEN
 
     # Allow registration from certain backends
-    REGISTRATION_ALLOW_BACKENDS = []
+    REGISTRATION_ALLOW_BACKENDS: ClassVar[list[str]] = list(
+        defaults.DEFAULT_REGISTRATION_ALLOW_BACKENDS
+    )
 
     # Allow rebinding to existing accounts
-    REGISTRATION_REBIND = False
+    REGISTRATION_REBIND = defaults.DEFAULT_REGISTRATION_REBIND
 
     # Registration email filter
-    REGISTRATION_EMAIL_MATCH = ".*"
+    REGISTRATION_EMAIL_MATCH = defaults.DEFAULT_REGISTRATION_EMAIL_MATCH
+    REGISTRATION_ALLOW_DISPOSABLE_EMAILS = (
+        defaults.DEFAULT_REGISTRATION_ALLOW_DISPOSABLE_EMAILS
+    )
 
     # Captcha for registrations
-    REGISTRATION_CAPTCHA = True
+    REGISTRATION_CAPTCHA = defaults.DEFAULT_REGISTRATION_CAPTCHA
 
-    ALTCHA_MAX_NUMBER = 1_000_000
+    ALTCHA_COST = defaults.DEFAULT_ALTCHA_COST
+    ALTCHA_MEMORY_COST = defaults.DEFAULT_ALTCHA_MEMORY_COST
+    ALTCHA_PARALLELISM = defaults.DEFAULT_ALTCHA_PARALLELISM
 
-    REGISTRATION_HINTS = {}
+    REGISTRATION_HINTS: ClassVar[dict[str, str]] = dict(
+        defaults.DEFAULT_REGISTRATION_HINTS
+    )
 
     # How long to keep auditlog entries
-    AUDITLOG_EXPIRY = 180
+    AUDITLOG_EXPIRY = defaults.DEFAULT_AUDITLOG_EXPIRY
 
     # Disable login support status check for superusers
-    SUPPORT_STATUS_CHECK = True
+    SUPPORT_STATUS_CHECK = defaults.DEFAULT_SUPPORT_STATUS_CHECK
 
     # Auto-watch setting for new users
-    DEFAULT_AUTO_WATCH = True
+    DEFAULT_AUTO_WATCH = defaults.DEFAULT_AUTO_WATCH
 
-    CONTACT_FORM = "reply-to"
+    CONTACT_FORM = defaults.DEFAULT_CONTACT_FORM
 
-    PRIVATE_COMMIT_EMAIL_TEMPLATE = "{username}@users.noreply.{site_domain}"
-    PRIVATE_COMMIT_EMAIL_OPT_IN = True
+    PRIVATE_COMMIT_EMAIL_TEMPLATE = defaults.DEFAULT_PRIVATE_COMMIT_EMAIL_TEMPLATE
+    PRIVATE_COMMIT_EMAIL_OPT_IN = defaults.DEFAULT_PRIVATE_COMMIT_EMAIL_OPT_IN
+    PRIVATE_COMMIT_NAME_TEMPLATE = defaults.DEFAULT_PRIVATE_COMMIT_NAME_TEMPLATE
+    PRIVATE_COMMIT_NAME_OPT_IN = defaults.DEFAULT_PRIVATE_COMMIT_NAME_OPT_IN
 
     # Auth0 provider default image & title on login page
-    SOCIAL_AUTH_AUTH0_IMAGE = "auth0.svg"
-    SOCIAL_AUTH_AUTH0_TITLE = "Auth0"
-    SOCIAL_AUTH_SAML_IMAGE = "saml.svg"
-    SOCIAL_AUTH_SAML_TITLE = "SAML"
+    SOCIAL_AUTH_AUTH0_IMAGE = defaults.DEFAULT_SOCIAL_AUTH_AUTH0_IMAGE
+    SOCIAL_AUTH_AUTH0_TITLE = defaults.DEFAULT_SOCIAL_AUTH_AUTH0_TITLE
+    SOCIAL_AUTH_SAML_IMAGE = defaults.DEFAULT_SOCIAL_AUTH_SAML_IMAGE
+    SOCIAL_AUTH_SAML_TITLE = defaults.DEFAULT_SOCIAL_AUTH_SAML_TITLE
 
-    MAXIMAL_PASSWORD_LENGTH = 72
+    # URL for password reset page when using external identity provider
+    PASSWORD_RESET_URL = defaults.DEFAULT_PASSWORD_RESET_URL
 
-    # Login required URLs
-    LOGIN_REQUIRED_URLS = []
-    LOGIN_REQUIRED_URLS_EXCEPTIONS = (
-        r"{URL_PREFIX}/accounts/(.*)$",  # Required for login
-        r"{URL_PREFIX}/admin/login/(.*)$",  # Required for admin login
-        r"{URL_PREFIX}/static/(.*)$",  # Required for development mode
-        r"{URL_PREFIX}/widgets/(.*)$",  # Allowing public access to widgets
-        r"{URL_PREFIX}/data/(.*)$",  # Allowing public access to data exports
-        r"{URL_PREFIX}/hooks/(.*)$",  # Allowing public access to notification hooks
-        r"{URL_PREFIX}/healthz/$",  # Allowing public access to health check
-        r"{URL_PREFIX}/api/(.*)$",  # Allowing access to API
-        r"{URL_PREFIX}/js/i18n/$",  # JavaScript localization
-        r"{URL_PREFIX}/contact/$",  # Optional for contact form
-        r"{URL_PREFIX}/legal/(.*)$",  # Optional for legal app
-        r"{URL_PREFIX}/avatar/(.*)$",  # Optional for avatars
-        r"{URL_PREFIX}/site.webmanifest$",  # The request for the manifest is made without credentials
+    MAXIMAL_PASSWORD_LENGTH = defaults.DEFAULT_MAXIMAL_PASSWORD_LENGTH
+
+    # Multi-level rate limiting for email notifications
+    # Each tuple contains (max_emails, time_window_seconds)
+    RATELIMIT_NOTIFICATION_LIMITS: ClassVar[list[tuple[int, int]]] = list(
+        defaults.DEFAULT_RATELIMIT_NOTIFICATION_LIMITS
     )
 
     class Meta:
@@ -153,8 +176,9 @@ DOT_ATOM_RE = re.compile(
 )
 
 
-def format_private_email(username: str, user_id: int) -> str:
-    if not settings.PRIVATE_COMMIT_EMAIL_TEMPLATE:
+def format_private_commit_data(template: str, username: str, user_id: int) -> str:
+    """Format private commit data (email or name) using a template."""
+    if not template:
         return ""
     if username:
         if username.endswith(".") or ".." in username:
@@ -167,13 +191,21 @@ def format_private_email(username: str, user_id: int) -> str:
             username = ""
     if not username:
         username = f"user-{user_id}"
-    return settings.PRIVATE_COMMIT_EMAIL_TEMPLATE.format(
+
+    return template.format(
         username=username.lower(),
+        user_id=user_id,
         site_domain=settings.SITE_DOMAIN.rsplit(":", 1)[0],
+        site_title=settings.SITE_TITLE,
     )
 
 
-class SubscriptionQuerySet(models.QuerySet["Subscription"]):
+def get_default_contribute_personal_tm() -> bool:
+    """Return default value for personal TM contribution."""
+    return not settings.DEFAULT_AUTOCLEAN_TM
+
+
+class SubscriptionQuerySet(models.QuerySet["Subscription", "Subscription"]):
     def order(self):
         """Ordering in project scope by priority."""
         return self.order_by("user", "scope")
@@ -183,6 +215,8 @@ class SubscriptionQuerySet(models.QuerySet["Subscription"]):
 
 
 class Subscription(models.Model):
+    SIGNATURE_MAX_AGE: ClassVar[int] = 24 * 3600
+
     user = models.ForeignKey(User, on_delete=models.deletion.CASCADE)
     notification = models.CharField(
         choices=[n.get_choice() for n in NOTIFICATIONS], max_length=100
@@ -202,7 +236,7 @@ class Subscription(models.Model):
     class Meta:
         verbose_name = "Notification subscription"
         verbose_name_plural = "Notification subscriptions"
-        constraints = [
+        constraints = [  # ruff: ignore[mutable-class-default]
             models.UniqueConstraint(
                 name="accounts_subscription_notification_unique",
                 fields=("notification", "scope", "project", "component", "user"),
@@ -213,6 +247,31 @@ class Subscription(models.Model):
     def __str__(self) -> str:
         return f"{self.user.username}:{self.get_scope_display()},{self.get_notification_display()} ({self.project},{self.component})"
 
+    @staticmethod
+    def sign_id(subscription_id: int | str) -> str:
+        return TimestampSigner().sign(str(subscription_id))
+
+    def get_signed_id(self) -> str:
+        return self.sign_id(self.pk)
+
+    @classmethod
+    def get_by_signed_id(cls, signed_id: str) -> Subscription:
+        return cls.objects.get(
+            pk=int(TimestampSigner().unsign(signed_id, max_age=cls.SIGNATURE_MAX_AGE))
+        )
+
+    def get_unsubscribe_url(self) -> str:
+        from django.urls import reverse  # ruff: ignore[import-outside-top-level, unsorted-imports]
+
+        # ruff: ignore[import-outside-top-level]
+        from django.utils.http import (
+            urlencode,
+        )
+
+        return f"{reverse('unsubscribe')}?{urlencode({'i': self.get_signed_id()})}"
+
+
+EXTERNAL_CREATE_ACTIVITY = "external-create"
 
 ACCOUNT_ACTIVITY = {
     # Translators: Audit log entry
@@ -267,17 +326,49 @@ ACCOUNT_ACTIVITY = {
         "translations uploaded by other user."
     ),
     # Translators: Audit log entry
+    EXTERNAL_CREATE_ACTIVITY: gettext_lazy(
+        "Account created externally from weblate.org for access to purchased services."
+    ),
+    # Translators: Audit log entry
     "blocked": gettext_lazy("Access to project {project} was blocked."),
     # Translators: Audit log entry
     "enabled": gettext_lazy("User was enabled by administrator."),
     # Translators: Audit log entry
     "disabled": gettext_lazy("User was disabled by administrator."),
     # Translators: Audit log entry
+    "disabled-expiry": gettext_lazy(
+        "User was disabled because the access has expired."
+    ),
+    # Translators: Audit log entry
+    "sitewide-team-add": gettext_lazy(
+        "User was added to the site-wide {team} team by {username}."
+    ),
+    # Translators: Audit log entry
+    "sitewide-team-change": gettext_lazy(
+        "User access to the site-wide {team} team was changed by {username}."
+    ),
+    # Translators: Audit log entry
+    "sitewide-team-remove": gettext_lazy(
+        "User was removed from the site-wide {team} team by {username}."
+    ),
+    # Translators: Audit log entry
+    "superuser-granted": gettext_lazy("Superuser privileges granted."),
+    # Translators: Audit log entry
+    "superuser-revoked": gettext_lazy("Superuser privileges revoked."),
+    # Translators: Audit log entry
     "donate": gettext_lazy("Semiannual support status review was displayed."),
     # Translators: Audit log entry
     "team-add": gettext_lazy("User was added to the {team} team by {username}."),
     # Translators: Audit log entry
+    "team-change": gettext_lazy(
+        "User access to the {team} team was changed by {username}."
+    ),
+    # Translators: Audit log entry
     "team-remove": gettext_lazy("User was removed from the {team} team by {username}."),
+    # Translators: Audit log entry
+    "token-created": gettext_lazy("Project token for {project} was created."),
+    # Translators: Audit log entry
+    "token-removed": gettext_lazy("Project token for {project} was removed."),
     # Translators: Audit log entry
     "recovery-generate": gettext_lazy(
         "Two-factor authentication recovery codes were generated"
@@ -292,8 +383,20 @@ ACCOUNT_ACTIVITY = {
     "twofactor-remove": gettext_lazy("Two-factor authentication removed: {device}"),
     # Translators: Audit log entry
     "twofactor-login": gettext_lazy("Two-factor authentication sign in using {device}"),
+    # Translators: Audit log entry
+    "twofactor-failed": gettext_lazy(
+        "Two-factor authentication failed using {device_type}"
+    ),
 }
-AUDIT_WARNING = {"locked", "removed", "failed-auth", "admin-locked"}
+AUDIT_WARNING = {
+    "admin-locked",
+    "failed-auth",
+    "locked",
+    "removed",
+    "superuser-granted",
+    "superuser-revoked",
+    "twofactor-failed",
+}
 # Override activity messages based on method
 ACCOUNT_ACTIVITY_METHOD = {
     "password": {
@@ -327,11 +430,11 @@ EXTRA_MESSAGES = {
     ),
     # Translators: Audit log hint
     "register": gettext_lazy(
-        "If it was you, please use a password reset to regain access to your account."
+        "If it was you, reset your password to regain access to your account."
     ),
     # Translators: Audit log hint
     "connect": gettext_lazy(
-        "If it was you, please use a password reset to regain access to your account."
+        "If it was you, reset your password to regain access to your account."
     ),
 }
 
@@ -351,8 +454,28 @@ NOTIFY_ACTIVITY = {
     "blocked",
     "recovery-generate",
     "recovery-show",
+    "superuser-granted",
+    "superuser-revoked",
     "twofactor-add",
     "twofactor-remove",
+    "twofactor-failed",
+}
+
+
+# Taken from https://github.com/selwin/python-user-agents/blob/master/user_agents/parsers.py
+USER_AGENT_DEVICE_TYPES: dict[str, StrOrPromise] = {
+    # Translators: User agent device type
+    "PC": pgettext_lazy("User agent device type", "PC"),
+    # Translators: User agent device type
+    "Other": pgettext_lazy("User agent device type", "Other"),
+    # Translators: User agent device type
+    "Generic Smartphone": pgettext_lazy("User agent device type", "Generic Smartphone"),
+    # Translators: User agent device type
+    "Generic Feature Phone": pgettext_lazy(
+        "User agent device type", "Generic Feature Phone"
+    ),
+    # Translators: User agent device type
+    "iOS-Device": pgettext_lazy("User agent device type", "iOS-Device"),
 }
 
 
@@ -371,11 +494,20 @@ class AuditLogManager(models.Manager):
 
         return not logins.filter(Q(address=address) | Q(user_agent=user_agent)).exists()
 
-    def create(
-        self, user: User, request: AuthenticatedHttpRequest | None, activity, **params
+    def create(  # type: ignore[override]
+        self, user: User, request: HttpRequest | None, activity: str, **params
     ):
-        address = get_ip_address(request)
-        user_agent = get_user_agent(request)
+        address: str | None = None
+        user_agent: str = ""
+        # Log only address for own actions (unauthenticated or when the request user matches audit user)
+        if request and (
+            not hasattr(request, "user")
+            or not request.user
+            or not request.user.is_authenticated
+            or request.user == user
+        ):
+            address = get_ip_address(request)
+            user_agent = get_user_agent(request)
         if activity == "login" and self.is_new_login(user, address, user_agent):
             activity = "login-new"
         return super().create(
@@ -387,8 +519,8 @@ class AuditLogManager(models.Manager):
         )
 
 
-class AuditLogQuerySet(models.QuerySet["AuditLog"]):
-    def get_after(self, user: User, after, activity):
+class AuditLogQuerySet(models.QuerySet["AuditLog", "AuditLog"]):
+    def get_after(self, user: User, after: str, activity: str) -> AuditLogQuerySet:
         """
         Get user activities of given type after another activity.
 
@@ -396,7 +528,9 @@ class AuditLogQuerySet(models.QuerySet["AuditLog"]):
         authentication attempts since last login.
         """
         try:
-            latest_login = self.filter(user=user, activity=after).order()[0]
+            latest_login = self.filter(
+                user=user, activity__in={after, "reset"}
+            ).order()[0]
             kwargs = {"timestamp__gte": latest_login.timestamp}
         except IndexError:
             kwargs = {}
@@ -434,13 +568,15 @@ class AuditLog(models.Model):
         verbose_name_plural = "Audit log entries"
 
     def __str__(self) -> str:
-        return f"{self.activity} for {self.user.username} from {self.address}"
+        if self.user:
+            return f"{self.activity} for {self.user.username} from {self.address}"
+        return f"{self.activity} from {self.address}"
 
     def save(self, *args, **kwargs) -> None:
         super().save(*args, **kwargs)
 
         # User notification
-        if self.should_notify():
+        if self.should_notify() and self.user:
             email = self.user.email
             notify_auditlog.delay_on_commit(self.pk, email)
 
@@ -449,14 +585,16 @@ class AuditLog(models.Model):
             logging.WARNING if self.activity in AUDIT_WARNING else logging.INFO,
             "audit[%s]: %s from %s",
             self.activity,
-            self.user.username if self.user else None,
+            self.user.username if self.user else "<no-user>",
             self.address,
         )
 
-    def get_params(self):
-        from weblate.accounts.templatetags.authnames import get_auth_name
+    def get_params(self) -> dict[str, Any]:
+        from weblate.accounts.templatetags.authnames import (  # ruff: ignore[import-outside-top-level]
+            get_auth_name,
+        )
 
-        result = {
+        result: dict[str, Any] = {
             "site_title": settings.SITE_TITLE,
         }
         for name, value in self.params.items():
@@ -481,14 +619,33 @@ class AuditLog(models.Model):
             message = ACCOUNT_ACTIVITY_METHOD[method][activity]
         else:
             message = ACCOUNT_ACTIVITY[activity]
-        return format_html(message, **self.get_params())
+        return format_html(str(message), **self.get_params())
 
-    def get_extra_message(self):
+    def get_extra_message(self) -> str | None:
+        if self.activity in {
+            "superuser-granted",
+            "superuser-revoked",
+            "token-created",
+            "token-removed",
+        } and self.params.get("username"):
+            return gettext("Triggered by {username}.").format(**self.params)
         if self.activity in EXTRA_MESSAGES:
             return EXTRA_MESSAGES[self.activity].format(**self.params)
         return None
 
-    def should_notify(self):
+    def get_user_agent_display(self) -> str:
+        """Return a user agent string with a localized first device-type segment."""
+        ua_string = self.user_agent
+        if not ua_string:
+            return ""
+
+        parts = ua_string.split(" / ")
+        device_type = parts[0].strip()
+        parts[0] = str(USER_AGENT_DEVICE_TYPES.get(device_type, device_type))
+
+        return " / ".join(parts)
+
+    def should_notify(self) -> bool:
         return (
             self.user is not None
             and not self.user.is_bot
@@ -500,10 +657,29 @@ class AuditLog(models.Model):
 
     def check_rate_limit(self, request: AuthenticatedHttpRequest) -> bool:
         """Check whether the activity should be rate limited."""
-        from weblate.accounts.utils import lock_user
+        # ruff: ignore[import-outside-top-level]
+        from weblate.accounts.utils import (
+            lock_user,
+        )
 
-        if self.activity == "failed-auth" and self.user.has_usable_password():
+        if (
+            self.activity == "failed-auth"
+            and self.user
+            and self.user.has_usable_password()
+        ):
             failures = AuditLog.objects.get_after(self.user, "login", "failed-auth")
+            if failures.count() >= settings.AUTH_LOCK_ATTEMPTS:
+                lock_user(self.user, "locked", request)
+                return True
+
+        elif (
+            self.activity == "twofactor-failed"
+            and self.user
+            and self.user.has_usable_password()
+        ):
+            failures = AuditLog.objects.get_after(
+                self.user, "twofactor-login", "twofactor-failed"
+            )
             if failures.count() >= settings.AUTH_LOCK_ATTEMPTS:
                 lock_user(self.user, "locked", request)
                 return True
@@ -539,7 +715,7 @@ class VerifiedEmail(models.Model):
     class Meta:
         verbose_name = "Verified e-mail"
         verbose_name_plural = "Verified e-mails"
-        indexes = [
+        indexes = [  # ruff: ignore[mutable-class-default]
             models.Index(
                 Upper("email"),
                 name="accounts_verifiedemail_email",
@@ -593,11 +769,7 @@ class Profile(models.Model):
         max_length=10,
         verbose_name=gettext_lazy("Theme"),
         default="auto",
-        choices=(
-            ("auto", pgettext_lazy("Theme selection", "Sync with system")),
-            ("light", pgettext_lazy("Theme selection", "Light")),
-            ("dark", pgettext_lazy("Theme selection", "Dark")),
-        ),
+        choices=ThemeChoices,
     )
     hide_completed = models.BooleanField(
         verbose_name=gettext_lazy("Hide completed translations on the dashboard"),
@@ -671,7 +843,7 @@ class Profile(models.Model):
     )
     contribute_personal_tm = models.BooleanField(
         verbose_name=gettext_lazy("Contribute to personal translation memory"),
-        default=True,
+        default=get_default_contribute_personal_tm,
         help_text=gettext_lazy(
             "Allow your translations to be added to your personal translation memory."
         ),
@@ -685,13 +857,13 @@ class Profile(models.Model):
 
     DASHBOARD_CHOICES = (
         (DASHBOARD_WATCHED, gettext_lazy("Watched translations")),
-        (DASHBOARD_COMPONENT_LISTS, gettext_lazy("Component lists")),
+        (DASHBOARD_COMPONENT_LISTS, gettext_lazy("All component lists")),
         (DASHBOARD_COMPONENT_LIST, gettext_lazy("Component list")),
         (DASHBOARD_SUGGESTIONS, gettext_lazy("Suggested translations")),
         (DASHBOARD_MANAGED, gettext_lazy("Managed projects")),
     )
 
-    DASHBOARD_SLUGS = {
+    DASHBOARD_SLUGS: ClassVar[dict[int, str]] = {
         DASHBOARD_WATCHED: "your-subscriptions",
         DASHBOARD_COMPONENT_LIST: "list",
         DASHBOARD_SUGGESTIONS: "suggestions",
@@ -727,12 +899,12 @@ class Profile(models.Model):
     website = models.URLField(
         verbose_name=gettext_lazy("Website URL"),
         blank=True,
-        validators=[WeblateURLValidator()],
+        validators=[WeblateURLValidator(), validate_profile_url],
     )
     contact = models.URLField(
         verbose_name=gettext_lazy("Contact URL"),
         blank=True,
-        validators=[WeblateURLValidator()],
+        validators=[WeblateURLValidator(), validate_contact_url],
         help_text=gettext_lazy(
             "Link to contact you online using services like Signal, SimpleX or Telegram."
         ),
@@ -753,7 +925,7 @@ class Profile(models.Model):
             "Link to your Fediverse profile for federated services "
             "like Mastodon or diaspora*."
         ),
-        validators=[WeblateURLValidator()],
+        validators=[WeblateURLValidator(), validate_fediverse_url],
     )
     codesite = models.URLField(
         verbose_name=gettext_lazy("Code site URL"),
@@ -761,7 +933,7 @@ class Profile(models.Model):
         help_text=gettext_lazy(
             "Link to your code profile for services like Codeberg or GitLab."
         ),
-        validators=[WeblateURLValidator()],
+        validators=[WeblateURLValidator(), validate_code_site_url],
     )
     github = models.SlugField(
         verbose_name=gettext_lazy("GitHub username"),
@@ -802,6 +974,17 @@ class Profile(models.Model):
         verbose_name=gettext_lazy("Commit e-mail"),
         blank=True,
         max_length=EMAIL_LENGTH,
+    )
+
+    class CommitNameChoices(models.IntegerChoices):
+        DEFAULT = 0, gettext_lazy("Use global default")
+        PUBLIC = 1, gettext_lazy("Public")
+        PRIVATE = 2, gettext_lazy("Private")
+
+    commit_name = models.IntegerField(
+        verbose_name=gettext_lazy("Commit name"),
+        default=CommitNameChoices.DEFAULT,
+        choices=CommitNameChoices.choices,
     )
 
     last_2fa = models.CharField(
@@ -856,7 +1039,7 @@ class Profile(models.Model):
 
     @property
     def full_name(self):
-        """Return user's full name."""
+        """User's full name."""
         return self.user.full_name
 
     def clean(self) -> None:
@@ -951,15 +1134,14 @@ class Profile(models.Model):
         self, request: AuthenticatedHttpRequest | None
     ) -> Callable[
         [
-            Iterable[
-                Unit
-                | Translation
-                | Language
-                | ProjectLanguageStats
-                | CategoryLanguageStats
-                | GhostProjectLanguageStats
-                | GhostTranslation
-            ]
+            Unit
+            | Translation
+            | Language
+            | ProjectLanguageStats
+            | CategoryLanguageStats
+            | GhostProjectLanguageStats
+            | GhostCategoryLanguageStats
+            | GhostTranslation
         ],
         str,
     ]:
@@ -972,9 +1154,13 @@ class Profile(models.Model):
             | ProjectLanguageStats
             | CategoryLanguageStats
             | GhostProjectLanguageStats
+            | GhostCategoryLanguageStats
             | GhostTranslation,
         ) -> str:
-            from weblate.trans.models import Unit
+            # ruff: ignore[import-outside-top-level]
+            from weblate.trans.models import (
+                Unit,
+            )
 
             language: Language
             is_source = False
@@ -991,6 +1177,7 @@ class Profile(models.Model):
                     ProjectLanguageStats,
                     CategoryLanguageStats,
                     GhostProjectLanguageStats,
+                    GhostCategoryLanguageStats,
                     GhostTranslation,
                 ),
             ):
@@ -1079,7 +1266,29 @@ class Profile(models.Model):
         return email
 
     def get_site_commit_email(self) -> str:
-        return format_private_email(self.user.username, self.user.pk)
+        return format_private_commit_data(
+            settings.PRIVATE_COMMIT_EMAIL_TEMPLATE, self.user.username, self.user.pk
+        )
+
+    def get_commit_name(self) -> str:
+        """Return the commit name to be used for version-control commits."""
+        visible_name = self.user.get_visible_name()
+        if (
+            self.user.is_bot
+            or self.commit_name == self.CommitNameChoices.PUBLIC
+            or (
+                self.commit_name == self.CommitNameChoices.DEFAULT
+                and settings.PRIVATE_COMMIT_NAME_OPT_IN
+            )
+        ):
+            return visible_name
+        return self.get_site_commit_name() or visible_name
+
+    def get_site_commit_name(self) -> str:
+        """Return the generated private commit name from the site template."""
+        return format_private_commit_data(
+            settings.PRIVATE_COMMIT_NAME_TEMPLATE, self.user.username, self.user.pk
+        )
 
     def _get_second_factors(self) -> Iterable[Device]:
         backend: type[Device]
@@ -1092,19 +1301,25 @@ class Profile(models.Model):
 
     @cached_property
     def second_factor_types(self) -> set[Literal["totp", "webauthn", "recovery"]]:
-        from weblate.accounts.utils import get_key_type
+        # ruff: ignore[import-outside-top-level]
+        from weblate.accounts.utils import (
+            get_key_type,
+        )
 
         return {get_key_type(device) for device in self.second_factors}
 
     @property
     def has_2fa(self) -> bool:
         return any(
-            isinstance(device, TOTPDevice | WebAuthnCredential)
+            isinstance(device, (TOTPDevice, WebAuthnCredential))
             for device in self.second_factors
         )
 
     def log_2fa(self, request: AuthenticatedHttpRequest, device: Device) -> None:
-        from weblate.accounts.utils import get_key_name, get_key_type
+        from weblate.accounts.utils import (  # ruff: ignore[import-outside-top-level]
+            get_key_name,
+            get_key_type,
+        )
 
         # Audit log entry
         AuditLog.objects.create(
@@ -1116,9 +1331,16 @@ class Profile(models.Model):
             self.last_2fa = device_type
             self.save(update_fields=["last_2fa"])
 
+    def log_2fa_failed(
+        self, request: AuthenticatedHttpRequest, device_type: DeviceType
+    ) -> None:
+        AuditLog.objects.create(
+            self.user, request, "twofactor-failed", device_type=device_type
+        )
+
     def get_second_factor_type(self) -> Literal["totp", "webauthn"]:
         if self.last_2fa in self.second_factor_types:
-            return self.last_2fa
+            return self.last_2fa  # type: ignore[return-value]
         for tested in ("webauthn", "totp"):
             if tested in self.second_factor_types:
                 return tested
@@ -1201,10 +1423,13 @@ def post_login_handler(
 def create_profile_callback(sender, instance, created=False, **kwargs) -> None:
     """Automatically create token and profile for user."""
     if created:
-        # Create API token
-        instance.auth_token = Token.objects.create(
-            user=instance, key=get_token("wlp" if instance.is_bot else "wlu")
+        # ruff: ignore[import-outside-top-level]
+        from weblate.accounts.utils import (
+            create_api_token,
         )
+
+        # Create API token
+        instance.auth_token = create_api_token(instance)
         # Create profile
         instance.profile = Profile.objects.create(user=instance)
         # Create subscriptions

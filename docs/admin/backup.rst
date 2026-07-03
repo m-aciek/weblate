@@ -10,27 +10,35 @@ Project level backups
 
 .. versionadded:: 4.14
 
-.. warning::
-
-   Restoring backups is only supported when using PostgreSQL or MariaDB 10.5+ as a database.
-
 The project backups all translation content from Weblate (project, components,
 translations, string comments, suggestions or checks). It is suitable for
 transferring a project to another Weblate instance.
 
-You can perform a project backup in :guilabel:`Manage` ↓ :guilabel:`Backups`.
+You can perform a project backup in :guilabel:`Operations` ↓ :guilabel:`Backups`.
 The backup can be restored when creating a project (see
 :ref:`adding-projects`).
 
+.. note::
+
+   Project backups can also be created, listed, and downloaded through the
+   :ref:`api` since version 2026.7;
+
 The backups currently do not include access control information and history.
 
-The comments and suggestions are backed up with an username of user who did
+The comments and suggestions are backed up with the username of the user who did
 create them. Upon import it is assigned to a matching user. If there is no user
 with such username, it is assigned to anonymous user.
 
 The generated backups are kept on the server as configured by
 :setting:`PROJECT_BACKUP_KEEP_DAYS` and :setting:`PROJECT_BACKUP_KEEP_COUNT`
 (it defaults to keep at most 3 backups for 30 days).
+
+Import validation of uploaded project backups can be tuned using
+:setting:`PROJECT_BACKUP_IMPORT_MAX_MEMBERS`,
+:setting:`PROJECT_BACKUP_IMPORT_MAX_TOTAL_UNCOMPRESSED_SIZE`,
+:setting:`PROJECT_BACKUP_IMPORT_MAX_COMPRESSED_ENTRY_SIZE`,
+:setting:`PROJECT_BACKUP_IMPORT_MIN_RATIO_SIZE`, and
+:setting:`PROJECT_BACKUP_IMPORT_MAX_COMPRESSED_ENTRY_RATIO`.
 
 Use the generated file to import project when :ref:`adding-projects` or in :wladmin:`import_projectbackup`.
 
@@ -54,7 +62,7 @@ the cloud. The backups can be controlled in the management interface from the
 
 .. versionchanged:: 4.4.1
 
-   Both PostgreSQL and MySQL/MariaDB databases are included in the automated backups.
+   PostgreSQL databases are included in the automated backups.
 
 The backups using Borg are incremental and Weblate is configured to keep following backups:
 
@@ -148,7 +156,7 @@ to create it but needs the appropriate permissions to do so.
               - /home/weblate/data:/app/data
               - /home/weblate/borgbackup:/borgbackup
 
-    The directory where backups will be stored have to be owned by UID 1000,
+    The directory where backups will be stored has to be owned by UID 1000,
     otherwise Weblate won’t be able to write the backups there.
 
 Remote backups
@@ -162,8 +170,10 @@ via SSH using the Weblate SSH key:
 2. Install the SSH server on it (you will get it by default with most Linux distributions).
 3. Install `BorgBackup`_ on that server; most Linux distributions have packages available (see :doc:`borg:installation`).
 4. Choose an existing user or create a new user that will be used for backing up.
-5. Add Weblate SSH key to the user so that Weblate can SSH to the server without a password (see :ref:`weblate-ssh-key`).
-6. Configure the backup location in Weblate as ``user@host:/path/to/backups`` or ``ssh://user@host:port/path/to/backups``.
+5. Add Weblate SSH key to the user's `.ssh/authorized_keys` file, so that Weblate can SSH to the server without a password (see :ref:`weblate-ssh-key`).
+6. Create a user-writable directory where Weblate can remotely set up the Borg backup repository, for example in the home directory (i.e. ``/home/borg/backups``).
+7. Configure the backup location in Weblate as ``user@host:/home/borg/backups`` or ``ssh://user@host:port/home/borg/backups``.
+8. Once enabled, the backups will be triggered automatically daily. You can also manually trigger a backup from the Weblate UI or using :ref:`backup-management-command`.
 
 .. hint::
 
@@ -171,7 +181,8 @@ via SSH using the Weblate SSH key:
 
 .. seealso::
 
-   :ref:`weblate-ssh-key`, :doc:`borg:usage/general`
+   * :ref:`weblate-ssh-key`
+   * :doc:`borg:usage/general`
 
 .. _restore-borg:
 
@@ -213,8 +224,87 @@ The Borg session might look like this:
 
 .. seealso::
 
-   :doc:`borg:usage/list`,
-   :doc:`borg:usage/extract`
+   * :doc:`borg:usage/list`
+   * :doc:`borg:usage/extract`
+
+
+.. _restore-docker:
+
+Restoring Docker based setup
+----------------------------
+
+The following steps assume the official Docker Compose setup using the bundled
+PostgreSQL and Valkey services, see :doc:`install/docker`. If your deployment
+uses an external database or a customized Compose file, adapt the database and
+volume steps to that environment.
+
+Start with a Docker Compose checkout matching the restored deployment. Restore
+your original Compose overrides, secrets, and environment variables. The
+:file:`environment.yml` file from :ref:`backup-dumps` can help with this, but
+it is not imported automatically.
+
+1. Restore the backup archive using :ref:`restore-borg` or unpack your manual
+   backup so that the Weblate data directory and
+   :file:`backups/database.sql` are available.
+
+2. Stop the services which can write to the database or data volume:
+
+   .. code-block:: shell
+
+      docker compose stop weblate cache
+
+3. Recreate the PostgreSQL volume.
+
+   .. code-block:: shell
+
+      docker compose stop database
+      docker compose rm -v database
+      docker volume remove weblate-docker_postgres-data
+
+   The volume name depends on the Compose project name and can differ from
+   :file:`weblate-docker_postgres-data`. Check your setup before removing any
+   volume.
+
+4. Start the database service:
+
+   .. code-block:: shell
+
+      docker compose up -d database
+
+5. Restore the database dump:
+
+   .. code-block:: shell
+
+      cat backups/database.sql | docker compose exec -T database psql --username weblate --dbname weblate
+
+   Check that the database name matches :envvar:`POSTGRES_DB` and the user
+   matches :envvar:`POSTGRES_USER` in your Compose configuration.
+
+6. Restore the Weblate data directory to the Docker data volume mounted as
+   :file:`/app/data`, see :ref:`docker-volume`. Files in this volume have to be
+   owned by UID 1000, see :ref:`file-permissions`.
+
+7. Start the remaining services and follow the logs:
+
+   .. code-block:: shell
+
+      docker compose up -d
+      docker compose logs -f
+
+   The Weblate container performs database migrations on startup. If you are
+   also upgrading Weblate, follow :ref:`upgrading-docker`.
+
+8. Refresh the repositories after the restore:
+
+   .. code-block:: shell
+
+      docker compose exec --user weblate weblate weblate updategit --all
+
+.. seealso::
+
+   * :ref:`backup-dumps`
+   * :ref:`docker-postgres-upgrade`
+   * :ref:`docker-volume`
 
 
 .. _BorgBackup: https://www.borgbackup.org/
@@ -250,8 +340,8 @@ Native database backup
 ++++++++++++++++++++++
 
 The recommended approach is to save a dump of the database using database-native
-tools such as :program:`pg_dump` or :program:`mysqldump`. It usually performs
-better than Django backup, and it restores complete tables with all their data.
+tools such as :program:`pg_dump`. It usually performs better than Django backup,
+and it restores complete tables with all their data.
 
 You can restore this backup in a newer Weblate release, it will perform all the
 necessary migrations when running in :wladmin:`migrate`. Please consult
@@ -337,6 +427,9 @@ If you are using SSH or GPG keys generated by Weblate, you should back up these
 locations. Otherwise you will lose the private keys and you will have to
 regenerate new ones.
 
+Generated SSH wrapper scripts are stored in :setting:`CACHE_DIR` and do not
+need to be backed up.
+
 User uploaded files
 +++++++++++++++++++
 
@@ -390,5 +483,5 @@ by following the backing up and restoration instructions above.
 
 .. seealso::
 
-   `Upgrading from Python 2 to Python 3 in the Weblate 3.11.1 documentation <https://docs.weblate.org/en/weblate-3.11.1/admin/upgrade.html#upgrading-from-python-2-to-python-3>`_,
-   :ref:`database-migration`
+   * `Upgrading from Python 2 to Python 3 in the Weblate 3.11.1 documentation <https://docs.weblate.org/en/weblate-3.11.1/admin/upgrade.html#upgrading-from-python-2-to-python-3>`_
+   * :ref:`database-migration`

@@ -6,6 +6,7 @@ from datetime import timedelta
 
 from django.test.utils import modify_settings, override_settings
 from django.utils import timezone
+from django_otp.plugins.otp_totp.models import TOTPDevice
 
 from weblate.auth.data import (
     GLOBAL_PERM_NAMES,
@@ -15,11 +16,12 @@ from weblate.auth.data import (
 )
 from weblate.auth.models import Group, Permission, Role, User
 from weblate.trans.models import Comment, Project
-from weblate.trans.tests.test_views import FixtureTestCase
+from weblate.trans.tests.test_views import FixtureComponentTestCase
 from weblate.trans.tests.utils import create_test_billing
+from weblate.workspaces.models import Workspace
 
 
-class PermissionsTest(FixtureTestCase):
+class PermissionsTest(FixtureComponentTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.user = User.objects.create_user("user", "test@example.com")
@@ -87,18 +89,82 @@ class PermissionsTest(FixtureTestCase):
         self.assertFalse(self.admin.has_perm("management.use"))
         self.assertFalse(self.user.has_perm("management.use"))
 
-    def test_global_perms_granted(self) -> None:
+    def grant_global_management_permission(
+        self, *, enforced_2fa: bool = False, user: User | None = None
+    ) -> None:
+        target = user or self.user
         permission = Permission.objects.get(codename="management.use")
 
         role = Role.objects.create(name="Nearly superuser")
         role.permissions.add(permission)
 
-        group = Group.objects.create(name="Nearly superuser")
+        group = Group.objects.create(name="Nearly superuser", enforced_2fa=enforced_2fa)
         group.roles.add(role)
 
-        self.user.groups.add(group)
+        target.groups.add(group)
+        target.clear_permissions_cache()
+
+    def test_global_perms_granted(self) -> None:
+        self.grant_global_management_permission()
 
         self.assertTrue(self.user.has_perm("management.use"))
+
+    def test_global_perms_granted_with_enforced_2fa(self) -> None:
+        self.grant_global_management_permission(enforced_2fa=True)
+
+        self.assertFalse(self.user.has_perm("management.use"))
+
+        TOTPDevice.objects.create(user=self.user)
+        user = User.objects.get(pk=self.user.pk)
+
+        self.assertTrue(user.has_perm("management.use"))
+
+    def test_global_perms_granted_with_enforced_2fa_bot(self) -> None:
+        bot = User.objects.create_user(
+            "management-bot", "management-bot@example.com", is_bot=True
+        )
+        self.grant_global_management_permission(enforced_2fa=True, user=bot)
+
+        self.assertTrue(bot.has_perm("management.use"))
+
+    def test_workspace_permissions_are_not_sitewide(self) -> None:
+        workspace = Workspace.objects.create(name="Global workspace")
+        group = Group.objects.get(name="Managers")
+        self.user.groups.add(group)
+
+        self.assertFalse(self.user.has_perm("workspace.edit", workspace))
+
+    def test_workspace_permissions_are_not_project_scoped(self) -> None:
+        workspace = Workspace.objects.create(name="Project workspace")
+        self.project.workspace = workspace
+        self.project.save(update_fields=["workspace"])
+        self.admin.clear_permissions_cache()
+
+        self.assertFalse(self.admin.has_perm("workspace.edit", workspace))
+
+    def test_workspace_permissions(self) -> None:
+        workspace = Workspace.objects.create(name="Workspace")
+        workspace.add_owner(self.user)
+
+        self.assertTrue(self.user.has_perm("workspace.edit", workspace))
+
+    def test_administration_role_is_project_scoped(self) -> None:
+        self.assertFalse(
+            Role.objects.get(name="Administration").permissions.filter(
+                codename="workspace.edit"
+            )
+        )
+        self.assertTrue(
+            Role.objects.get(name="Workspace administration").permissions.filter(
+                codename="workspace.edit"
+            )
+        )
+
+    def test_project_creators_can_add_workspaces(self) -> None:
+        self.user.groups.add(Group.objects.get(name="Project creators"))
+
+        self.assertTrue(self.user.has_perm("project.add"))
+        self.assertTrue(self.user.has_perm("workspace.add"))
 
     def test_restricted_component(self) -> None:
         self.assertTrue(self.superuser.has_perm("unit.edit", self.component))
@@ -139,7 +205,7 @@ class PermissionsTest(FixtureTestCase):
 
         project = Project.objects.get(pk=self.project.pk)
         billing = create_test_billing(self.admin)
-        billing.projects.add(project)
+        billing.add_project(project)
 
         # The default plan allows
         self.assertTrue(self.superuser.has_perm("billing:project.permissions", project))
@@ -159,13 +225,13 @@ class PermissionsTest(FixtureTestCase):
         self.assertTrue(self.user.has_perm("unit.edit", self.component))
 
         # Block user
-        self.user.clear_cache()
+        self.user.clear_permissions_cache()
         self.user.userblock_set.create(project=self.project)
         self.assertFalse(self.user.has_perm("unit.edit", self.component))
         self.user.userblock_set.all().delete()
 
         # Block user with past expiry
-        self.user.clear_cache()
+        self.user.clear_permissions_cache()
         self.user.userblock_set.create(
             project=self.project, expiry=timezone.now() - timedelta(days=1)
         )
@@ -173,7 +239,7 @@ class PermissionsTest(FixtureTestCase):
         self.user.userblock_set.all().delete()
 
         # Block user with future expiry
-        self.user.clear_cache()
+        self.user.clear_permissions_cache()
         self.user.userblock_set.create(
             project=self.project, expiry=timezone.now() + timedelta(days=1)
         )
@@ -301,7 +367,7 @@ class PermissionsTest(FixtureTestCase):
         # Public projects with membership
         group.project_selection = SELECTION_ALL_PUBLIC
         group.save()
-        self.user.clear_cache()
+        self.user.clear_permissions_cache()
         self.assertEqual(
             list(
                 self.user.projects_with_perm("project.edit").values_list(
@@ -322,7 +388,7 @@ class PermissionsTest(FixtureTestCase):
         # Protected projects without membership
         self.project.access_control = Project.ACCESS_PROTECTED
         self.project.save()
-        self.user.clear_cache()
+        self.user.clear_permissions_cache()
         self.assertEqual(
             list(
                 self.user.projects_with_perm("project.edit").values_list(
@@ -343,7 +409,7 @@ class PermissionsTest(FixtureTestCase):
         # Protected projects with membership
         group.project_selection = SELECTION_ALL_PROTECTED
         group.save()
-        self.user.clear_cache()
+        self.user.clear_permissions_cache()
         self.assertEqual(
             list(
                 self.user.projects_with_perm("project.edit").values_list(
@@ -361,6 +427,6 @@ class PermissionsTest(FixtureTestCase):
             [],
         )
 
-    def test_meta_team_edit_perm(self):
+    def test_meta_team_edit_perm(self) -> None:
         self.assertTrue(self.admin.has_perm("meta:team.edit", self.project))
         self.assertFalse(self.admin.has_perm("meta:team.edit"))

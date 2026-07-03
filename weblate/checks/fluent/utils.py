@@ -10,21 +10,25 @@ from typing import TYPE_CHECKING
 from django.utils.html import escape, format_html, format_html_join
 from django.utils.safestring import mark_safe
 from translate.storage.fluent import (
-    FluentPart,
-    FluentReference,
-    FluentSelectorBranch,
     FluentUnit,
 )
+
+from weblate.checks.base import Highlight
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
     from django.utils.safestring import SafeString
+    from translate.storage.fluent import (
+        FluentPart,
+        FluentReference,
+        FluentSelectorBranch,
+    )
 
     from weblate.checks.models import Check as CheckModel
     from weblate.trans.models.unit import Unit as TransUnitModel
 
-HighlightsType = list[tuple[int, int, str]]
+HighlightsType = list[Highlight]
 
 
 def translation_from_check(
@@ -47,11 +51,12 @@ def format_html_code(
     }
     if safe_kwargs:
         return format_html(escape(format_string), **safe_kwargs)
-    return mark_safe(escape(format_string))  # noqa: S308
+    # ruff: ignore[suspicious-mark-safe-usage]
+    return mark_safe(escape(format_string))
 
 
 def format_html_error_list(errors: Iterable[str]) -> SafeString:
-    """Return a HTML SafeString with each given error on a new line."""
+    """Return an HTML SafeString with each given error on a new line."""
     return format_html_join(
         mark_safe("<br />"),
         "{}",
@@ -63,7 +68,7 @@ def variant_name(branches: list[FluentSelectorBranch]) -> str:
     """Get a variant name for the given branch path."""
     if not branches:
         return ""
-    return "[" + "][".join(branch.key for branch in branches) + "]"
+    return f"[{']['.join(branch.key for branch in branches)}]"
 
 
 class FluentPatterns:
@@ -72,31 +77,11 @@ class FluentPatterns:
     BLANK = r"( |\n|\r\n)*"
     # Match string or number literals.
     ESCAPED_CHAR = r'(\\\\|\\"|\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{6})'
-    STRING_LITERAL = r'"(' + ESCAPED_CHAR + r'|[^"\\])*"'
+    STRING_LITERAL = rf'"({ESCAPED_CHAR}|[^"\\])*"'
     NUMBER_LITERAL = r"-?[0-9]+(\.[0-9]+)?"
     IDENTIFIER = r"[a-zA-Z][a-zA-Z0-9_-]*"
-    NAMED_ARGUMENT = (
-        IDENTIFIER
-        + BLANK
-        + r":"
-        + BLANK
-        + r"("
-        + STRING_LITERAL
-        + r"|"
-        + NUMBER_LITERAL
-        + r")"
-    )
-    NAMED_ARGUMENT_LIST = (
-        r"("
-        + NAMED_ARGUMENT
-        + BLANK
-        + r","
-        + BLANK
-        + r")*"
-        + r"("
-        + NAMED_ARGUMENT
-        + r")?"
-    )
+    NAMED_ARGUMENT = f"{IDENTIFIER}{BLANK}:{BLANK}({STRING_LITERAL}|{NUMBER_LITERAL})"
+    NAMED_ARGUMENT_LIST = rf"({NAMED_ARGUMENT}{BLANK},{BLANK})*({NAMED_ARGUMENT})?"
     NAMED_ARGUMENTS_CALL = BLANK + r"\(" + BLANK + NAMED_ARGUMENT_LIST + BLANK + r"\)"
 
     @classmethod
@@ -125,7 +110,7 @@ class FluentPatterns:
             # Instead, we just build the regex to match named arguments, which
             # can only be string or number literals.
             return cls.placeable(
-                r"-" + re.escape(ref.name) + r"(" + cls.NAMED_ARGUMENTS_CALL + ")?"
+                rf"-{re.escape(ref.name)}({cls.NAMED_ARGUMENTS_CALL})?"
             )
         if ref.type_name == "variable":
             return cls.placeable(r"\$" + re.escape(ref.name))
@@ -186,7 +171,8 @@ class FluentPatterns:
                     else:
                         # Remove the leading "\u" or "\U" and convert hex
                         # sequence to a number.
-                        unicode_point = int(chars[2:], 16)  # noqa: FURB166
+                        # ruff: ignore[int-on-sliced-str]
+                        unicode_point = int(chars[2:], 16)
                         try:
                             # Try unescape the unicode sequence.
                             literal += chr(unicode_point)
@@ -211,9 +197,7 @@ class FluentPatterns:
         Generate a list of highlights for the given source.
 
         Highlights all matches for the patterns in highlight_patterns, except
-        within a literal expression. Returns the highlights as a list of
-        3-tuples of the highlighted regions' starting positions, ending
-        positions and text.
+        within a literal expression.
         """
         unique_highlights = {p for p in highlight_patterns if p}
         if not unique_highlights:
@@ -223,7 +207,12 @@ class FluentPatterns:
         for start, text, _ in cls.split_literal_expressions(source):
             # NOTE: text may be empty if two literals touch.
             highlights.extend(
-                (start + match.start(), start + match.end(), match.group())
+                Highlight(
+                    start + match.start(),
+                    start + match.end(),
+                    match.group(),
+                    kind="grammar",
+                )
                 for match in regex.finditer(text)
             )
         return highlights

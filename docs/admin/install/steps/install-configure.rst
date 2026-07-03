@@ -3,7 +3,7 @@ Configuring Weblate
 
 .. note::
 
-   The following assumes the virtualenv used by Weblate is activated
+   The following assumes the Python environment used by Weblate is activated
    (by executing ``. ~/weblate-env/bin/activate``). If not, specify the full path
    to the :command:`weblate` command as ``~/weblate-env/bin/weblate``.
 
@@ -60,7 +60,7 @@ Configuring Weblate
 
    .. code-block:: sh
 
-         ~/weblate-env/lib/python3.9/site-packages/weblate/examples/celery start
+         celery --app=weblate.utils worker --beat --queues=celery,notify,memory,translate,backup
 
 #. Start the development server (:ref:`server` details a production setup):
 

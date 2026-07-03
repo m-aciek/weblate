@@ -4,9 +4,13 @@
 
 """Tests for comment views."""
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
-from weblate.trans.models import Comment
+from weblate.auth.data import SELECTION_ALL
+from weblate.auth.models import Group, UserBlock
+from weblate.trans.models import Comment, Project
 from weblate.trans.tests.test_views import FixtureTestCase
 
 
@@ -39,7 +43,7 @@ class CommentViewTest(FixtureTestCase):
     def test_add_long_comment(self) -> None:
         unit = self.get_unit()
 
-        # Add comment which is 1000 charters long, but is using \r\n as newlines
+        # Add comment which is 1000 characters long, but is using \r\n as newlines
         # which makes it too long. This happens in the browser as it counts newline
         # as a single character, but posts it as \r\n.
         response = self.client.post(
@@ -155,3 +159,102 @@ class CommentViewTest(FixtureTestCase):
         comment.refresh_from_db()
         self.assertTrue(comment.resolved)
         self.assertFalse(comment.unit.has_comment)
+
+    def test_comment_views_hide_private_unit_and_comment(self) -> None:
+        self.project.access_control = Project.ACCESS_PRIVATE
+        self.project.save(update_fields=["access_control"])
+        self.user.clear_permissions_cache()
+
+        unit = self.get_unit()
+        comment = Comment.objects.create(
+            user=self.anotheruser, unit=unit, comment="Hidden comment"
+        )
+
+        response = self.client.post(
+            reverse("comment", kwargs={"pk": unit.pk}),
+            {"comment": "Probe comment", "scope": "translation"},
+        )
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.post(
+            reverse("delete-comment", kwargs={"pk": comment.pk})
+        )
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.post(
+            reverse("resolve-comment", kwargs={"pk": comment.pk})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_comment_views_hide_blocked_project_for_all_projects_user(self) -> None:
+        group = Group.objects.create(
+            name="All projects comments", project_selection=SELECTION_ALL
+        )
+        self.user.groups.add(group)
+        UserBlock.objects.create(user=self.user, project=self.project)
+        self.user.clear_permissions_cache()
+
+        unit = self.get_unit()
+        comment = Comment.objects.create(
+            user=self.anotheruser, unit=unit, comment="Blocked comment"
+        )
+
+        response = self.client.post(
+            reverse("comment", kwargs={"pk": unit.pk}),
+            {"comment": "Probe comment", "scope": "translation"},
+        )
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.post(
+            reverse("delete-comment", kwargs={"pk": comment.pk})
+        )
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.post(
+            reverse("resolve-comment", kwargs={"pk": comment.pk})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_translate_comment_queries_do_not_scale_with_comment_count(self) -> None:
+        unit = self.get_unit()
+        self.make_manager()
+
+        def render_queries() -> int:
+            for _unused in range(2):
+                session = self.client.session
+                session.clear()
+                session.save()
+                response = self.client.get(
+                    unit.translation.get_translate_url(),
+                    {"checksum": unit.checksum},
+                )
+                self.assertEqual(response.status_code, 200)
+
+            session = self.client.session
+            session.clear()
+            session.save()
+            with CaptureQueriesContext(connection) as queries:
+                response = self.client.get(
+                    unit.translation.get_translate_url(),
+                    {"checksum": unit.checksum},
+                )
+            self.assertEqual(response.status_code, 200)
+            return len(queries)
+
+        Comment.objects.filter(unit__in=(unit, unit.source_unit)).delete()
+        Comment.objects.create(
+            unit=unit,
+            comment="Comment 0",
+            user=self.anotheruser,
+        )
+        baseline_queries = render_queries()
+
+        Comment.objects.filter(unit__in=(unit, unit.source_unit)).delete()
+        for index in range(5):
+            Comment.objects.create(
+                unit=unit,
+                comment=f"Comment {index}",
+                user=self.anotheruser,
+            )
+
+        self.assertEqual(render_queries(), baseline_queries)

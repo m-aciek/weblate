@@ -1,7 +1,3 @@
-# Copyright © Michal Čihař <michal@weblate.org>
-#
-# SPDX-License-Identifier: GPL-3.0-or-later
-
 """Simple quality check example."""
 
 from django.utils.translation import gettext_lazy
@@ -15,7 +11,8 @@ class FooCheck(TargetCheck):
     check_id = "foo"
 
     # Short name used to display failing check
-    name = gettext_lazy("Foo check")
+    # Might be localized using gettext_lazy
+    name = "Foo check"
 
     # Description for failing check
     description = gettext_lazy("Your translation is foo")

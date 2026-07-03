@@ -25,15 +25,17 @@ INI translations are usually used as monolingual translations.
 
 .. seealso::
 
-    :doc:`tt:formats/ini`,
-    :ref:`javaprop`,
-    :ref:`joomla`,
-    :ref:`islu`
+   * :doc:`tt:formats/ini`
+   * :ref:`javaprop`
+   * :ref:`joomla`
+   * :ref:`islu`
 
 Example file:
 
 .. literalinclude:: ../../weblate/trans/tests/data/cs.ini
     :language: ini
+
+.. include:: /snippets/format-features/ini-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

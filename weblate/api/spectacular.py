@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from django.utils.functional import lazy
 from django.utils.translation import gettext_lazy
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def get_doc_url_wrapper(page: str, anchor: str = "") -> str:
@@ -16,16 +19,35 @@ def get_doc_url_wrapper(page: str, anchor: str = "") -> str:
     Wrap get_doc_url to delay get_doc_url import.
 
     It cannot be imported directly, because get_spectacular_settings is used
-    from settings and get_doc_url needs settings to determine if it should hide t
-    he version info.
+    from settings.
     """
+    # ruff: ignore[import-outside-top-level]
     from weblate.utils.docs import get_doc_url
 
-    return get_doc_url(page, anchor)
+    return get_doc_url(page, anchor, doc_version="latest")
+
+
+def get_legal_terms_url(
+    legal_hidden_documents: Sequence[str] | str = (), legal_url: str | None = None
+) -> str | None:
+    if isinstance(legal_hidden_documents, str):
+        hidden_documents = legal_hidden_documents.split(",")
+    else:
+        hidden_documents = legal_hidden_documents
+
+    for document in hidden_documents:
+        if document.strip() == "terms":
+            return legal_url
+    return "/legal/terms/"
 
 
 def get_spectacular_settings(
-    installed_apps: list[str], site_url: str, site_title: str
+    installed_apps: list[str],
+    site_url: str,
+    site_title: str,
+    *,
+    legal_hidden_documents: Sequence[str] | str = (),
+    legal_url: str | None = None,
 ) -> dict[str, Any]:
     settings = {
         # Use redoc from sidecar
@@ -49,13 +71,14 @@ def get_spectacular_settings(
                 },
             },
         },
+        "SWAGGER_UI_DIST": "SIDECAR",
+        "DEFAULT_GENERATOR_CLASS": "weblate.api.generators.WeblateSchemaGenerator",
         # OpenAPI Specification version: 'webhooks' field is supported from 3.1.0
         "OAS_VERSION": "3.1.1",
         "SERVERS": [
             {"url": site_url.rstrip("/"), "description": site_title},
         ],
-        # Document only API (not webauthn and other drf endpoints)
-        "SERVE_URLCONF": "weblate.api.urls",
+        "SERVE_URLCONF": "weblate.urls",
         "TITLE": gettext_lazy("Weblate's REST API"),
         "LICENSE": {
             "name": "GNU General Public License v3 or later",
@@ -82,6 +105,9 @@ The OpenAPI specification is available as feature preview, feedback welcome!
         # Flatten enum definitions
         "ENUM_NAME_OVERRIDES": {
             "ColorEnum": "weblate.utils.colors.ColorChoices.choices",
+            "StringStateEnum": "weblate.utils.state.StringState.choices",
+            "NewUnitStateEnum": "weblate.api.serializers.NEW_UNIT_STATE_CHOICES",
+            "ErrorResponse400TypeEnum": "weblate.api.serializers.ErrorResponse400TypeEnum.choices",
             "ValidationErrorEnum": "drf_standardized_errors.openapi_serializers.ValidationErrorEnum.choices",
             "ClientErrorEnum": "drf_standardized_errors.openapi_serializers.ClientErrorEnum.choices",
             "ServerErrorEnum": "drf_standardized_errors.openapi_serializers.ServerErrorEnum.choices",
@@ -97,7 +123,12 @@ The OpenAPI specification is available as feature preview, feedback welcome!
         },
         "POSTPROCESSING_HOOKS": [
             "drf_standardized_errors.openapi_hooks.postprocess_schema_enums",
+            "weblate.api.docs.strip_field_choice_descriptions",
+            "weblate.api.docs.document_all_static_vcs_choices",
             "weblate.api.docs.add_middleware_headers",
+            "weblate.api.docs.simplify_license_schema",
+            "weblate.api.docs.document_user_group_delete_body",
+            "weblate.api.docs.simplify_media_types",
         ],
         "EXTERNAL_DOCS": {
             "url": lazy(get_doc_url_wrapper, str)("index"),
@@ -196,12 +227,14 @@ The OpenAPI specification is available as feature preview, feedback welcome!
         "WEBHOOKS": ["weblate.addons.webhooks.change_event_webhook"],
     }
     if "weblate.legal" in installed_apps:
-        settings["TOS"] = "/legal/terms/"
+        terms_url = get_legal_terms_url(legal_hidden_documents, legal_url)
+        if terms_url:
+            settings["TOS"] = terms_url
 
     return settings
 
 
-def get_drf_standardized_errors_sertings() -> dict[str, Any]:
+def get_drf_standardized_errors_settings() -> dict[str, Any]:
     return {
         "ALLOWED_ERROR_STATUS_CODES": [
             "400",
@@ -216,6 +249,7 @@ def get_drf_standardized_errors_sertings() -> dict[str, Any]:
             "500",
         ],
         "ERROR_SCHEMAS": {
+            "400": "weblate.api.serializers.ErrorResponse400Serializer",
             "423": "weblate.api.serializers.ErrorResponse423Serializer",
         },
         "EXCEPTION_HANDLER_CLASS": "weblate.api.views.WeblateExceptionHandler",
@@ -257,5 +291,5 @@ def get_drf_settings(
         "VIEW_DESCRIPTION_FUNCTION": "weblate.api.views.get_view_description",
         "EXCEPTION_HANDLER": "drf_standardized_errors.handler.exception_handler",
         "UNAUTHENTICATED_USER": "weblate.auth.models.get_anonymous",
-        "DEFAULT_SCHEMA_CLASS": "drf_standardized_errors.openapi.AutoSchema",
+        "DEFAULT_SCHEMA_CLASS": "weblate.api.generators.WeblateAutoSchema",
     }

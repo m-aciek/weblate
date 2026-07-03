@@ -19,10 +19,15 @@ linting, and other tasks to ensure code quality.
 
 There are several jobs to verify different aspects:
 
-* Unit tests
-* Documentation build and external links
+* Unit and functional tests using `pytest <https://pytest.org/>`_.
+* Documentation build and external links using `Sphinx <https://www.sphinx-doc.org/>`_.
+* Code linting and quality assurance using `ruff <https://docs.astral.sh/ruff/>`_ and `pylint <https://www.pylint.org/>`_.
+* Code security scanning using `CodeQL <https://codeql.github.com/>`_.
+* Visual changes testing is utilizing `Argos CI <https://argos-ci.com>`_.
+* Code formatting using :pypi:`prek`, a faster
+  third-party reimplementation of the `pre-commit <https://pre-commit.com/>`_
+  framework.
 * Migration testing from all supported releases
-* Code linting
 * Setup verification (ensures that generated dist files do not miss anything and can be tested)
 
 The configuration for the CI is in :file:`.github/workflows` directory. It
@@ -30,6 +35,14 @@ heavily uses helper scripts stored in :file:`ci` directory. The scripts can be
 also executed manually, but they require several environment variables, mostly
 defining Django settings file to use and test database connection. The example
 definition of that is in :file:`scripts/test-database.sh`:
+
+The Selenium screenshot tests in :file:`weblate/trans/tests/test_selenium.py`
+serve two purposes. They generate images for visual change testing in CI, and
+the same images are converted into documentation screenshots by
+:command:`make -C docs update-screenshots`. Keep screenshot fixtures close to
+real rendered pages so CI catches UI regressions. When a screenshot includes
+volatile runtime data, prefer deterministic server-side test inputs over
+post-render DOM changes.
 
 .. literalinclude:: ../../scripts/test-database.sh
    :language: sh
@@ -48,7 +61,11 @@ The simple execution can look like:
 Local testing of Weblate
 +++++++++++++++++++++++++
 
-Before running test, please ensure test dependencies are installed. This can be done by ``pip install -e .[test]``.
+Before running tests, please ensure development dependencies are installed:
+
+.. code-block:: sh
+
+   uv sync --all-extras --dev
 
 Testing using pytest
 ~~~~~~~~~~~~~~~~~~~~
@@ -57,19 +74,19 @@ Prior to running tests you should collect static files as some tests rely on the
 
 .. code-block:: sh
 
-    DJANGO_SETTINGS_MODULE=weblate.settings_test ./manage.py collectstatic
+    DJANGO_SETTINGS_MODULE=weblate.settings_test uv run ./manage.py collectstatic --noinput
 
-You can use `pytest` to run a testsuite locally:
+You can use `pytest` to run the test suite locally:
 
 .. code-block:: sh
 
-   pytest weblate
+   uv run pytest
 
 Running an individual test file:
 
 .. code-block:: sh
 
-   pytest weblate/utils/tests/test_search.py
+   uv run pytest weblate/utils/tests/test_search.py
 
 .. hint::
 
@@ -84,7 +101,6 @@ The :file:`weblate/settings_test.py` is used in CI environment as well (see
 
 .. code-block:: sh
 
-   export CI_DATABASE=postgresql
    export CI_DB_USER=weblate
    export CI_DB_PASSWORD=weblate
    export CI_DB_HOST=127.0.0.1
@@ -104,14 +120,33 @@ The :file:`weblate/settings_test.py` is used in CI environment as well (see
 Local testing of Weblate modules
 --------------------------------
 
-The tests are executed using :program:`py.test`. First you need to install test requirements:
+The tests are executed using :program:`pytest`. First you need to install development dependencies:
 
 .. code-block:: sh
 
-   uv pip install -e '.[dev]'
+   uv sync --all-extras --dev
 
 You can then execute the testsuite in the repository checkout:
 
 .. code-block:: sh
 
-   py.test
+   uv run pytest
+
+.. _test-data:
+
+Testing repository
+------------------
+
+Many of the tests in the Weblate test suite use the test repository. The test
+suite repository is maintained at https://github.com/WeblateOrg/test. The
+script :file:`scripts/pack-test-data.sh` is then used to generate a tarball
+with a repository for each of the supported version control systems. These are
+stored as :file:`weblate/trans/tests/data/test-base-repo.git.tar`,
+:file:`weblate/trans/tests/data/test-base-repo.hg.tar`, and
+:file:`weblate/trans/tests/data/test-base-repo.svn.tar` in the Weblate
+repository.
+
+The https://github.com/WeblateOrg/test repository is tagged at the release
+time, which ensures that the release tags can be used to access test data used
+at the release time. The script tries to create reproducible tarballs as much
+as possible.

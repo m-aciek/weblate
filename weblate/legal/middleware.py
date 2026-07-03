@@ -26,7 +26,7 @@ class RequireTOSMiddleware:
         self.get_response = get_response
         # Ignored paths regexp, mostly covers API and legal pages
         self.matcher = re.compile(
-            r"^/(legal|about|contact|api|static|widgets|data|hooks)/"
+            r"^/(legal|about|contact|api|static|widget|data|hooks|avatar|healthz|js|css)/"
         )
 
     def process_view(
@@ -52,10 +52,7 @@ class RequireTOSMiddleware:
                 ),
             )
             return redirect(
-                "{}?{}".format(
-                    reverse("legal:confirm"),
-                    urlencode({"next": request.get_full_path()}),
-                )
+                f"{reverse('legal:confirm')}?{urlencode({'next': request.get_full_path()})}"
             )
 
         # Explicitly return None for all non-matching requests

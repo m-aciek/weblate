@@ -5,22 +5,50 @@
 from __future__ import annotations
 
 import copy
+import json
 import os.path
 import re
 import shutil
+
+# ruff: ignore[suspicious-subprocess-import]
+import subprocess
 import tempfile
-from typing import Any, NoReturn
-from unittest.mock import patch
+from configparser import RawConfigParser
+from contextlib import ExitStack
+from datetime import datetime
+from io import BytesIO
+from os import utime
+from pathlib import Path
+from time import time
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NoReturn, Protocol
+from unittest.mock import call, patch
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import responses
-from django.test import TestCase
+from django.core.cache import cache
+from django.test import SimpleTestCase, TestCase
 from django.test.utils import override_settings
 from django.utils import timezone
 from responses import matchers
 
+from weblate.trans import defaults
 from weblate.trans.models import Component, Project
 from weblate.trans.tests.utils import RepoTestMixin, TempDirMixin
-from weblate.vcs.base import Repository, RepositoryError
+from weblate.utils.files import REPO_TEMP_DIRNAME
+from weblate.utils.render import render_template
+from weblate.utils.zip import ZipSafetyLimits
+from weblate.vcs.base import (
+    RepositoryCommandError,
+    RepositoryError,
+    RepositoryRestrictedPathError,
+    RepositorySymlinkError,
+    RepositoryValidationError,
+    get_config_check_cache_key,
+    is_ssh_host_key_mismatch_error,
+    is_ssh_host_key_verification_error,
+    parse_commit_date,
+    should_auto_add_ssh_host_key,
+)
 from weblate.vcs.git import (
     AzureDevOpsRepository,
     BitbucketCloudRepository,
@@ -29,6 +57,7 @@ from weblate.vcs.git import (
     GitForcePushRepository,
     GithubRepository,
     GitLabRepository,
+    GitMergeRequestBase,
     GitRepository,
     GitWithGerritRepository,
     LocalRepository,
@@ -36,6 +65,13 @@ from weblate.vcs.git import (
     SubversionRepository,
 )
 from weblate.vcs.mercurial import HgRepository
+from weblate.vcs.ssh import SSH_WRAPPER
+
+if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+    from unittest.mock import MagicMock
+
+    from weblate.vcs.base import Repository
 
 
 class AzureDevOpsFakeRepository(AzureDevOpsRepository):
@@ -51,6 +87,18 @@ class GithubFakeRepository(GithubRepository):
 class GitLabFakeRepository(GitLabRepository):
     _is_supported = None
     _version = None
+
+
+class ExecuteSideEffect(Protocol):
+    def __call__(self, args: list[str], **kwargs: object) -> str: ...
+
+
+class GitLockRecoveryMocks(NamedTuple):
+    has_rev: MagicMock
+    merge: MagicMock
+    rebase: MagicMock
+    checkout_with_temp_cleanup: MagicMock
+    execute: MagicMock
 
 
 class GiteaFakeRepository(GiteaRepository):
@@ -96,7 +144,81 @@ class GitNoVersionRepository(GitRepository):
     req_version = None
 
 
-class RepositoryTest(TestCase):
+class BrokenGitRepository(GitRepository):
+    _version = None
+
+    @classmethod
+    def _get_version(cls):
+        msg = "missing git"
+        raise FileNotFoundError(msg)
+
+
+class BrokenGitChildRepository(BrokenGitRepository):
+    _version = None
+
+    @classmethod
+    def _get_version(cls):
+        return "1.0"
+
+
+class RepositoryTest(SimpleTestCase):
+    def create_git_repository(
+        self,
+        tempdir: str,
+        *,
+        branch: str = "main",
+        git_dirs: tuple[str, ...] = (),
+    ) -> tuple[GitRepository, Path]:
+        git_dir = Path(tempdir) / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").touch()
+        for git_dir_name in git_dirs:
+            (git_dir / git_dir_name).mkdir()
+        return GitRepository(tempdir, branch=branch, local=True), git_dir
+
+    def make_stale_lock(self, lockfile: Path) -> None:
+        lockfile.parent.mkdir(parents=True, exist_ok=True)
+        lockfile.touch()
+        past_timestamp = time() - 7200
+        utime(lockfile, (past_timestamp, past_timestamp))
+
+    def enter_patch_contexts(
+        self, *contexts: AbstractContextManager[MagicMock]
+    ) -> tuple[MagicMock, ...]:
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        return tuple(stack.enter_context(context) for context in contexts)
+
+    def mock_git_lock_recovery(
+        self, repo: GitRepository, *, current_branch: str
+    ) -> GitLockRecoveryMocks:
+        _, has_rev, _, merge, rebase, checkout, execute = self.enter_patch_contexts(
+            patch.object(repo, "get_current_branch", return_value=current_branch),
+            patch.object(repo, "has_rev", return_value=False),
+            patch.object(repo, "has_git_file", return_value=False),
+            patch.object(repo, "merge"),
+            patch.object(repo, "rebase"),
+            patch.object(repo, "checkout_with_temp_cleanup"),
+            patch.object(repo, "execute"),
+        )
+        return GitLockRecoveryMocks(
+            has_rev=has_rev,
+            merge=merge,
+            rebase=rebase,
+            checkout_with_temp_cleanup=checkout,
+            execute=execute,
+        )
+
+    def mock_interrupted_git_rebase_recovery(
+        self, repo: GitRepository, *, execute_side_effect: ExecuteSideEffect
+    ) -> None:
+        self.enter_patch_contexts(
+            patch.object(repo, "has_rev", return_value=False),
+            patch.object(repo, "needs_commit", return_value=False),
+            patch.object(repo, "get_current_branch", return_value="main"),
+            patch.object(repo, "execute", side_effect=execute_side_effect),
+        )
+
     def test_not_supported(self) -> None:
         self.assertFalse(NonExistingRepository.is_supported())
         with self.assertRaises(FileNotFoundError):
@@ -114,16 +236,951 @@ class RepositoryTest(TestCase):
     def test_is_supported_no_version(self) -> None:
         self.assertTrue(GitNoVersionRepository.is_supported())
 
+    def test_parse_commit_date_normalizes_naive_datetime(self) -> None:
+        # ruff: ignore[call-datetime-without-tzinfo]
+        parsed = parse_commit_date(datetime(2026, 5, 7, 12, 30))
+        self.assertTrue(timezone.is_aware(parsed))
+
+    def test_parse_commit_date_normalizes_naive_string(self) -> None:
+        parsed = parse_commit_date("2026-05-07 12:30:00")
+        self.assertTrue(timezone.is_aware(parsed))
+
     def test_is_supported_cache(self) -> None:
         GitTestRepository.is_supported()
         self.assertTrue(GitTestRepository.is_supported())
+
+    def test_version_error_cache_is_per_class(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            BrokenGitRepository.get_version()
+
+        self.assertEqual(BrokenGitChildRepository.get_version(), "1.0")
+
+    def test_repository_command_error_negative_retcode_shows_signal_hint(self) -> None:
+        error = RepositoryCommandError(-15, "Rebasing (59/194)")
+
+        self.assertEqual(
+            str(error),
+            "Rebasing (59/194)\n\n"
+            "The underlying command was terminated by signal SIGTERM, usually because the worker or host was restarted or stopped during the operation. (-15)",
+        )
+
+    def test_repository_error_negative_retcode_keeps_original_message(self) -> None:
+        error = RepositoryError(-1, "Can not switch subversion URL")
+
+        self.assertEqual(str(error), "Can not switch subversion URL (-1)")
+
+    def test_popen_retry_does_not_duplicate_command(self) -> None:
+        failed_process = subprocess.CompletedProcess(
+            args=["git", "reset", "--hard"],
+            returncode=1,
+            stdout="fatal: lock failed",
+            stderr=None,
+        )
+        successful_process = subprocess.CompletedProcess(
+            args=["git", "reset", "--hard"],
+            returncode=0,
+            stdout="",
+            stderr=None,
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            patch.object(GitRepository, "should_retry_popen", return_value=True),
+            patch(
+                "weblate.vcs.base.subprocess.run",
+                side_effect=[failed_process, successful_process],
+            ) as run,
+        ):
+            # ruff: ignore[private-member-access]
+            GitRepository._popen(["reset", "--hard"], cwd=cwd)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["args"] for call in run.call_args_list],
+            [["git", "reset", "--hard"], ["git", "reset", "--hard"]],
+        )
+
+    def test_popen_missing_working_tree_raises_repository_error(self) -> None:
+        cwd = os.path.join(tempfile.gettempdir(), "missing-working-tree")
+        error = FileNotFoundError(2, "No such file or directory", cwd)
+
+        with (
+            patch("weblate.vcs.base.subprocess.run", side_effect=error),
+            self.assertRaises(RepositoryCommandError) as context,
+        ):
+            # ruff: ignore[private-member-access]
+            GitRepository._popen(["status"], cwd=cwd)
+
+        self.assertIs(context.exception.__cause__, error)
+        self.assertEqual(context.exception.retcode, 2)
+        self.assertIn(cwd, str(context.exception))
+
+    def test_config_check_cache_key_is_versioned(self) -> None:
+        self.assertRegex(
+            get_config_check_cache_key(42),
+            r"^sp-config-check-v\d+-[0-9a-f]{64}-42$",
+        )
+
+    def test_mercurial_repository_uses_hg_temp_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo_path = Path(tempdir)
+            (repo_path / ".hg").mkdir()
+
+            repo = HgRepository(tempdir, local=True)
+
+            self.assertEqual(
+                repo.get_repo_temp_dir(), repo_path / ".hg" / REPO_TEMP_DIRNAME
+            )
+
+    def test_mercurial_recovery_cleans_temp_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo_path = Path(tempdir)
+            (repo_path / ".hg").mkdir()
+
+            repo = HgRepository(tempdir, local=True)
+            temp_dir = repo.get_repo_temp_dir()
+            if temp_dir is None:
+                self.fail("Expected Mercurial temp dir to exist")
+            temp_file = temp_dir / "leftover.tmp"
+            temp_file.write_text("temp", encoding="utf-8")
+
+            with repo.lock:
+                repo.recover_lock_session()
+
+            self.assertFalse(temp_file.exists())
+
+    def test_cleanup_repo_temp_dir_unlinks_directory_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo_path = Path(tempdir)
+            (repo_path / ".hg").mkdir()
+
+            repo = HgRepository(tempdir, local=True)
+            temp_dir = repo.get_repo_temp_dir()
+            if temp_dir is None:
+                self.fail("Expected Mercurial temp dir to exist")
+
+            target_dir = repo_path / "target-dir"
+            target_dir.mkdir()
+            symlink_path = temp_dir / "linked-dir"
+            try:
+                symlink_path.symlink_to(target_dir, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"Symlinks are not supported: {error}")
+
+            repo.cleanup_repo_temp_dir()
+
+            self.assertFalse(symlink_path.exists())
+            self.assertTrue(target_dir.exists())
+
+    def test_cleanup_repo_temp_dir_ignores_unlink_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo_path = Path(tempdir)
+            (repo_path / ".hg").mkdir()
+
+            repo = HgRepository(tempdir, local=True)
+            temp_dir = repo.get_repo_temp_dir()
+            if temp_dir is None:
+                self.fail("Expected Mercurial temp dir to exist")
+
+            blocked_file = temp_dir / "blocked.tmp"
+            blocked_file.write_text("blocked", encoding="utf-8")
+            removable_file = temp_dir / "removable.tmp"
+            removable_file.write_text("removable", encoding="utf-8")
+
+            original_unlink = Path.unlink
+
+            def mocked_unlink(path: Path, *args, **kwargs) -> None:
+                if path == blocked_file:
+                    msg = "blocked"
+                    raise PermissionError(msg)
+                original_unlink(path, *args, **kwargs)
+
+            with (
+                self.assertLogs("weblate.vcs", level="WARNING") as captured_logs,
+                patch.object(Path, "unlink", autospec=True, side_effect=mocked_unlink),
+            ):
+                repo.cleanup_repo_temp_dir()
+
+            self.assertTrue(blocked_file.exists())
+            self.assertFalse(removable_file.exists())
+            self.assertIn(
+                "Failed to clean repository temp entry", captured_logs.output[0]
+            )
+
+    def test_lock_session_recovery_runs_once_per_outer_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo_path = Path(tempdir)
+            (repo_path / ".hg").mkdir()
+
+            repo = HgRepository(tempdir, local=True)
+
+            with patch.object(repo, "recover_lock_session") as recover_lock_session:
+                with repo.lock:
+                    self.assertEqual(recover_lock_session.call_count, 1)
+                    repo.ensure_lock_session_recovered()
+                    with repo.lock:
+                        self.assertEqual(recover_lock_session.call_count, 1)
+
+                with repo.lock:
+                    self.assertEqual(recover_lock_session.call_count, 2)
+
+    def test_lock_session_recovery_can_be_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo_path = Path(tempdir)
+            (repo_path / ".hg").mkdir()
+
+            repo = HgRepository(tempdir, local=True)
+
+            with (
+                patch.object(
+                    repo,
+                    "recover_lock_session",
+                    side_effect=RepositoryError(128, "recovery failed"),
+                ) as recover_lock_session,
+                repo.lock.without_recovery(),
+                repo.lock,
+            ):
+                pass
+
+            recover_lock_session.assert_not_called()
+
+    def test_git_lock_session_recovery_aborts_interrupted_rebase(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(
+                tempdir, git_dirs=("rebase-merge",)
+            )
+            lockfile = git_dir / "CHERRY_PICK_HEAD.lock"
+            self.make_stale_lock(lockfile)
+
+            abort_attempts = 0
+
+            def mocked_execute(args: list[str], **kwargs) -> str:
+                nonlocal abort_attempts
+                if args == ["rebase", "--abort"]:
+                    abort_attempts += 1
+                    if abort_attempts == 1:
+                        raise RepositoryCommandError(
+                            128,
+                            f"fatal: cannot lock ref 'CHERRY_PICK_HEAD': Unable to create '{lockfile}': File exists.",
+                        )
+                    (git_dir / "rebase-merge").rmdir()
+                    return ""
+                msg = f"Unexpected command: {args!r}"
+                raise AssertionError(msg)
+
+            self.mock_interrupted_git_rebase_recovery(
+                repo, execute_side_effect=mocked_execute
+            )
+            with repo.lock:
+                pass
+
+            self.assertEqual(abort_attempts, 2)
+            self.assertFalse(lockfile.exists())
+
+    def test_git_lock_session_recovery_cleans_successful_rebase_abort_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(
+                tempdir, git_dirs=("rebase-merge",)
+            )
+            lockfile = git_dir / "AUTO_MERGE.lock"
+            self.make_stale_lock(lockfile)
+
+            abort_attempts = 0
+
+            def mocked_execute(args: list[str], **kwargs) -> str:
+                nonlocal abort_attempts
+                if args == ["rebase", "--abort"]:
+                    abort_attempts += 1
+                    if abort_attempts == 1:
+                        return (
+                            "warning: cleanup failed\n"
+                            f"Unable to create '{lockfile}': File exists."
+                        )
+                    (git_dir / "rebase-merge").rmdir()
+                    return ""
+                msg = f"Unexpected command: {args!r}"
+                raise AssertionError(msg)
+
+            self.mock_interrupted_git_rebase_recovery(
+                repo, execute_side_effect=mocked_execute
+            )
+            with repo.lock:
+                pass
+
+            self.assertEqual(abort_attempts, 2)
+            self.assertFalse(lockfile.exists())
+
+    def test_git_lock_session_recovery_aborts_interrupted_rebase_with_branch_ref_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(
+                tempdir, git_dirs=("rebase-merge",)
+            )
+            lockfile = git_dir / "refs" / "heads" / "main.lock"
+            self.make_stale_lock(lockfile)
+
+            abort_attempts = 0
+
+            def mocked_execute(args: list[str], **kwargs) -> str:
+                nonlocal abort_attempts
+                if args == ["rebase", "--abort"]:
+                    abort_attempts += 1
+                    if abort_attempts == 1:
+                        raise RepositoryCommandError(
+                            128,
+                            f"fatal: cannot lock ref 'refs/heads/main': Unable to create '{lockfile}': File exists.",
+                        )
+                    (git_dir / "rebase-merge").rmdir()
+                    return ""
+                msg = f"Unexpected command: {args!r}"
+                raise AssertionError(msg)
+
+            self.mock_interrupted_git_rebase_recovery(
+                repo, execute_side_effect=mocked_execute
+            )
+            with repo.lock:
+                pass
+
+            self.assertEqual(abort_attempts, 2)
+            self.assertFalse(lockfile.exists())
+
+    def test_git_lock_session_recovery_reports_failed_rebase_abort(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(
+                tempdir, git_dirs=("rebase-merge",)
+            )
+
+            def mocked_execute(args: list[str], **kwargs) -> str:
+                if args == ["rebase", "--abort"]:
+                    raise RepositoryCommandError(128, "fatal: rebase abort failed")
+                msg = f"Unexpected command: {args!r}"
+                raise AssertionError(msg)
+
+            self.mock_interrupted_git_rebase_recovery(
+                repo, execute_side_effect=mocked_execute
+            )
+            with self.assertRaises(RepositoryCommandError), repo.lock:
+                pass
+
+            self.assertTrue((git_dir / "rebase-merge").exists())
+
+    def test_git_reset_clears_interrupted_operation_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(
+                tempdir, git_dirs=("rebase-merge", "sequencer")
+            )
+            for filename in (
+                "AUTO_MERGE",
+                "CHERRY_PICK_HEAD",
+                "MERGE_HEAD",
+                "MERGE_MODE",
+                "MERGE_MSG",
+                "REBASE_HEAD",
+                "REVERT_HEAD",
+            ):
+                (git_dir / filename).touch()
+
+            with (
+                patch.object(repo, "get_current_branch", return_value="main"),
+                patch.object(repo, "execute", return_value="") as execute,
+            ):
+                repo.reset()
+
+            execute.assert_called_once_with(
+                ["reset", "--hard", "origin/main"], remote_op="none"
+            )
+            self.assertFalse((git_dir / "rebase-merge").exists())
+            self.assertFalse((git_dir / "sequencer").exists())
+            self.assertIsNone(repo.get_interrupted_operation())
+
+    def test_git_reset_checks_out_real_branch_from_temporary_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, _ = self.create_git_repository(tempdir)
+
+            with (
+                patch.object(
+                    repo, "get_current_branch", return_value="weblate-squash-tmp"
+                ),
+                patch.object(repo, "execute", return_value="") as execute,
+            ):
+                repo.reset()
+
+            self.assertEqual(
+                execute.call_args_list,
+                [
+                    call(["checkout", "--force", "main"], remote_op="none"),
+                    call(["branch", "-D", "weblate-squash-tmp"], remote_op="none"),
+                    call(["reset", "--hard", "origin/main"], remote_op="none"),
+                ],
+            )
+
+    def test_git_reset_reattaches_detached_head_to_real_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, _ = self.create_git_repository(tempdir)
+
+            with (
+                patch.object(repo, "get_current_branch", return_value=""),
+                patch.object(repo, "execute", return_value="") as execute,
+            ):
+                repo.reset()
+
+            self.assertEqual(
+                execute.call_args_list,
+                [
+                    call(["checkout", "--force", "main"], remote_op="none"),
+                    call(["reset", "--hard", "origin/main"], remote_op="none"),
+                ],
+            )
+
+    def test_gerrit_reset_uses_local_branch_without_push_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo = GitWithGerritRepository(
+                tempdir, branch="main%topic=l10n", local=True
+            )
+
+            with (
+                patch.object(GitWithGerritRepository, "_popen", return_value=""),
+                patch.object(repo, "get_current_branch", return_value="main"),
+                patch.object(repo, "execute", return_value="") as execute,
+            ):
+                repo.reset()
+
+            execute.assert_called_once_with(
+                ["reset", "--hard", "origin/main"], remote_op="none"
+            )
+
+    def test_execute_abort_preserves_fresh_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(tempdir)
+            lockfile = git_dir / "CHERRY_PICK_HEAD.lock"
+            lockfile.touch()
+
+            error = RepositoryCommandError(
+                128,
+                f"fatal: cannot lock ref 'CHERRY_PICK_HEAD': Unable to create '{lockfile}': File exists.",
+            )
+
+            _, execute = self.enter_patch_contexts(
+                patch.object(repo, "ensure_lock_session_recovered"),
+                patch.object(repo, "execute", side_effect=error),
+            )
+            with self.assertRaises(RepositoryCommandError), repo.lock:
+                repo.execute_abort(["rebase", "--abort"])
+
+            execute.assert_called_once_with(["rebase", "--abort"], remote_op="none")
+            self.assertTrue(lockfile.exists())
+
+    def test_execute_abort_retries_after_zero_exit_lock_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(tempdir)
+            (git_dir / "CHERRY_PICK_HEAD").touch()
+            lockfile = git_dir / "CHERRY_PICK_HEAD.lock"
+            self.make_stale_lock(lockfile)
+
+            execute_attempts = 0
+
+            def mocked_execute(args: list[str], **kwargs) -> str:
+                nonlocal execute_attempts
+                if args == ["cherry-pick", "--abort"]:
+                    execute_attempts += 1
+                    if execute_attempts == 1:
+                        return (
+                            "warning: cleanup failed\n"
+                            f"Unable to create '{lockfile}': File exists."
+                        )
+                    return ""
+                msg = f"Unexpected command: {args!r}"
+                raise AssertionError(msg)
+
+            _, execute = self.enter_patch_contexts(
+                patch.object(repo, "ensure_lock_session_recovered"),
+                patch.object(repo, "execute", side_effect=mocked_execute),
+            )
+            with repo.lock:
+                repo.execute_abort(["cherry-pick", "--abort"])
+
+            self.assertEqual(execute_attempts, 2)
+            self.assertFalse(lockfile.exists())
+            self.assertEqual(
+                execute.call_args_list,
+                [
+                    call(["cherry-pick", "--abort"], remote_op="none"),
+                    call(["cherry-pick", "--abort"], remote_op="none"),
+                ],
+            )
+
+    def test_execute_abort_skips_retry_after_zero_exit_clears_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(
+                tempdir, git_dirs=("rebase-merge",)
+            )
+            lockfile = git_dir / "REBASE_HEAD.lock"
+            self.make_stale_lock(lockfile)
+
+            def mocked_execute(args: list[str], **kwargs) -> str:
+                if args == ["rebase", "--abort"]:
+                    (git_dir / "rebase-merge").rmdir()
+                    return (
+                        "warning: cleanup failed\n"
+                        f"Unable to create '{lockfile}': File exists."
+                    )
+                msg = f"Unexpected command: {args!r}"
+                raise AssertionError(msg)
+
+            _, execute = self.enter_patch_contexts(
+                patch.object(repo, "ensure_lock_session_recovered"),
+                patch.object(repo, "execute", side_effect=mocked_execute),
+            )
+            with repo.lock:
+                repo.execute_abort(["rebase", "--abort"])
+
+            self.assertFalse(lockfile.exists())
+            execute.assert_called_once_with(["rebase", "--abort"], remote_op="none")
+
+    def test_execute_abort_recovers_stale_revert_head_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, git_dir = self.create_git_repository(tempdir)
+            (git_dir / "REVERT_HEAD").touch()
+            lockfile = git_dir / "REVERT_HEAD.lock"
+            self.make_stale_lock(lockfile)
+
+            error = RepositoryCommandError(
+                128,
+                f"fatal: cannot lock ref 'REVERT_HEAD': Unable to create '{lockfile}': File exists.",
+            )
+
+            _, execute = self.enter_patch_contexts(
+                patch.object(repo, "ensure_lock_session_recovered"),
+                patch.object(repo, "execute", side_effect=[error, ""]),
+            )
+            with repo.lock:
+                repo.execute_abort(["revert", "--abort"])
+
+            self.assertFalse(lockfile.exists())
+            self.assertEqual(
+                execute.call_args_list,
+                [
+                    call(["revert", "--abort"], remote_op="none"),
+                    call(["revert", "--abort"], remote_op="none"),
+                ],
+            )
+
+    def test_merge_request_abort_recovers_stale_merge_head_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            _, git_dir = self.create_git_repository(tempdir)
+            repo = GitMergeRequestBase(tempdir, branch="main", local=True)
+            (git_dir / "MERGE_HEAD").touch()
+            lockfile = git_dir / "MERGE_HEAD.lock"
+            self.make_stale_lock(lockfile)
+
+            error = RepositoryCommandError(
+                128,
+                f"fatal: Unable to create '{lockfile}': File exists.",
+            )
+
+            _, _, execute = self.enter_patch_contexts(
+                patch.object(repo, "ensure_lock_session_recovered"),
+                patch.object(repo, "validate_branch_name", return_value="main"),
+                patch.object(repo, "execute", side_effect=[error, "", ""]),
+            )
+            with repo.lock:
+                repo.merge(abort=True)
+
+            self.assertFalse(lockfile.exists())
+            self.assertEqual(
+                execute.call_args_list,
+                [
+                    call(["merge", "--abort"], remote_op="none"),
+                    call(["merge", "--abort"], remote_op="none"),
+                    call(["checkout", "main"], remote_op="none"),
+                ],
+            )
+
+    def test_subversion_rebase_abort_recovers_stale_rebase_head_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            _, git_dir = self.create_git_repository(tempdir, git_dirs=("rebase-merge",))
+            repo = SubversionRepository(tempdir, branch="main", local=True)
+            lockfile = git_dir / "REBASE_HEAD.lock"
+            self.make_stale_lock(lockfile)
+
+            error = RepositoryCommandError(
+                128,
+                f"fatal: Unable to create '{lockfile}': File exists.",
+            )
+
+            _, execute = self.enter_patch_contexts(
+                patch.object(repo, "ensure_lock_session_recovered"),
+                patch.object(repo, "execute", side_effect=[error, ""]),
+            )
+            with repo.lock:
+                repo.rebase(abort=True)
+
+            self.assertFalse(lockfile.exists())
+            self.assertEqual(
+                execute.call_args_list,
+                [
+                    call(["rebase", "--abort"], remote_op="none"),
+                    call(["rebase", "--abort"], remote_op="none"),
+                ],
+            )
+
+    def test_git_lock_session_recovery_preserves_temp_branch_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, _ = self.create_git_repository(tempdir)
+            mocks = self.mock_git_lock_recovery(
+                repo, current_branch="weblate-squash-tmp"
+            )
+            with repo.lock:
+                pass
+
+            mocks.merge.assert_not_called()
+            mocks.rebase.assert_not_called()
+            mocks.checkout_with_temp_cleanup.assert_called_once_with("main")
+            mocks.execute.assert_any_call(["reset", "--hard"], remote_op="none")
+            mocks.execute.assert_any_call(
+                ["branch", "-D", "weblate-squash-tmp"], remote_op="none"
+            )
+
+    def test_git_lock_session_recovery_skips_abort_without_git_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            repo, _ = self.create_git_repository(tempdir)
+            mocks = self.mock_git_lock_recovery(repo, current_branch="main")
+            with repo.lock:
+                pass
+
+            mocks.merge.assert_not_called()
+            mocks.rebase.assert_not_called()
+            mocks.has_rev.assert_not_called()
+            mocks.execute.assert_not_called()
+
+    def test_clone_runtime_private_url_rejected(self) -> None:
+        component = Component(
+            slug="test",
+            name="Test",
+            project=Project(name="Test", slug="test", pk=-1),
+            source_language_id=1,
+            pk=-1,
+        )
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            patch.object(GitTestRepository, "_clone") as mock_clone,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            repo = GitTestRepository(tempdir, branch="main", component=component)
+            repo.clone_from("https://private.example/repo.git")
+
+        mock_clone.assert_not_called()
+        self.assertIn("internal or non-public address", str(error.exception))
+
+    def test_clone_runtime_malformed_idna_rejected(self) -> None:
+        component = Component(
+            slug="test",
+            name="Test",
+            project=Project(name="Test", slug="test", pk=-1),
+            source_language_id=1,
+            pk=-1,
+        )
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            patch.object(GitTestRepository, "_clone") as mock_clone,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                side_effect=UnicodeError("label empty or too long"),
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            repo = GitTestRepository(tempdir, branch="main", component=component)
+            repo.clone_from("git@a..b:repo.git")
+
+        mock_clone.assert_not_called()
+        self.assertIn("Could not resolve the URL domain", str(error.exception))
+
+    def test_clone_runtime_file_host_rejected(self) -> None:
+        component = Component(
+            slug="test",
+            name="Test",
+            project=Project(name="Test", slug="test", pk=-1),
+            source_language_id=1,
+            pk=-1,
+        )
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            patch.object(GitTestRepository, "_clone") as mock_clone,
+            self.assertRaises(RepositoryError) as error,
+        ):
+            repo = GitTestRepository(tempdir, branch="main", component=component)
+            repo.clone_from("file://localhost/repo.git")
+
+        mock_clone.assert_not_called()
+        self.assertIn("Could not parse URL.", str(error.exception))
+
+    def test_clone_runtime_disallowed_scheme_rejected(self) -> None:
+        component = Component(
+            slug="test",
+            name="Test",
+            project=Project(name="Test", slug="test", pk=-1),
+            source_language_id=1,
+            pk=-1,
+        )
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            patch.object(GitTestRepository, "_clone") as mock_clone,
+            self.assertRaises(RepositoryError) as error,
+        ):
+            repo = GitTestRepository(tempdir, branch="main", component=component)
+            repo.clone_from("git://example.com/repo.git")
+
+        mock_clone.assert_not_called()
+        self.assertIn(
+            "Fetching VCS repository using git is not allowed.", str(error.exception)
+        )
+
+
+class GitCrashRecoveryTest(SimpleTestCase, RepoTestMixin, TempDirMixin):
+    def setUp(self) -> None:
+        super().setUp()
+        if not GitRepository.is_supported():
+            self.skipTest("Not supported")
+        self.clone_test_repos()
+        self.create_temp()
+        self.repo = GitRepository.clone(
+            self.format_local_path(self.git_repo_path),
+            self.tempdir,
+            "main",
+            component=Component(
+                slug="test",
+                name="Test",
+                project=Project(name="Test", slug="test", pk=-1),
+                source_language_id=1,
+                branch="main",
+                vcs="git",
+                repo=self.format_local_path(self.git_repo_path),
+                pk=-1,
+            ),
+        )
+
+    def tearDown(self) -> None:
+        self.remove_temp()
+
+    def test_checkout_with_temp_cleanup_requires_lock(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "without lock held"):
+            self.repo.checkout_with_temp_cleanup("main")
+
+    def test_configure_branch_requires_lock_for_branch_creation(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "without lock held"):
+            self.repo.configure_branch("translations")
+
+    def test_configure_branch_recovers_temp_branch_on_next_lock(self) -> None:
+        with self.repo.lock:
+            self.repo.execute(
+                ["checkout", "-b", "weblate-squash-tmp"],
+                remote_op="none",
+            )
+            temp_dir = self.repo.get_repo_temp_dir()
+            if temp_dir is None:
+                self.fail("Expected Git temp dir to exist")
+            temp_path = temp_dir / "leftover.tmp"
+            temp_path.write_text("TEMP FILE\n", encoding="utf-8")
+
+        with self.repo.lock:
+            head = (Path(self.tempdir) / ".git" / "HEAD").read_text(encoding="utf-8")
+            self.assertEqual(head.strip(), "ref: refs/heads/main")
+            self.assertFalse(temp_path.exists())
+            self.repo.configure_branch("main")
+
+            self.assertEqual(self.repo.get_current_branch(), "main")
+            self.assertNotIn("weblate-squash-tmp", self.repo.list_branches())
+            self.assertFalse(
+                self.repo.execute(
+                    ["status", "--short"],
+                    remote_op="none",
+                    needs_lock=False,
+                ).strip()
+            )
+
+
+class GitBranchValidationTest(SimpleTestCase):
+    def test_empty_branch_in_constructor_uses_default(self) -> None:
+        repo = GitRepository(".", branch="", local=True)
+
+        self.assertEqual(repo.branch, repo.default_branch)
+
+    def test_usage_error_is_normalized(self) -> None:
+        with (
+            patch.object(
+                GitRepository, "_popen", side_effect=RepositoryError(129, "usage: git")
+            ),
+            self.assertRaises(RepositoryError) as cm,
+        ):
+            GitRepository.validate_branch_name("main")
+
+        self.assertEqual(str(cm.exception), "'main' is not a valid branch name")
+
+    def test_literal_ref_validation_is_used(self) -> None:
+        with patch.object(GitRepository, "_popen", return_value="") as mocked:
+            self.assertEqual("main", GitRepository.validate_branch_name("main"))
+
+        mocked.assert_called_once_with(
+            ["check-ref-format", "refs/heads/main"],
+            merge_err=False,
+        )
+
+    def test_generic_git_branch_accepts_gerrit_option_delimiters(self) -> None:
+        with patch.object(GitRepository, "_popen", return_value=""):
+            self.assertEqual(
+                "main%topic=l10n", GitRepository.validate_branch_name("main%topic=l10n")
+            )
+
+    def test_gerrit_branch_accepts_review_targets(self) -> None:
+        branches = (
+            "review-branch",
+            "main%topic=l10n",
+            "main%hashtag=translations",
+            "main%topic=l10n,hashtag=translations",
+        )
+        with patch.object(GitWithGerritRepository, "_popen", return_value=""):
+            for branch in branches:
+                with self.subTest(branch=branch):
+                    self.assertEqual(
+                        branch,
+                        GitWithGerritRepository.validate_review_target(branch),
+                    )
+
+    def test_gerrit_branch_rejects_review_target_without_base_branch(self) -> None:
+        with (
+            patch.object(GitWithGerritRepository, "_popen", return_value=""),
+            self.assertRaises(RepositoryError) as cm,
+        ):
+            GitWithGerritRepository.validate_review_target("%topic=l10n")
+
+        self.assertEqual(str(cm.exception), "'' is not a valid branch name")
+
+    def test_gerrit_branch_extracts_fetch_branch_from_review_target(self) -> None:
+        with patch.object(GitWithGerritRepository, "_popen", return_value=""):
+            self.assertEqual(
+                "main",
+                GitWithGerritRepository.get_gerrit_branch_name(
+                    "main%topic=l10n,hashtag=translations"
+                ),
+            )
+
+    def test_gerrit_branch_validation_uses_base_review_target_branch(self) -> None:
+        with patch.object(GitWithGerritRepository, "_popen", return_value=""):
+            self.assertEqual(
+                "main",
+                GitWithGerritRepository.validate_branch_name(
+                    "main%topic=l10n,hashtag=translations"
+                ),
+            )
+
+    def test_gerrit_remote_branch_uses_base_review_target_branch(self) -> None:
+        repo = GitWithGerritRepository(".", branch="main", local=True)
+
+        with patch.object(GitWithGerritRepository, "_popen", return_value=""):
+            self.assertEqual(
+                "origin/main",
+                repo.get_remote_branch_name("main%topic=l10n,hashtag=translations"),
+            )
+
+    def test_shorthand_branch_is_rejected(self) -> None:
+        with self.assertRaises(RepositoryError) as cm:
+            GitRepository.validate_branch_name("@{-1}")
+
+        self.assertEqual(str(cm.exception), "'@{-1}' is not a valid branch name")
+
+    def test_full_ref_branch_is_rejected(self) -> None:
+        with self.assertRaises(RepositoryError) as cm:
+            GitRepository.validate_branch_name("refs/heads/main")
+
+        self.assertEqual(
+            str(cm.exception), "'refs/heads/main' is not a valid branch name"
+        )
+
+    def test_empty_branch_uses_default_remote_branch(self) -> None:
+        repo = GitMergeRequestBase(".", branch="main", local=True)
+
+        self.assertEqual(repo.get_remote_branch_name(""), "origin/main")
+
+    def test_merge_request_templates_use_git_component_repository(self) -> None:
+        component = Component(
+            slug="test",
+            name="Test",
+            project=Project(name="Test", slug="test", pk=-1),
+            source_language_id=1,
+            branch="main",
+            vcs="git",
+            repo="https://example.invalid/repo.git",
+            pk=-1,
+        )
+        component.pull_message = "Title\n\nBody"
+        component.inherit_pull_message = False
+
+        repo = GithubFakeRepository(".", branch="main", component=component, local=True)
+
+        self.assertEqual(repo.get_merge_message(), ("Title", "Body"))
+        self.assertEqual(
+            render_template("{{ component_remote_branch }}", component=component),
+            "origin/main",
+        )
+        self.assertIsInstance(component.repository, GitRepository)
+
+    def test_default_pull_message_title_ignores_multiline_names(self) -> None:
+        component = Component(
+            slug="test",
+            name="Test\ncomponent",
+            project=Project(name="Test\nproject", slug="test", pk=-1),
+            source_language_id=1,
+            branch="main",
+            vcs="git",
+            repo="https://example.invalid/repo.git",
+            pk=-1,
+        )
+        component.pull_message = defaults.DEFAULT_PULL_MESSAGE
+        component.inherit_pull_message = False
+
+        repo = GithubFakeRepository(".", branch="main", component=component, local=True)
+
+        with patch.object(
+            Component, "get_linked_children_for_template", return_value=[]
+        ):
+            title, body = repo.get_merge_message()
+        self.assertEqual(title, "chore(l10n): update translations")
+        self.assertIn("Test\nproject/Test\ncomponent", body)
+        self.assertIn("/matrix-auto.svg", body)
+
+
+class RepositoryHostKeyErrorTest(SimpleTestCase):
+    def test_changed_host_key_is_not_tofu_retry(self) -> None:
+        errormessage = (
+            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
+            "Host key for kallithea-scm.org has changed and you have requested strict checking.\n"
+            "Host key verification failed.\n"
+        )
+
+        self.assertTrue(is_ssh_host_key_verification_error(errormessage))
+        self.assertTrue(is_ssh_host_key_mismatch_error(errormessage))
+        self.assertFalse(should_auto_add_ssh_host_key(errormessage))
+
+    def test_missing_host_key_can_still_use_tofu_retry(self) -> None:
+        errormessage = "No ED25519 host key is known for example.com.\nHost key verification failed.\n"
+
+        self.assertTrue(is_ssh_host_key_verification_error(errormessage))
+        self.assertFalse(is_ssh_host_key_mismatch_error(errormessage))
+        self.assertTrue(should_auto_add_ssh_host_key(errormessage))
 
 
 class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
     _class: type[Repository] = GitRepository
     _vcs = "git"
     _sets_push = True
-    _remote_branches = ["main", "translations"]
+    _remote_branches: ClassVar[list[str]] = ["main", "translations"]
     _remote_branch = "main"
 
     def setUp(self) -> None:
@@ -148,7 +1205,43 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
             slug="test",
             name="Test",
             project=Project(name="Test", slug="test", pk=-1),
+            branch=self._remote_branch,
+            vcs=self._vcs,
+            repo=self.get_remote_repo_url(),
             pk=-1,
+        )
+
+    def create_unrelated_git_repository(self, path: str) -> None:
+        GitRepository.create_blank_repository(path)
+        unrelated = GitRepository(path, branch=GitRepository.default_branch, local=True)
+        with unrelated.lock:
+            unrelated.set_committer("Test", "test@example.net")
+            Path(path, "README.md").write_text("Unrelated\n", encoding="utf-8")
+            unrelated.commit(
+                "Initial commit",
+                "Test <test@example.net>",
+                timezone.now(),
+                ["README.md"],
+            )
+            if self._remote_branch != GitRepository.default_branch:
+                unrelated.execute(["branch", self._remote_branch], remote_op="none")
+
+    def assert_no_popen_sequence(
+        self,
+        mocked_popen,
+        *sequence: str,
+    ) -> None:
+        width = len(sequence)
+
+        self.assertFalse(
+            any(
+                any(
+                    tuple(call.args[0][index : index + width]) == sequence
+                    for index in range(len(call.args[0]) - width + 1)
+                )
+                for call in mocked_popen.call_args_list
+            ),
+            mocked_popen.call_args_list,
         )
 
     def clone_repo(self, path):
@@ -165,7 +1258,9 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
             repo = self._class(
                 tempdir, branch=self._remote_branch, component=self.get_fake_component()
             )
+            self.assertFalse(repo.is_valid())
             with repo.lock:
+                repo.clone_from(self.get_remote_repo_url())
                 repo.configure_remote(
                     self.get_remote_repo_url(),
                     "",
@@ -198,8 +1293,9 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
                 else:
                     filename = "testfile" if conflict else "test2"
                     # Create test file
-                    with open(os.path.join(tempdir, filename), "w") as handle:
-                        handle.write("SECOND TEST FILE\n")
+                    Path(os.path.join(tempdir, filename)).write_text(
+                        "SECOND TEST FILE\n", encoding="utf-8"
+                    )
                     filenames = [filename]
 
                 # Commit it
@@ -227,9 +1323,154 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
         with self.repo.lock:
             self.repo.update_remote()
 
+    def test_update_remote_fetches_branch_over_same_named_tag(self) -> None:
+        if self._class is not GitRepository:
+            self.skipTest("GitRepository-specific regression test")
+
+        branch = self._remote_branch
+        with tempfile.TemporaryDirectory() as tempdir:
+            remote_repo = self.clone_repo(tempdir)
+            with remote_repo.lock:
+                old_revision = remote_repo.last_revision
+                remote_repo.execute(["tag", branch, old_revision], remote_op="none")
+                remote_repo.execute(
+                    ["push", "origin", f"refs/tags/{branch}:refs/tags/{branch}"],
+                    remote_op="push",
+                )
+
+                filename = "same-name-tag"
+                Path(os.path.join(tempdir, filename)).write_text(
+                    "SECOND TEST FILE\n", encoding="utf-8"
+                )
+                remote_repo.commit(
+                    "Test commit", "Foo Bar <foo@bar.com>", timezone.now(), [filename]
+                )
+                new_revision = remote_repo.last_revision
+                remote_repo.execute(
+                    ["push", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
+                    remote_op="push",
+                )
+
+        with self.repo.lock:
+            self.assertEqual(old_revision, self.repo.last_remote_revision)
+            self.repo.update_remote()
+            self.assertEqual(new_revision, self.repo.last_remote_revision)
+            self.assertEqual(
+                "",
+                self.repo.execute(
+                    ["tag", "--list", branch], remote_op="none", merge_err=False
+                ),
+            )
+
+    def test_list_remote_branches_runtime_private_url_rejected(self) -> None:
+        if self._class in {SubversionRepository, HgRepository, LocalRepository}:
+            self.skipTest("Covered by backend-specific behavior")
+        self.repo.component.repo = "https://private.example/repo.git"
+        with (
+            self.repo.lock,
+            patch.object(self._class, "_popen") as mock_popen,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            self.repo.list_remote_branches()
+
+        mock_popen.assert_not_called()
+        self.assertIn("internal or non-public address", str(error.exception))
+
+    def test_remove_stale_branches_runtime_private_url_rejected(self) -> None:
+        if self._class in {SubversionRepository, HgRepository, LocalRepository}:
+            self.skipTest("Covered by backend-specific behavior")
+        self.repo.component.repo = "https://private.example/repo.git"
+        with (
+            self.repo.lock,
+            patch.object(self._class, "_popen") as mock_popen,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryValidationError) as error,
+        ):
+            self.repo.remove_stale_branches()
+
+        self.assert_no_popen_sequence(mock_popen, "remote", "prune", "origin")
+        self.assertIn("internal or non-public address", str(error.exception))
+
+    def test_remove_stale_branches_ignores_command_errors(self) -> None:
+        if self._class in {SubversionRepository, HgRepository, LocalRepository}:
+            self.skipTest("Covered by backend-specific behavior")
+
+        original_execute = self.repo.execute
+
+        def mocked_execute(args: list[str], **kwargs):
+            if tuple(args[-3:]) == ("remote", "prune", "origin"):
+                raise RepositoryCommandError(128, "remote unavailable")
+            return original_execute(args, **kwargs)
+
+        with (
+            self.repo.lock,
+            patch.object(self.repo, "execute", side_effect=mocked_execute),
+        ):
+            self.repo.remove_stale_branches()
+
+    def test_update_remote_runtime_private_url_rejected(self) -> None:
+        if self._class in {SubversionRepository, HgRepository, LocalRepository}:
+            self.skipTest("Covered by backend-specific behavior")
+        self.repo.component.repo = "https://private.example/repo.git"
+        with (
+            self.repo.lock,
+            patch.object(self._class, "_popen") as mock_popen,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            self.repo.update_remote()
+
+        self.assert_no_popen_sequence(mock_popen, "fetch")
+        self.assertIn("internal or non-public address", str(error.exception))
+
     def test_push(self, branch: str = "") -> None:
         with self.repo.lock:
             self.repo.push(branch)
+
+    def test_push_runtime_private_url_rejected(self) -> None:
+        if self._class in {SubversionRepository, HgRepository, LocalRepository}:
+            self.skipTest("Covered by backend-specific behavior")
+        self.repo.component.push = "https://private.example/repo.git"
+        with (
+            self.repo.lock,
+            patch.object(self._class, "_popen") as mock_popen,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            self.repo.push("")
+
+        self.assert_no_popen_sequence(mock_popen, "push")
+        self.assert_no_popen_sequence(mock_popen, "review")
+        self.assertIn("internal or non-public address", str(error.exception))
+
+    def test_get_remote_branch_runtime_private_url_rejected(self) -> None:
+        if not issubclass(self._class, GitRepository) or self._class is LocalRepository:
+            self.skipTest("Covered by backend-specific behavior")
+        with (
+            patch.object(self._class, "_popen") as mock_popen,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            self._class.get_remote_branch("https://private.example/repo.git")
+
+        mock_popen.assert_not_called()
+        self.assertIn("internal or non-public address", str(error.exception))
 
     def test_push_commit(self) -> None:
         self.test_commit()
@@ -238,6 +1479,34 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
     def test_push_branch(self) -> None:
         self.test_commit()
         self.test_push("push-branch")
+
+    def test_validate_branch_name(self) -> None:
+        if not issubclass(self._class, GitRepository):
+            self.skipTest("Git only")
+        self.assertEqual("main", GitRepository.validate_branch_name("main"))
+        with self.assertRaises(RepositoryError):
+            GitRepository.validate_branch_name("--orphan")
+
+    def test_configure_branch_rejects_option_like_name(self) -> None:
+        if not issubclass(self._class, GitRepository):
+            self.skipTest("Git only")
+        with (
+            patch.object(self.repo, "execute") as mocked,
+            self.assertRaises(RepositoryError),
+        ):
+            self.repo.configure_branch("--orphan")
+        mocked.assert_not_called()
+
+    def test_has_rev_uses_end_of_options(self) -> None:
+        if not issubclass(self._class, GitRepository):
+            self.skipTest("Git only")
+        with patch.object(self.repo, "execute", return_value="HEAD") as mocked:
+            self.assertTrue(self.repo.has_rev("--verify"))
+        mocked.assert_called_once_with(
+            ["rev-parse", "--verify", "--end-of-options", "--verify"],
+            remote_op="none",
+            needs_lock=False,
+        )
 
     def test_reset(self) -> None:
         with self.repo.lock:
@@ -253,6 +1522,42 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
     def test_cleanup(self) -> None:
         with self.repo.lock:
             self.repo.cleanup()
+
+    def test_resolve_symlinks_rejects_prefix_collision(self) -> None:
+        repo_path = os.path.realpath(self.repo.path)
+        outside_path = f"{repo_path}_outside"
+        os.makedirs(outside_path)
+        self.addCleanup(shutil.rmtree, outside_path, True)
+
+        Path(os.path.join(outside_path, "secrets.po")).write_text(
+            "TOPSECRET\n", encoding="utf-8"
+        )
+        os.symlink(outside_path, os.path.join(self.repo.path, "prefix-collision"))
+
+        with self.assertRaises(RepositorySymlinkError):
+            self.repo.resolve_symlinks("prefix-collision/secrets.po")
+
+    def test_resolve_symlinks_rejects_vcs_metadata_path(self) -> None:
+        with self.assertRaises(RepositoryRestrictedPathError):
+            self.repo.resolve_symlinks(".git/config")
+
+    def test_resolve_symlinks_allows_missing_excluded_repository_path(self) -> None:
+        filename = "dist/appstream/messages.pot"
+
+        self.assertEqual(self.repo.resolve_symlinks(filename), filename)
+
+    def test_resolve_symlinks_allows_missing_regular_repository_path(self) -> None:
+        filename = "locale/missing.po"
+
+        self.assertEqual(self.repo.resolve_symlinks(filename), filename)
+
+    def test_resolve_symlinks_allows_regular_repository_path(self) -> None:
+        filename = "locale/cs.po"
+        full_path = os.path.join(self.repo.path, filename)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        Path(full_path).write_text("TEST\n", encoding="utf-8")
+
+        self.assertEqual(self.repo.resolve_symlinks(filename), filename)
 
     def test_merge_commit(self) -> None:
         self.test_commit()
@@ -296,6 +1601,128 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
         with self.assertRaises(RepositoryError):
             self.test_rebase()
 
+    def test_validate_remote_compatibility_allows_merge_conflict(self) -> None:
+        if self._class is not GitRepository:
+            self.skipTest("Plain Git specific validation")
+
+        self.add_remote_commit(conflict=True)
+        self.test_commit()
+
+        self.repo.validate_remote_compatibility(
+            self.get_remote_repo_url(), self._remote_branch
+        )
+        self.assertFalse(
+            self.repo.has_rev(f"refs/weblate/validation/{self._remote_branch}")
+        )
+
+    def test_validate_remote_compatibility_rejects_unrelated_history(self) -> None:
+        if self._class is not GitRepository:
+            self.skipTest("Plain Git specific validation")
+
+        if self.repo.is_shallow():
+            with self.repo.lock:
+                self.repo.unshallow()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            self.create_unrelated_git_repository(tempdir)
+
+            with self.assertRaisesRegex(
+                RepositoryError, "does not share common history"
+            ):
+                self.repo.validate_remote_compatibility(
+                    self.format_local_path(tempdir), self._remote_branch
+                )
+
+    def test_validate_remote_compatibility_rejects_inconclusive_shallow_history(
+        self,
+    ) -> None:
+        if self._class is not GitRepository:
+            self.skipTest("Plain Git specific validation")
+
+        self.assertTrue(self.repo.is_shallow())
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            self.create_unrelated_git_repository(tempdir)
+
+            with self.assertRaisesRegex(
+                RepositoryError, "could not be verified against the shallow"
+            ):
+                self.repo.validate_remote_compatibility(
+                    self.format_local_path(tempdir), self._remote_branch
+                )
+
+    def test_validate_remote_compatibility_allows_shallow_fork(self) -> None:
+        if self._class is not GitRepository:
+            self.skipTest("Plain Git specific validation")
+
+        branch = self._remote_branch
+        with tempfile.TemporaryDirectory() as tempdir:
+            origin_path = os.path.join(tempdir, "origin.git")
+            fork_path = os.path.join(tempdir, "fork.git")
+            work_path = os.path.join(tempdir, "work")
+            shallow_path = os.path.join(tempdir, "shallow")
+            git = GitRepository(tempdir, branch=branch, local=True)
+
+            git.execute(
+                ["init", "--bare", "--initial-branch", branch, origin_path],
+                remote_op="none",
+                needs_lock=False,
+            )
+            git.execute(
+                ["init", "--initial-branch", branch, work_path],
+                remote_op="none",
+                needs_lock=False,
+            )
+            work = GitRepository(work_path, branch=branch, local=True)
+            with work.lock:
+                work.set_committer("Test", "test@example.net")
+                Path(work_path, "README.md").write_text("A\n", encoding="utf-8")
+                work.commit(
+                    "A", "Test <test@example.net>", timezone.now(), ["README.md"]
+                )
+                base_revision = work.last_revision
+                for commit_id in range(2):
+                    Path(work_path, "README.md").write_text(
+                        f"{commit_id}\n", encoding="utf-8"
+                    )
+                    work.commit(
+                        f"Commit {commit_id}",
+                        "Test <test@example.net>",
+                        timezone.now(),
+                        ["README.md"],
+                    )
+                work.execute(["remote", "add", "origin", origin_path], remote_op="none")
+                work.push("")
+
+                git.execute(
+                    ["init", "--bare", "--initial-branch", branch, fork_path],
+                    remote_op="none",
+                    needs_lock=False,
+                )
+                work.execute(
+                    ["checkout", "-B", "fork-main", base_revision], remote_op="none"
+                )
+                Path(work_path, "fork.txt").write_text("D\n", encoding="utf-8")
+                work.commit(
+                    "D", "Test <test@example.net>", timezone.now(), ["fork.txt"]
+                )
+                work.execute(
+                    ["push", fork_path, f"HEAD:refs/heads/{branch}"], remote_op="none"
+                )
+
+            component = self.get_fake_component()
+            component.repo = self.format_local_path(origin_path)
+            component.branch = branch
+            with override_settings(VCS_CLONE_DEPTH=1):
+                shallow = GitRepository.clone(
+                    component.repo, shallow_path, branch, component=component
+                )
+
+            self.assertTrue(shallow.is_shallow())
+            shallow.validate_remote_compatibility(
+                self.format_local_path(fork_path), branch
+            )
+
     def test_upstream_changes(self) -> None:
         self.add_remote_commit()
         with self.repo.lock:
@@ -325,7 +1752,9 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
 
     def test_needs_commit(self) -> None:
         self.assertFalse(self.repo.needs_commit())
-        with open(os.path.join(self.tempdir, "README.md"), "a") as handle:
+        with open(
+            os.path.join(self.tempdir, "README.md"), "a", encoding="utf-8"
+        ) as handle:
             handle.write("CHANGE")
         self.assertTrue(self.repo.needs_commit())
         self.assertTrue(self.repo.needs_commit(["README.md"]))
@@ -377,8 +1806,7 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
         with self.repo.lock:
             self.repo.set_committer(committer, "foo@example.net")
         # Create test file
-        with open(os.path.join(self.tempdir, "testfile"), "wb") as handle:
-            handle.write(b"TEST FILE\n")
+        Path(os.path.join(self.tempdir, "testfile")).write_bytes(b"TEST FILE\n")
 
         oldrev = self.repo.last_revision
         # Commit it
@@ -452,7 +1880,10 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
                     self.repo.get_config("remote.origin.pushURL"), "pushurl"
                 )
             # Test that we handle not set fetching
-            self.repo.execute(["config", "--unset", "remote.origin.fetch"])
+            self.repo.execute(
+                ["config", "--unset", "remote.origin.fetch"],
+                remote_op="none",
+            )
             self.repo.configure_remote("pullurl", "pushurl", "branch")
             self.assertEqual(
                 self.repo.get_config("remote.origin.fetch"),
@@ -482,6 +1913,16 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
                 with self.assertRaises(RepositoryError):
                     self.repo.get_config("remote.origin.pushURL")
 
+    def test_check_config_disables_git_auto_maintenance(self) -> None:
+        if not issubclass(self._class, GitRepository):
+            self.skipTest("Git specific configuration")
+
+        self.repo.check_config()
+
+        self.assertEqual(self.repo.get_config("push.default"), "current")
+        self.assertEqual(self.repo.get_config("maintenance.auto"), "0")
+        self.assertEqual(self.repo.get_config("gc.auto"), "0")
+
     def test_configure_branch(self) -> None:
         # Existing branch
         with self.repo.lock:
@@ -494,18 +1935,6 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
         self.assertIn("msgid", self.repo.get_file("po/cs.po", self.repo.last_revision))
 
     def test_remote_branches(self) -> None:
-        # The initial setup clones just single branch
-        self.assertEqual(
-            [self._remote_branch] if self._remote_branches else [],
-            self.repo.list_remote_branches(),
-        )
-
-        # Full configure adds all other branches
-        with self.repo.lock:
-            self.repo.configure_remote(
-                self.get_remote_repo_url(), "", self.repo.branch, fast=False
-            )
-            self.repo.update_remote()
         self.assertEqual(self._remote_branches, self.repo.list_remote_branches())
 
     def test_remote_branch(self) -> None:
@@ -517,6 +1946,20 @@ class VCSGitForcePushTest(VCSGitTest):
 
 
 class VCSGitUpstreamTest(VCSGitTest):
+    _repo_override: str = ""
+
+    def setUp(self) -> None:
+        getaddrinfo_patcher = patch(
+            "weblate.utils.outbound.socket.getaddrinfo",
+            return_value=[(0, 0, 0, "", ("93.184.216.34", 443))],
+        )
+        getaddrinfo_patcher.start()
+        self.addCleanup(getaddrinfo_patcher.stop)
+        super().setUp()
+        # Set repo URL to match configured credentials
+        if self._repo_override:
+            self.repo.component.repo = self._repo_override
+
     def add_remote_commit(self, conflict=False, rename=False) -> None:
         # Use Git to create changed upstream repo
         backup = self._class
@@ -534,6 +1977,7 @@ class VCSGiteaTest(VCSGitUpstreamTest):
     _class = GiteaFakeRepository
     _vcs = "git"
     _sets_push = False
+    _repo_override = "https://try.gitea.io/WeblateOrg/test.git"
 
     def mock_responses(self, pr_response, pr_status=200) -> None:
         """
@@ -557,6 +2001,27 @@ class VCSGiteaTest(VCSGitUpstreamTest):
             status=pr_status,
             match=[matchers.header_matcher({"Content-Type": "application/json"})],
         )
+
+    def mock_pull_request_response(self, pr_response, pr_status=200) -> None:
+        responses.add(
+            responses.POST,
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/pulls",
+            json=pr_response,
+            status=pr_status,
+            match=[matchers.header_matcher({"Content-Type": "application/json"})],
+        )
+
+    def assert_pr_head(self, head: str) -> None:
+        pr_calls = [
+            call
+            for call in responses.calls
+            if call.request.url
+            == "https://try.gitea.io/api/v1/repos/WeblateOrg/test/pulls"
+        ]
+        self.assertEqual(len(pr_calls), 1)
+        request = json.loads(pr_calls[0].request.body or "{}")
+        self.assertEqual(request["head"], head)
+        self.assertEqual(request["base"], self._remote_branch)
 
     def test_api_url_try_gitea(self) -> None:
         self.repo.component.repo = "https://try.gitea.io/WeblateOrg/test.git"
@@ -627,8 +2092,6 @@ class VCSGiteaTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://try.gitea.io/WeblateOrg/test.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -644,9 +2107,133 @@ class VCSGiteaTest(VCSGitUpstreamTest):
         mock_push_to_fork.stop()
 
     @responses.activate
-    def test_pull_request_error(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://try.gitea.io/WeblateOrg/test.git"
+    def test_push_reconfigures_stale_fork_remote(self) -> None:
+        self.repo.config_update(
+            ('remote "test"', "pushurl", "git@github.com:test/test.git")
+        )
 
+        with patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork") as mocked_push:
+            mocked_push.return_value = ""
+            self.mock_responses(
+                pr_response={"url": "https://try.gitea.io/WeblateOrg/test/pull/1"}
+            )
+
+            super().test_push("")
+
+        responses.assert_call_count(
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/forks", 1
+        )
+        self.assertEqual(
+            self.repo.get_config("remote.test.pushURL"), "git@gitea.io:test/test.git"
+        )
+
+    @responses.activate
+    def test_push_with_existing_fork_configures_fork_remote(self) -> None:
+        responses.add(
+            responses.POST,
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/forks",
+            json={"message": "repository is already forked by user"},
+            status=409,
+            match=[matchers.header_matcher({"Content-Type": "application/json"})],
+        )
+        responses.add(
+            responses.GET,
+            "https://try.gitea.io/api/v1/repos/test/test",
+            json={
+                "fork": True,
+                "parent": {"full_name": "weblateorg/TEST"},
+                "ssh_url": "git@gitea.io:test/test.git",
+                "clone_url": "https://gitea.io/test/test.git",
+            },
+        )
+        self.mock_pull_request_response(
+            pr_response={"url": "https://try.gitea.io/WeblateOrg/test/pull/1"}
+        )
+
+        with patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork") as mocked_push:
+            mocked_push.return_value = ""
+            super().test_push("")
+
+        mocked_push.assert_called_once_with(
+            self.repo.get_credentials(), self._remote_branch, "weblate-test-test"
+        )
+        responses.assert_call_count(
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/forks", 1
+        )
+        responses.assert_call_count("https://try.gitea.io/api/v1/repos/test/test", 1)
+        self.assertEqual(
+            self.repo.get_config("remote.test.pushURL"), "git@gitea.io:test/test.git"
+        )
+
+    @responses.activate
+    def test_push_with_same_name_non_fork_rejected(self) -> None:
+        responses.add(
+            responses.POST,
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/forks",
+            json={"message": "repository is already forked by user"},
+            status=409,
+            match=[matchers.header_matcher({"Content-Type": "application/json"})],
+        )
+        responses.add(
+            responses.GET,
+            "https://try.gitea.io/api/v1/repos/test/test",
+            json={
+                "fork": False,
+                "ssh_url": "git@gitea.io:test/test.git",
+                "clone_url": "https://gitea.io/test/test.git",
+            },
+        )
+
+        with (
+            patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork") as mocked_push,
+            self.assertRaisesMessage(
+                RepositoryError,
+                "Existing repository test/test is not a fork of WeblateOrg/test.",
+            ),
+        ):
+            super().test_push("")
+
+        mocked_push.assert_not_called()
+        responses.assert_call_count(
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/forks", 1
+        )
+        responses.assert_call_count("https://try.gitea.io/api/v1/repos/test/test", 1)
+        responses.assert_call_count(
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/pulls", 0
+        )
+
+    @responses.activate
+    def test_empty_push_url_with_push_branch_uses_upstream_branch(self) -> None:
+        self.repo.component.push = ""
+        self.repo.component.push_branch = "upstream-branch"
+        self.mock_responses(
+            pr_response={"url": "https://try.gitea.io/WeblateOrg/test/pull/1"}
+        )
+
+        super().test_push(self.repo.component.push_branch)
+
+        responses.assert_call_count(
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/forks", 0
+        )
+        self.assert_pr_head("upstream-branch")
+
+    @responses.activate
+    def test_push_url_with_push_branch_uses_upstream_branch(self) -> None:
+        self.repo.component.push = "https://try.gitea.io/WeblateOrg/test.git"
+        self.repo.component.push_branch = "upstream-branch"
+        self.mock_responses(
+            pr_response={"url": "https://try.gitea.io/WeblateOrg/test/pull/1"}
+        )
+
+        super().test_push(self.repo.component.push_branch)
+
+        responses.assert_call_count(
+            "https://try.gitea.io/api/v1/repos/WeblateOrg/test/forks", 0
+        )
+        self.assert_pr_head("upstream-branch")
+
+    @responses.activate
+    def test_pull_request_error(self, branch: str = "") -> None:
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -664,8 +2251,6 @@ class VCSGiteaTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_pull_request_exists(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://try.gitea.io/WeblateOrg/test.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -690,7 +2275,12 @@ class VCSGiteaTest(VCSGitUpstreamTest):
             "username": "test",
             "token": "token",
             "organization": "organization",
-        }
+        },
+        "summanv.visualstudio.com": {
+            "username": "test",
+            "token": "token",
+            "organization": "organization",
+        },
     }
 )
 class VCSAzureDevOpsTest(VCSGitUpstreamTest):
@@ -698,13 +2288,10 @@ class VCSAzureDevOpsTest(VCSGitUpstreamTest):
     _vcs = "git"
     _sets_push = False
     _mock_push_to_fork = None
+    _repo_override = "https://dev.azure.com/organization/WeblateOrg/test.git"
 
     def setUp(self) -> None:
         super().setUp()
-        self.repo.component.repo = (
-            "https://dev.azure.com/organization/WeblateOrg/test.git"
-        )
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -714,7 +2301,8 @@ class VCSAzureDevOpsTest(VCSGitUpstreamTest):
         self._mock_push_to_fork.return_value = ""
 
     def tearDown(self) -> None:
-        self._mock_push_to_fork.stop()
+        if self._mock_push_to_fork is not None:
+            self._mock_push_to_fork.stop()
         super().tearDown()
 
     def mock_responses(self, pr_response, pr_status=200) -> None:
@@ -826,6 +2414,16 @@ class VCSAzureDevOpsTest(VCSGitUpstreamTest):
         self.assertEqual(
             self.repo.get_credentials()["url"],
             "https://dev.azure.com/organization/WeblateOrg/_apis/git/repositories/test",
+        )
+
+    def test_api_url_visualstudio_com(self) -> None:
+        # HTTPS with PAT
+        self.repo.component.repo = (
+            "https://username:PAT@summanv.visualstudio.com/Lancelot/_git/GoSuite"
+        )
+        self.assertEqual(
+            self.repo.get_credentials()["url"],
+            "https://summanv.visualstudio.com/Lancelot/_apis/git/repositories/GoSuite",
         )
 
     @responses.activate
@@ -954,7 +2552,8 @@ class VCSAzureDevOpsTest(VCSGitUpstreamTest):
                     "add",
                     "test",
                     "git@ssh.this.does.not.exist:v3/org/proj/repo",
-                ]
+                ],
+                remote_op="none",
             )
 
         responses.post(
@@ -1048,8 +2647,15 @@ class VCSGitHubTest(VCSGitUpstreamTest):
     _class = GithubFakeRepository
     _vcs = "git"
     _sets_push = False
+    _repo_override = "https://github.com/WeblateOrg/test.git"
 
-    def mock_responses(self, pr_response, pr_status=200) -> None:
+    def mock_responses(
+        self,
+        pr_response: dict | None = None,
+        pr_status: int = 200,
+        pr_body: str | None = None,
+        pr_content_type: str | None = None,
+    ) -> None:
         """
         Mock response helper function.
 
@@ -1061,13 +2667,25 @@ class VCSGitHubTest(VCSGitUpstreamTest):
             json={
                 "ssh_url": "git@github.com:test/test.git",
                 "clone_url": "https://github.com/test/test.git",
+                "url": "https://api.github.com/repos/test/test",
             },
         )
         responses.add(
+            responses.PUT,
+            "https://api.github.com/repos/test/test/actions/permissions",
+            status=204,
+        )
+        kwargs: dict[str, object] = {"status": pr_status}
+        if pr_body is None:
+            kwargs["json"] = pr_response or {}
+        else:
+            kwargs["body"] = pr_body
+            if pr_content_type is not None:
+                kwargs["content_type"] = pr_content_type
+        responses.add(
             responses.POST,
             "https://api.github.com/repos/WeblateOrg/test/pulls",
-            json=pr_response,
-            status=pr_status,
+            **kwargs,
         )
 
     def test_api_url_github_com(self) -> None:
@@ -1149,8 +2767,6 @@ class VCSGitHubTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://github.com/WeblateOrg/test.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1167,8 +2783,6 @@ class VCSGitHubTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_pull_request_error(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://github.com/WeblateOrg/test.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1185,9 +2799,70 @@ class VCSGitHubTest(VCSGitUpstreamTest):
         mock_push_to_fork.stop()
 
     @responses.activate
-    def test_pull_request_exists(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://github.com/WeblateOrg/test.git"
+    def test_pull_request_empty_server_error(self) -> None:
+        with patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork") as mocked_push:
+            mocked_push.return_value = ""
+            self.mock_responses(pr_status=500, pr_body="")
 
+            with self.assertRaises(RepositoryError) as error:
+                super().test_push("")
+
+        message = error.exception.get_message()
+        self.assertIn(
+            "GitHub API request failed while creating a pull request", message
+        )
+        self.assertIn("500 Internal Server Error", message)
+        self.assertIn("Please retry later.", message)
+        self.assertNotIn("JSONDecodeError", message)
+
+    @responses.activate
+    def test_pull_request_html_server_error(self) -> None:
+        with patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork") as mocked_push:
+            mocked_push.return_value = ""
+            self.mock_responses(
+                pr_status=502,
+                pr_body="<html><body>Bad gateway</body></html>",
+                pr_content_type="text/html",
+            )
+
+            with self.assertRaises(RepositoryError) as error:
+                super().test_push("")
+
+        message = error.exception.get_message()
+        self.assertIn(
+            "GitHub API request failed while creating a pull request", message
+        )
+        self.assertIn("502 Bad Gateway", message)
+        self.assertIn("Please retry later.", message)
+        self.assertNotIn("<html>", message)
+
+    @responses.activate
+    def test_pull_request_client_errors_do_not_suggest_retry(self) -> None:
+        for status in (401, 403, 404, 422):
+            with self.subTest(status=status):
+                responses.reset()
+                with patch(
+                    "weblate.vcs.git.GitMergeRequestBase.push_to_fork"
+                ) as mocked_push:
+                    mocked_push.return_value = ""
+                    self.mock_responses(
+                        pr_status=status,
+                        pr_response={"message": "Some error"},
+                    )
+
+                    with self.assertRaises(RepositoryError) as error:
+                        super().test_push("")
+
+                message = error.exception.get_message()
+                self.assertIn(
+                    "GitHub API request failed while creating a pull request", message
+                )
+                self.assertIn(str(status), message)
+                self.assertIn("Some error", message)
+                self.assertNotIn("Please retry later.", message)
+
+    @responses.activate
+    def test_pull_request_exists(self, branch: str = "") -> None:
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1208,6 +2883,7 @@ class VCSGitHubTest(VCSGitUpstreamTest):
     def test_merge_message(self) -> None:
         repo = self.repo
         component = repo.component
+        component.inherit_pull_message = False
         component.pull_message = "Test message\n\nBody"
         self.assertEqual(repo.get_merge_message(), ("Test message", "Body"))
         component.pull_message = "Test message\r\n\r\nBody"
@@ -1228,6 +2904,7 @@ class VCSGitLabTest(VCSGitUpstreamTest):
     _class = GitLabFakeRepository
     _vcs = "git"
     _sets_push = False
+    _repo_override = "https://gitlab.com/WeblateOrg/test.git"
 
     def mock_fork_responses(self, get_forks, repo_state=200) -> None:
         if repo_state == 409:
@@ -1452,8 +3129,6 @@ class VCSGitLabTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://gitlab.com/WeblateOrg/test.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1473,8 +3148,6 @@ class VCSGitLabTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push_with_existing_fork(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://gitlab.com/WeblateOrg/test.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1507,9 +3180,62 @@ class VCSGitLabTest(VCSGitUpstreamTest):
         self.assertEqual(call_count, 1)
 
     @responses.activate
-    def test_push_duplicate_repo_name(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://gitlab.com/WeblateOrg/test.git"
+    def test_fork_listing_non_json_server_error(self, branch: str = "") -> None:
+        """Test fork discovery with non-JSON server errors."""
+        fork_list_url = (
+            "https://gitlab.com/api/v4/projects/WeblateOrg%2Ftest/forks?owned=True"
+        )
+        fork_create_url = "https://gitlab.com/api/v4/projects/WeblateOrg%2Ftest/fork"
 
+        for body, content_type in (
+            ("", None),
+            ("<html><body>Bad gateway</body></html>", "text/html"),
+        ):
+            with self.subTest(body=body):
+                responses.reset()
+                response_kwargs: dict[str, object] = {
+                    "body": body,
+                    "status": 502,
+                }
+                if content_type is not None:
+                    response_kwargs["content_type"] = content_type
+                responses.add(responses.GET, fork_list_url, **response_kwargs)
+                responses.add(
+                    responses.POST,
+                    fork_create_url,
+                    json={
+                        "ssh_url_to_repo": "git@gitlab.com:test/test.git",
+                        "http_url_to_repo": "https://gitlab.com/test/test.git",
+                        "_links": {
+                            "self": "https://gitlab.com/api/v4/projects/20227391"
+                        },
+                    },
+                )
+
+                with (
+                    self.assertRaises(RepositoryError) as error,
+                    patch(
+                        "weblate.vcs.git.GitMergeRequestBase.push_to_fork",
+                        return_value="",
+                    ),
+                ):
+                    super().test_push(branch)
+
+                message = error.exception.get_message()
+                self.assertIn("Could not fork repository", message)
+                self.assertIn("502 Bad Gateway", message)
+                self.assertIn("Please retry later.", message)
+                self.assertNotIn("<html>", message)
+                fork_create_calls = [
+                    call
+                    for call in responses.calls
+                    if call.request.method == "POST"
+                    and call.request.url == fork_create_url
+                ]
+                self.assertEqual(fork_create_calls, [])
+
+    @responses.activate
+    def test_push_duplicate_repo_name(self, branch: str = "") -> None:
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1537,8 +3263,6 @@ class VCSGitLabTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push_rejected(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://gitlab.com/WeblateOrg/test.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1566,9 +3290,34 @@ class VCSGitLabTest(VCSGitUpstreamTest):
         self.assertEqual(call_count, 1)
 
     @responses.activate
-    def test_pull_request_error(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://gitlab.com/WeblateOrg/test.git"
+    def test_get_target_project_id_auth_error(self) -> None:
+        responses.add(
+            responses.GET,
+            "https://gitlab.com/api/v4/projects/WeblateOrg%2Ftest",
+            json={
+                "error": "invalid_token",
+                "error_description": "Token is expired.",
+            },
+            status=401,
+        )
 
+        with (
+            patch("weblate.vcs.git.report_error") as mock_report_error,
+            self.assertRaisesMessage(
+                RepositoryError,
+                "Could not get GitLab project (401): invalid_token, Token is expired.",
+            ),
+        ):
+            self.repo.get_target_project_id(self.repo.get_credentials())
+
+        mock_report_error.assert_called_once_with(
+            "Could not get GitLab project",
+            message=True,
+            extra_log="401: invalid_token, Token is expired.",
+        )
+
+    @responses.activate
+    def test_pull_request_error(self, branch: str = "") -> None:
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1585,8 +3334,6 @@ class VCSGitLabTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_pull_request_exists(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://gitlab.com/WeblateOrg/test.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1603,6 +3350,84 @@ class VCSGitLabTest(VCSGitUpstreamTest):
         super().test_push(branch)
         mock_push_to_fork.stop()
 
+    def test_count_outgoing_after_merge(self) -> None:
+        """Test that count_outgoing correctly detects no pending changes after merge."""
+        # Make a commit locally
+        self.test_commit()
+
+        # Verify there are outgoing commits before any push/merge
+        initial_count = self.repo.count_outgoing()
+        self.assertGreater(initial_count, 0)
+
+        # Scenario 1: Simulate the commit being pushed to fork
+        # The fork branch name is from get_fork_branch_name() method
+        credentials = self.repo.get_credentials()
+        fork_branch_name = self.repo.get_fork_branch_name()
+        fork_ref = f"refs/remotes/{credentials['username']}/{fork_branch_name}"
+        self.repo.execute(
+            ["update-ref", fork_ref, "HEAD"],
+            remote_op="none",
+            needs_lock=False,
+        )
+
+        # count_outgoing should now be 0 since fork has our commits
+        # (even though origin doesn't yet - MR is pending)
+        self.assertEqual(self.repo.count_outgoing(), 0)
+
+        # Scenario 2: Simulate the merge request being merged to origin
+        # In a real scenario, after a merge request is merged and git fetch is done,
+        # origin/{branch} would contain the local commits
+        origin_ref = f"refs/remotes/origin/{self.repo.branch}"
+        self.repo.execute(
+            ["update-ref", origin_ref, "HEAD"],
+            remote_op="none",
+            needs_lock=False,
+        )
+
+        # count_outgoing should still return 0 since origin has our commits
+        self.assertEqual(self.repo.count_outgoing(), 0)
+
+        # Verify with explicit branch parameter
+        self.assertEqual(self.repo.count_outgoing(self.repo.branch), 0)
+
+    def test_count_outgoing_non_default_branch(self) -> None:
+        """Test count_outgoing with non-default branch doesn't check fork."""
+        # Make a commit locally
+        self.test_commit()
+
+        # When called with a different branch than self.branch,
+        # should_use_fork() returns False, so fork checking is skipped
+        # Create a different branch name
+        different_branch = "develop" if self.repo.branch != "develop" else "feature"
+
+        # Update origin ref for the different branch
+        origin_ref = f"refs/remotes/origin/{different_branch}"
+        self.repo.execute(
+            ["update-ref", origin_ref, "HEAD"],
+            remote_op="none",
+            needs_lock=False,
+        )
+
+        # count_outgoing with different branch should return 0
+        # (commits are in origin for that branch, fork not checked)
+        self.assertEqual(self.repo.count_outgoing(different_branch), 0)
+
+    def test_needs_push_non_default_branch_ignores_stale_fork(self) -> None:
+        """Direct-push branch checks should not be suppressed by stale fork refs."""
+        self.test_commit()
+
+        credentials = self.repo.get_credentials()
+        fork_branch_name = self.repo.get_fork_branch_name()
+        fork_ref = f"refs/remotes/{credentials['username']}/{fork_branch_name}"
+        self.repo.execute(
+            ["update-ref", fork_ref, "HEAD"],
+            remote_op="none",
+            needs_lock=False,
+        )
+
+        different_branch = "develop" if self.repo.branch != "develop" else "feature"
+        self.assertTrue(self.repo.needs_push(different_branch))
+
 
 @override_settings(
     PAGURE_CREDENTIALS={"pagure.io": {"username": "test", "token": "token"}}
@@ -1611,6 +3436,7 @@ class VCSPagureTest(VCSGitUpstreamTest):
     _class = PagureFakeRepository
     _vcs = "git"
     _sets_push = False
+    _repo_override = "https://pagure.io/testrepo.git"
 
     def mock_responses(self, pr_response: dict, existing_response: dict) -> None:
         """Mock response helper function."""
@@ -1641,8 +3467,6 @@ class VCSPagureTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://pagure.io/testrepo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1661,8 +3485,6 @@ class VCSPagureTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push_with_existing_fork(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://pagure.io/testrepo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1690,8 +3512,6 @@ class VCSPagureTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push_with_existing_request(self, branch: str = "") -> None:
-        self.repo.component.repo = "https://pagure.io/testrepo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -1728,9 +3548,126 @@ class VCSGerritTest(VCSGitUpstreamTest):
         # Create commit-msg hook, so that git-review doesn't try
         # to create one
         hook = os.path.join(repo.path, ".git", "hooks", "commit-msg")
-        with open(hook, "w") as handle:
-            handle.write("#!/bin/sh\nexit 0\n")
-        os.chmod(hook, 0o755)  # noqa: S103, nosec
+        Path(hook).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(hook, 0o755)  # ruff: ignore[bad-file-permissions]  # nosec
+        if isinstance(repo, GitWithGerritRepository):
+            repo.config_update(('remote "gerrit"', "url", self.get_remote_repo_url()))
+
+    def test_configure_remote_sets_gerrit_fetch(self) -> None:
+        with self.repo.lock:
+            self.repo.configure_remote(
+                "pullurl", "ssh://sshuser@domain.com:29418/repo.git", "branch"
+            )
+            self.assertEqual(
+                self.repo.get_config("remote.gerrit.fetch"),
+                "+refs/heads/branch:refs/remotes/gerrit/branch",
+            )
+            self.assertEqual(self.repo.get_config("remote.gerrit.tagOpt"), "--no-tags")
+
+    def test_configure_remote_removes_gerrit_fetch_without_push(self) -> None:
+        with self.repo.lock:
+            self.repo.configure_remote(
+                "pullurl", "ssh://sshuser@domain.com:29418/repo.git", "branch"
+            )
+            self.repo.configure_remote("pullurl", "", "branch")
+            with self.assertRaises(RepositoryError):
+                self.repo.get_config("remote.gerrit.url")
+            with self.assertRaises(RepositoryError):
+                self.repo.get_config("remote.gerrit.fetch")
+            with self.assertRaises(RepositoryError):
+                self.repo.get_config("remote.gerrit.tagOpt")
+
+    def test_push_branch_targets_gerrit_review_branch(self) -> None:
+        with (
+            self.repo.lock,
+            patch.object(self.repo, "needs_push", return_value=True) as needs_push,
+            patch.object(self.repo, "execute") as execute,
+        ):
+            self.repo.push("review-branch")
+
+        needs_push.assert_called_once_with("review-branch")
+        execute.assert_called_once_with(
+            ["review", "--remote", "gerrit", "--yes", "review-branch"],
+            remote_op="push",
+        )
+        self.assertEqual(
+            self.repo.get_config("remote.gerrit.fetch"),
+            "+refs/heads/review-branch:refs/remotes/gerrit/review-branch",
+        )
+
+    def test_push_branch_targets_gerrit_review_branch_with_options(self) -> None:
+        with (
+            self.repo.lock,
+            patch.object(self.repo, "needs_push", return_value=True) as needs_push,
+            patch.object(self.repo, "execute") as execute,
+        ):
+            self.repo.push("review-branch%topic=l10n,hashtag=translations")
+
+        needs_push.assert_called_once_with(
+            "review-branch%topic=l10n,hashtag=translations"
+        )
+        execute.assert_called_once_with(
+            [
+                "review",
+                "--remote",
+                "gerrit",
+                "--yes",
+                "review-branch%topic=l10n,hashtag=translations",
+            ],
+            remote_op="push",
+        )
+        self.assertEqual(
+            self.repo.get_config("remote.gerrit.fetch"),
+            "+refs/heads/review-branch:refs/remotes/gerrit/review-branch",
+        )
+
+    def test_branch_targets_gerrit_review_branch_with_options(self) -> None:
+        self.repo.branch = "review-branch%topic=l10n,hashtag=translations"
+
+        with (
+            self.repo.lock,
+            patch.object(self.repo, "needs_push", return_value=True) as needs_push,
+            patch.object(self.repo, "execute") as execute,
+        ):
+            self.repo.push("")
+
+        needs_push.assert_called_once_with("")
+        execute.assert_called_once_with(
+            [
+                "review",
+                "--remote",
+                "gerrit",
+                "--yes",
+                "review-branch%topic=l10n,hashtag=translations",
+            ],
+            remote_op="push",
+        )
+        self.assertEqual(
+            self.repo.get_config("remote.gerrit.fetch"),
+            "+refs/heads/review-branch:refs/remotes/gerrit/review-branch",
+        )
+
+    def test_remove_stale_branches_keeps_gerrit_review_target_branch(self) -> None:
+        self.repo.branch = "main%topic=l10n,hashtag=translations"
+
+        with (
+            self.repo.lock,
+            patch.object(self.repo, "list_branches", return_value=["main", "stale"]),
+            patch.object(self.repo, "execute", return_value="") as execute,
+        ):
+            self.repo.remove_stale_branches()
+
+        execute.assert_any_call(
+            ["branch", "--delete", "--force", "stale"], remote_op="none"
+        )
+        self.assertNotIn(
+            call(["branch", "--delete", "--force", "main"], remote_op="none"),
+            execute.mock_calls,
+        )
+
+    def test_push_branch(self) -> None:
+        self.test_commit()
+        self.test_push("translations")
 
     def test_set_gitreview_username_git(self) -> None:
         with self.repo.lock:
@@ -1766,7 +3703,7 @@ class VCSGerritTest(VCSGitUpstreamTest):
 class VCSSubversionTest(VCSGitTest):
     _class = SubversionRepository
     _vcs = "subversion"
-    _remote_branches = []
+    _remote_branches: ClassVar[list[str]] = []
     _remote_branch = "master"
 
     def test_clone(self) -> None:
@@ -1803,6 +3740,23 @@ class VCSSubversionTest(VCSGitTest):
             self.format_local_path(self.subversion_repo_path),
         )
 
+    def test_push_runtime_private_repo_rejected_even_with_safe_push_url(self) -> None:
+        self.repo.component.repo = "https://private.example/repo"
+        self.repo.component.push = "https://example.com/repo"
+        with (
+            self.repo.lock,
+            patch.object(self._class, "_popen") as mock_popen,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            self.repo.push("")
+
+        self.assert_no_popen_sequence(mock_popen, "svn", "dcommit")
+        self.assertIn("internal or non-public address", str(error.exception))
+
 
 class VCSSubversionBranchTest(VCSSubversionTest):
     """Cloning subversion branch directly."""
@@ -1817,7 +3771,7 @@ class VCSHgTest(VCSGitTest):
 
     _class = HgRepository
     _vcs = "mercurial"
-    _remote_branches = []
+    _remote_branches: ClassVar[list[str]] = []
     _remote_branch = "default"
 
     def test_configure_remote(self) -> None:
@@ -1846,9 +3800,62 @@ class VCSHgTest(VCSGitTest):
             self.repo.get_config("ui", "username"), "Foo Bar Žač <foo@example.net>"
         )
 
+    def test_ensure_config_updated_refreshes_ssh_path(self) -> None:
+        old_cache_key = f"sp-config-check-{self.repo.component.pk}"
+        new_cache_key = get_config_check_cache_key(self.repo.component.pk)
+        cache.set(old_cache_key, True, 86400)
+        cache.delete(new_cache_key)
+
+        with self.repo.lock:
+            self.repo.set_config_values(
+                ("ui", "ssh", os.path.join(self.tempdir, "legacy-ssh-wrapper"))
+            )
+
+        repo = self._class(
+            self.tempdir,
+            branch=self._remote_branch,
+            component=self.get_fake_component(),
+        )
+        with repo.lock:
+            repo.ensure_config_updated()
+
+        self.assertEqual(repo.get_config("ui", "ssh"), SSH_WRAPPER.filename.as_posix())
+
     def test_status(self) -> None:
         status = self.repo.status()
         self.assertEqual(status, "")
+
+    def test_count_outgoing_runtime_private_url_rejected(self) -> None:
+        self.repo.component.repo = "https://private.example/repo"
+        with (
+            patch.object(self._class, "_popen") as mock_popen,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            self.repo.count_outgoing()
+
+        mock_popen.assert_not_called()
+        self.assertIn("internal or non-public address", str(error.exception))
+
+    def test_reset_runtime_private_url_rejected(self) -> None:
+        self.repo.component.repo = "https://private.example/repo"
+        with (
+            self.repo.lock,
+            patch.object(self._class, "_popen") as mock_popen,
+            patch(
+                "weblate.utils.outbound.socket.getaddrinfo",
+                return_value=[(0, 0, 0, "", ("127.0.0.1", 443))],
+            ),
+            self.assertRaises(RepositoryError) as error,
+        ):
+            self.repo.reset()
+
+        self.assert_no_popen_sequence(mock_popen, "update", "--clean", "remote(.)")
+        self.assert_no_popen_sequence(mock_popen, "strip", "roots(outgoing())")
+        self.assertIn("internal or non-public address", str(error.exception))
 
 
 class VCSLocalTest(VCSGitTest):
@@ -1856,7 +3863,7 @@ class VCSLocalTest(VCSGitTest):
 
     _class = LocalRepository
     _vcs = "local"
-    _remote_branches = []
+    _remote_branches: ClassVar[list[str]] = []
     _remote_branch = "main"
 
     @classmethod
@@ -1864,6 +3871,19 @@ class VCSLocalTest(VCSGitTest):
         super().setUpClass()
         # Global setup to configure git committer
         GitRepository.global_setup()
+
+    def test_global_setup_disables_git_auto_maintenance(self) -> None:
+        with tempfile.TemporaryDirectory() as data_dir:
+            home = Path(data_dir) / "home"
+            home.mkdir()
+
+            with override_settings(DATA_DIR=data_dir):
+                GitRepository.global_setup()
+
+            config = RawConfigParser()
+            config.read(home / ".gitconfig")
+            self.assertEqual(config.get("maintenance", "auto"), "0")
+            self.assertEqual(config.get("gc", "auto"), "0")
 
     def test_status(self) -> None:
         status = self.repo.status()
@@ -1901,6 +3921,100 @@ class VCSLocalTest(VCSGitTest):
     def test_configure_remote_no_push(self) -> NoReturn:
         self.skipTest("Not supported")
 
+    def test_should_retry_popen(self) -> None:
+        # This really belongs to the Git class, but we want to test it just once
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            tempdir = Path(tempdir_name)
+            gitdir = tempdir / ".git"
+            gitdir.mkdir()
+            lockfile = gitdir / "HEAD.lock"
+            lockfile.touch()
+            past_timestamp = time() - 7200
+            utime(lockfile, (past_timestamp, past_timestamp))
+            self.assertFalse(
+                self.repo.should_retry_popen(f"""
+fatal: cannot lock ref 'HEAD': Unable to create '/nonexisting/{lockfile}': File exists.
+""")
+            )
+
+            self.assertTrue(
+                self.repo.should_retry_popen(f"""
+fatal: cannot lock ref 'HEAD': Unable to create '{lockfile}': File exists.
+
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+""")
+            )
+
+    def test_from_zip_rejects_symlink_entry(self) -> None:
+        archive = BytesIO()
+        with ZipFile(archive, "w") as zipfile:
+            zipfile.writestr("symlink", "ignored")
+            info = zipfile.getinfo("symlink")
+            info.external_attr = 0o120777 << 16
+        archive.seek(0)
+        target = os.path.join(self.tempdir, "from-zip-symlink")
+
+        with self.assertRaisesRegex(
+            RepositoryError, "ZIP file contains unsupported symbolic links"
+        ):
+            LocalRepository.from_zip(target, archive)
+
+    def test_from_zip_rejects_path_outside_target(self) -> None:
+        archive = BytesIO()
+        with ZipFile(archive, "w") as zipfile:
+            zipfile.writestr("../../outside.txt", "blocked")
+        archive.seek(0)
+        target = os.path.join(self.tempdir, "from-zip-path")
+
+        with self.assertRaisesRegex(RepositoryError, "ZIP file contains invalid path"):
+            LocalRepository.from_zip(target, archive)
+        self.assertFalse(os.path.exists(target))
+
+    def test_from_zip_rejects_too_many_entries(self) -> None:
+        archive = BytesIO()
+        with ZipFile(archive, "w") as zipfile:
+            zipfile.writestr("first.po", "msgid ''\nmsgstr ''\n")
+            zipfile.writestr("second.po", "msgid ''\nmsgstr ''\n")
+        archive.seek(0)
+        target = os.path.join(self.tempdir, "from-zip-too-many")
+
+        with (
+            patch.object(
+                LocalRepository,
+                "ZIP_IMPORT_LIMITS",
+                ZipSafetyLimits(max_members=1),
+            ),
+            self.assertRaisesRegex(RepositoryError, "contains too many entries"),
+        ):
+            LocalRepository.from_zip(target, archive)
+
+    def test_from_zip_rejects_compressed_large_entry(self) -> None:
+        archive = BytesIO()
+        with ZipFile(archive, "w") as zipfile:
+            zipfile.writestr("large.po", b"a" * 5000, compress_type=ZIP_DEFLATED)
+        archive.seek(0)
+        target = os.path.join(self.tempdir, "from-zip-compressed")
+
+        with (
+            patch.object(
+                LocalRepository,
+                "ZIP_IMPORT_LIMITS",
+                ZipSafetyLimits(
+                    max_compressed_entry_size=100,
+                    min_compressed_ratio_size=10,
+                    max_compressed_entry_ratio=5,
+                ),
+            ),
+            self.assertRaisesRegex(
+                RepositoryError, "compressed entry that is too large"
+            ),
+        ):
+            LocalRepository.from_zip(target, archive)
+
 
 @override_settings(
     BITBUCKETSERVER_CREDENTIALS={
@@ -1913,8 +4027,11 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
     _sets_push = False
 
     _bbhost = "https://api.selfhosted.com"
-    _bb_api_error_stub = {"errors": [{"context": "<string>", "message": "<string>"}]}
-    _bb_fork_stub = {
+    _repo_override = f"{_bbhost}/bb_pk/bb_repo.git"
+    _bb_api_error_stub: ClassVar[dict] = {
+        "errors": [{"context": "<string>", "message": "<string>"}]
+    }
+    _bb_fork_stub: ClassVar[dict] = {
         "id": "222",
         "slug": "bb_fork",
         "project": {"key": "bb_fork_pk"},
@@ -1983,7 +4100,7 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
         if pages > 0:  # Add paginated irrelevant responses
             while pages > 0:
                 fork_stub = copy.deepcopy(self._bb_fork_stub)
-                fork_stub["slug"] = "not_the_slug_youre_looking_for"
+                fork_stub["slug"] = "not_the_slug_you_are_looking_for"
                 page_body = {"values": [{"origin": fork_stub}], "isLastPage": False}
 
                 params = f"limit=1000&start={pages}"
@@ -2003,7 +4120,7 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
             status=status,
         )
 
-    def mock_reviewer_reponse(self, status, branch: str = "") -> None:
+    def mock_reviewer_response(self, status, branch: str = "") -> None:
         path = "rest/default-reviewers/1.0/projects/bb_pk/repos/bb_repo/reviewers"
         body: dict[str, Any] | list = []
         if status == 200:
@@ -2081,8 +4198,6 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_default_reviewers_repo_error(self) -> None:
-        self.repo.component.repo = f"{self._bbhost}/bb_pk/bb_repo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -2103,8 +4218,6 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_default_reviewers_error(self) -> None:
-        self.repo.component.repo = f"{self._bbhost}/bb_pk/bb_repo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -2114,7 +4227,7 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
         mock_push_to_fork.return_value = ""
 
         self.mock_repo_response(200)  # get target repo info
-        self.mock_reviewer_reponse(400)  # get default reviewers
+        self.mock_reviewer_response(400)  # get default reviewers
         self.repo.bb_fork = {"id": "222"}
         credentials = {
             "url": f"{self._bbhost}/rest/api/1.0/projects/bb_pk/repos/bb_repo",
@@ -2127,8 +4240,6 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push(self, branch: str = "") -> None:
-        self.repo.component.repo = f"{self._bbhost}/bb_pk/bb_repo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -2139,15 +4250,13 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
 
         self.mock_fork_response(201)  # fork created
         self.mock_repo_response(200)  # get target repo info
-        self.mock_reviewer_reponse(200, branch)  # get default reviewers
+        self.mock_reviewer_response(200, branch)  # get default reviewers
         self.mock_pr_response(201)  # create pr ok
         super().test_push(branch)
         mock_push_to_fork.stop()
 
     @responses.activate
     def test_push_with_existing_pr(self, branch: str = "") -> None:
-        self.repo.component.repo = f"{self._bbhost}/bb_pk/bb_repo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -2158,15 +4267,13 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
 
         self.mock_fork_response(201)  # fork created
         self.mock_repo_response(200)  # get target repo info
-        self.mock_reviewer_reponse(200, branch)  # get default reviewers
+        self.mock_reviewer_response(200, branch)  # get default reviewers
         self.mock_pr_response(409)  # create pr error, PR already exists
         super().test_push(branch)
         mock_push_to_fork.stop()
 
     @responses.activate
-    def test_push_pr_error_reponse(self, branch: str = "") -> None:
-        self.repo.component.repo = f"{self._bbhost}/bb_pk/bb_repo.git"
-
+    def test_push_pr_error_response(self, branch: str = "") -> None:
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -2177,7 +4284,7 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
 
         self.mock_fork_response(201)  # fork created
         self.mock_repo_response(200)  # get target repo info
-        self.mock_reviewer_reponse(200, branch)  # get default reviewers
+        self.mock_reviewer_response(200, branch)  # get default reviewers
         self.mock_pr_response(401)  # create pr error
         with self.assertRaises(RepositoryError):
             super().test_push(branch)
@@ -2185,8 +4292,6 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_push_with_existing_fork(self, branch: str = "") -> None:
-        self.repo.component.repo = f"{self._bbhost}/bb_pk/bb_repo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -2198,15 +4303,13 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
         self.mock_fork_response(status=409)  # fork already exists
         self.mock_repo_forks_response(status=200, pages=3)  # simulate pagination
         self.mock_repo_response(200)  # get target repo info
-        self.mock_reviewer_reponse(200, branch)  # get default reviewers
+        self.mock_reviewer_response(200, branch)  # get default reviewers
         self.mock_pr_response(201)  # create pr ok
         super().test_push(branch)
         mock_push_to_fork.stop()
 
     @responses.activate
     def test_create_fork_unexpected_fail(self, branch: str = "") -> None:
-        self.repo.component.repo = f"{self._bbhost}/bb_pk/bb_repo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -2222,8 +4325,6 @@ class VCSBitbucketServerTest(VCSGitUpstreamTest):
 
     @responses.activate
     def test_existing_fork_not_found(self, branch: str = "") -> None:
-        self.repo.component.repo = f"{self._bbhost}/bb_pk/bb_repo.git"
-
         # Patch push_to_fork() function because we don't want to actually
         # make a git push request
         mock_push_to_fork_patcher = patch(
@@ -2254,6 +4355,7 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     _vcs = "git"
     _sets_push = False
     _apihost = "bitbucket.org"
+    _repo_override = "git@bitbucket.org:WeblateOrg/test.git"
 
     def mock_responses(self) -> None:
         """
@@ -2307,13 +4409,16 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
 
         responses.add(
             responses.GET,
-            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/default-reviewers",
+            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/effective-default-reviewers",
             json={
                 "values": [
                     {
                         "type": "default_reviewer",
-                        "display_name": "reviewer_1",
-                        "uuid": "reviewer-uuid",
+                        "reviewer_type": "project",
+                        "user": {
+                            "display_name": "reviewer_1",
+                            "uuid": "reviewer-uuid",
+                        },
                     }
                 ],
                 "pagelen": 10,
@@ -2339,7 +4444,6 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     @responses.activate
     def test_push(self, branch: str = "") -> None:
         """Test push to bitbucket cloud."""
-        self.repo.component.repo = "git@bitbucket.org:WeblateOrg/test.git"
         self.mock_responses()
         with patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork", return_value=""):
             super().test_push(branch)
@@ -2347,7 +4451,6 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     @responses.activate
     def test_push_with_http(self, branch: str = "") -> None:
         """Test push to bitbucket cloud with HTTP repo link."""
-        self.repo.component.repo = "https://bitbucket.org/WeblateOrg/test.git"
         self.mock_responses()
         with patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork", return_value=""):
             super().test_push(branch)
@@ -2355,8 +4458,6 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     @responses.activate
     def test_push_with_missing_permission(self, branch: str = "") -> None:
         """Test push with missing permission for App Password."""
-        self.repo.component.repo = "git@bitbucket.org:WeblateOrg/test.git"
-
         self.mock_responses()
         responses.replace(
             responses.POST,
@@ -2380,14 +4481,75 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
             super().test_push(branch)
 
     @responses.activate
+    def test_pull_request_non_json_server_error(self, branch: str = "") -> None:
+        """Test pull request creation with non-JSON server errors."""
+        for body, content_type in (
+            ("", None),
+            ("<html><body>Bad gateway</body></html>", "text/html"),
+        ):
+            with self.subTest(body=body):
+                responses.reset()
+                self.mock_responses()
+                response_kwargs: dict[str, object] = {
+                    "body": body,
+                    "status": 502,
+                }
+                if content_type is not None:
+                    response_kwargs["content_type"] = content_type
+                responses.replace(
+                    responses.POST,
+                    "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/pullrequests",
+                    **response_kwargs,
+                )
+
+                with (
+                    self.assertRaises(RepositoryError) as error,
+                    patch(
+                        "weblate.vcs.git.GitMergeRequestBase.push_to_fork",
+                        return_value="",
+                    ),
+                ):
+                    super().test_push(branch)
+
+                message = error.exception.get_message()
+                self.assertIn(
+                    "Bitbucket Cloud API request failed while creating a pull request",
+                    message,
+                )
+                self.assertIn("502 Bad Gateway", message)
+                self.assertIn("Please retry later.", message)
+                self.assertNotIn("<html>", message)
+
+    @responses.activate
+    def test_fork_non_json_server_error(self, branch: str = "") -> None:
+        """Test fork creation with a non-JSON server error."""
+        self.mock_responses()
+        responses.replace(
+            responses.POST,
+            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/forks",
+            body="",
+            status=502,
+        )
+
+        with (
+            self.assertRaises(RepositoryError) as error,
+            patch("weblate.vcs.git.GitMergeRequestBase.push_to_fork", return_value=""),
+        ):
+            super().test_push(branch)
+
+        message = error.exception.get_message()
+        self.assertIn("Could not fork repository", message)
+        self.assertIn("502 Bad Gateway", message)
+        self.assertIn("Please retry later.", message)
+
+    @responses.activate
     def test_default_reviewers_error(self, branch: str = "") -> None:
         """Test default reviewers error, push expected to be successful."""
-        self.repo.component.repo = "git@bitbucket.org:WeblateOrg/test.git"
         self.mock_responses()
 
         responses.replace(
             responses.GET,
-            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/default-reviewers",
+            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/effective-default-reviewers",
             json={
                 "type": "error",
                 "error": {
@@ -2406,36 +4568,41 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     @responses.activate
     def test_paginated_reviewers_list(self, branch: str = "") -> None:
         """Test the 'build_full_paginated_result' with default reviewers list."""
-        self.repo.component.repo = "git@bitbucket.org:WeblateOrg/test.git"
         self.mock_responses()
 
         responses.replace(
             responses.GET,
-            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/default-reviewers",
+            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/effective-default-reviewers",
             json={
                 "values": [
                     {
                         "type": "default_reviewer",
-                        "display_name": "reviewer_1",
-                        "uuid": "reviewer-uuid-1",
+                        "reviewer_type": "project",
+                        "user": {
+                            "display_name": "reviewer_1",
+                            "uuid": "reviewer-uuid-1",
+                        },
                     }
                 ],
                 "pagelen": 1,
                 "page": 1,
-                "next": "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/default-reviewers?page=2",
+                "next": "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/effective-default-reviewers?page=2",
             },
             status=200,
         )
 
         responses.add(
             responses.GET,
-            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/default-reviewers?page=2",
+            "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/effective-default-reviewers?page=2",
             json={
                 "values": [
                     {
                         "type": "default_reviewer",
-                        "display_name": "reviewer_2",
-                        "uuid": "reviewer-uuid-2",
+                        "reviewer_type": "repository",
+                        "user": {
+                            "display_name": "reviewer_2",
+                            "uuid": "reviewer-uuid-2",
+                        },
                     }
                 ],
                 "pagelen": 1,
@@ -2457,7 +4624,6 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     @responses.activate
     def test_push_nothing_to_merge(self, branch: str = "") -> None:
         """Test push to bitbucket cloud with no changes to be merged."""
-        self.repo.component.repo = "git@bitbucket.org:WeblateOrg/test.git"
         self.mock_responses()
 
         responses.replace(
@@ -2476,7 +4642,6 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     @responses.activate
     def test_fork_already_exists(self, branch: str = "") -> None:
         """Test push to bitbucket cloud with HTTP repo link."""
-        self.repo.component.repo = "git@bitbucket.org:WeblateOrg/test.git"
         self.mock_responses()
 
         responses.replace(
@@ -2514,7 +4679,6 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     @responses.activate
     def test_fork_name_already_taken(self, branch: str = "") -> None:
         """Test push to bitbucket cloud with HTTP repo link."""
-        self.repo.component.repo = "git@bitbucket.org:WeblateOrg/test.git"
         responses.add(
             responses.POST,
             "https://api.bitbucket.org/2.0/repositories/WeblateOrg/test/forks",
@@ -2536,7 +4700,6 @@ class VCSBitbucketCloudTest(VCSGitUpstreamTest):
     @responses.activate
     def test_fork_error(self, branch: str = "") -> None:
         """Test push to bitbucket cloud with HTTP repo link."""
-        self.repo.component.repo = "git@bitbucket.org:WeblateOrg/test.git"
         self.mock_responses()
         responses.replace(
             responses.POST,

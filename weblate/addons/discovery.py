@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from django.utils.translation import gettext_lazy
 
@@ -14,11 +14,13 @@ from weblate.addons.forms import DiscoveryForm
 from weblate.trans.discovery import ComponentDiscovery
 
 if TYPE_CHECKING:
+    from weblate.addons.forms import BaseAddonForm
     from weblate.auth.models import User
+    from weblate.trans.models import Component
 
 
 class DiscoveryAddon(BaseAddon):
-    events: set[AddonEvent] = {
+    events: ClassVar[set[AddonEvent]] = {
         AddonEvent.EVENT_POST_UPDATE,
     }
     name = "weblate.discovery.discovery"
@@ -34,20 +36,28 @@ class DiscoveryAddon(BaseAddon):
     needs_component = True
     trigger_update = True
 
-    def post_update(self, component, previous_head: str, skip_push: bool) -> None:
+    def post_update(
+        self,
+        component: Component,
+        previous_head: str,
+        skip_push: bool,
+        changed_files: list[str],
+        parse_after_update: bool = False,
+        activity_log_id: int | None = None,
+    ) -> None:
         discovery = self.get_discovery(component)
         discovery.perform(
             remove=self.instance.configuration.get("remove"), background=True
         )
 
-    def get_settings_form(self, user: User | None, **kwargs):
+    def get_settings_form(self, user: User | None, **kwargs) -> BaseAddonForm | None:
         """Return configuration form for this addon."""
         if "data" not in kwargs:
             kwargs["data"] = self.instance.configuration
             kwargs["data"]["confirm"] = False
         return super().get_settings_form(user, **kwargs)
 
-    def get_discovery(self, component):
+    def get_discovery(self, component: Component) -> ComponentDiscovery:
         # Handle old settings which did not have this set
         if "new_base_template" not in self.instance.configuration:
             self.instance.configuration["new_base_template"] = ""

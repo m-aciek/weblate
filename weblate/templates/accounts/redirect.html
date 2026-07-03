@@ -3,7 +3,7 @@
 {% load authnames i18n translations %}
 
 {% block breadcrumbs %}
-  <li>
+  <li class="breadcrumb-item">
     <a href="{% url 'login' %}">{% translate "Sign in" %}</a>
   </li>
 {% endblock breadcrumbs %}
@@ -19,7 +19,7 @@
       <a href=""
          class="btn btn-link link-auto link-post"
          data-href="{% url 'social:begin' backend %}"
-         {% if next %}data-params='{"next": "{{ next|escapejs }}"}'{% endif %}>{% auth_name backend " " %}</a>
+         {% if next %}data-params='{"next": "{{ next|escapejs }}"}'{% endif %}>{% auth_name backend %}</a>
     </div>
 
   </div>

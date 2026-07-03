@@ -9,7 +9,14 @@ on:
     branches-ignore:
     - renovate/**
     - weblate
+    - dependabot/**
+    - copilot/**
+    - codex/**
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -18,27 +25,21 @@ jobs:
   macos:
     # This verifies that installation instructions works, any changes here
     # need to be reflected in docs/admin/install/venv-macos.rst
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       PYTHONUNBUFFERED: 1
       PYTHONWARNINGS: default,ignore:unclosed:ResourceWarning
-      CI_DATABASE: postgresql
       CI_REDIS_HOST: localhost
       CI_DB_HOST: localhost
       DJANGO_SETTINGS_MODULE: weblate.settings_test
       CI_SKIP_SAML: 1
     steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
         persist-credentials: false
     - run: brew update
-    - run: brew uninstall openssl@1.1
-    - run: brew uninstall python@3.12 azure-cli
-    - run: brew untap homebrew/cask
-    - run: brew untap homebrew/core
-    - run: brew untap aws/tap
     - run: brew upgrade
-    - run: brew cleanup
+      continue-on-error: true
     - run: brew list --versions
     - run: brew deps --tree --installed
     - run: brew config
@@ -46,18 +47,18 @@ jobs:
       continue-on-error: true
     - name: Install brew dependencies
       run: |
-        brew install pango cairo gobject-introspection glib libyaml pkgconf zstd xxhash librsvg uv libxmlsec1
+        brew install python pango cairo gobject-introspection glib libyaml pkgconf zstd lz4 xxhash libxmlsec1 librsvg uv
     - name: Install test dependencies
       run: |
-        brew install mysql icu4c redis postgresql
+        brew install icu4c valkey postgresql
         brew link --force icu4c
     - name: Start services
       run: |
         brew services start postgresql
-        brew services start redis
+        brew services start valkey
     - name: Install Weblate
       run: |
-        uv venv --python python3.13 .venv
+        uv venv .venv
         source .venv/bin/activate
         uv sync --frozen --all-extras --dev --no-binary-package lxml --no-binary-package xmlsec
     - name: Test with Django
@@ -66,13 +67,14 @@ jobs:
         export CI_DB_USER="$(id -nu)"
         source .venv/bin/activate
         pytest --junitxml=junit.xml --cov=weblate --cov-report=xml --numprocesses=auto weblate
-    - uses: codecov/codecov-action@18283e04ce6e62d37312384ff67231eb8fd56d24 # v5.4.3
+    - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
       with:
-        token: ${{secrets.CODECOV_TOKEN}}
+        token: ${{secrets.CODECOV_TOKEN}} # zizmor: ignore[secrets-outside-env]
         flags: unittests
         name: Tests macos
     - name: Upload test results to Codecov
       if: ${{ !cancelled() }}
-      uses: codecov/test-results-action@47f89e9acb64b76debcd5ea40642d25a4adced9f # v1.1.1
+      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
       with:
-        token: ${{ secrets.CODECOV_TOKEN }}
+        token: ${{ secrets.CODECOV_TOKEN }} # zizmor: ignore[secrets-outside-env]
+        report_type: test_results

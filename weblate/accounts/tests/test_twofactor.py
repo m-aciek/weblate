@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest import mock
 
+from django.conf import settings
 from django.core import mail
 from django.urls import reverse
 from django.utils.timezone import now
@@ -18,7 +20,11 @@ from django_otp_webauthn.models import WebAuthnCredential
 
 from weblate.accounts.models import AuditLog
 from weblate.accounts.tasks import cleanup_auditlog
-from weblate.accounts.utils import SESSION_WEBAUTHN_AUDIT
+from weblate.accounts.utils import (
+    SECOND_FACTOR_VERIFY_SECONDS,
+    SESSION_SECOND_FACTOR_TIMESTAMP,
+    SESSION_WEBAUTHN_AUDIT,
+)
 from weblate.trans.tests.test_views import FixtureTestCase
 from weblate.utils.ratelimit import reset_rate_limit
 
@@ -48,19 +54,24 @@ class TwoFactorTestCase(FixtureTestCase):
             self.user, None, "twofactor-add", device="", skip_notify=True
         )
 
-    def assert_audit_mail(self) -> None:
-        self.assertEqual(len(mail.outbox), 1)
+    def assert_audit_mail(self, *, expected: int = 1) -> None:
+        self.assertEqual(len(mail.outbox), expected)
         self.assertEqual(
             mail.outbox[0].subject, "[Weblate] Activity on your account at Weblate"
         )
         mail.outbox.clear()
+
+    def post_with_callbacks(self, *args, **kwargs):
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(*args, **kwargs)
 
     def test_audit_maturing(self) -> None:
         audit = self.create_webauthn_audit()
         audit.timestamp = now() - timedelta(minutes=10)
         audit.save()
         self.assertEqual(len(mail.outbox), 0)
-        cleanup_auditlog()
+        with self.captureOnCommitCallbacks(execute=True):
+            cleanup_auditlog()
         self.assert_audit_mail()
 
     def test_webauthn(self) -> None:
@@ -78,7 +89,7 @@ class TwoFactorTestCase(FixtureTestCase):
         self.assertEqual(len(mail.outbox), 0)
 
         # Test initial naming
-        response = self.client.post(url, {"name": test_name}, follow=True)
+        response = self.post_with_callbacks(url, {"name": test_name}, follow=True)
         # The device should be listed
         self.assertContains(response, test_name)
         # Audit log mail should be triggered
@@ -97,13 +108,20 @@ class TwoFactorTestCase(FixtureTestCase):
         self.assertEqual(credential.name, test_name)
 
         # Test removal
-        response = self.client.post(url, {"delete": ""}, follow=True)
+        response = self.post_with_callbacks(url, {"delete": ""}, follow=True)
         self.assertEqual(WebAuthnCredential.objects.all().count(), 0)
         # The audit log for removal should be present
         self.assertContains(response, test_name)
         self.assert_audit_mail()
 
-    def add_totp(self, test_name: str = "test totp name"):
+    def add_totp(
+        self,
+        test_name: str = "test totp name",
+        *,
+        expected: int = 1,
+        expected_mail: int = 1,
+        remove_previous: str = "",
+    ):
         # Display form to get TOTP params
         response = self.client.get(reverse("totp"))
 
@@ -112,15 +130,33 @@ class TwoFactorTestCase(FixtureTestCase):
         totp_response = totp(totp_key, 30, 0, 6, 0)
 
         # Register TOTP device
-        response = self.client.post(
-            reverse("totp"), {"name": test_name, "token": totp_response}, follow=True
+        response = self.post_with_callbacks(
+            reverse("totp"),
+            {
+                "name": test_name,
+                "token": totp_response,
+                "remove_previous": remove_previous,
+            },
+            follow=True,
         )
         self.assertContains(response, test_name)
         devices = TOTPDevice.objects.all()
-        self.assertEqual(len(devices), 1)
+        self.assertEqual(len(devices), expected)
         device = devices[0]
-        self.assert_audit_mail()
+        self.assert_audit_mail(expected=expected_mail)
         return device
+
+    def test_manage_totp(self) -> None:
+        self.add_totp("TOTP 1")
+        self.add_totp("TOTP 2", expected=2)
+        self.assertEqual(
+            set(self.user.totpdevice_set.values_list("name", flat=True)),
+            {"TOTP 1", "TOTP 2"},
+        )
+        self.add_totp("TOTP 3", remove_previous="1", expected_mail=3)
+        self.assertEqual(
+            set(self.user.totpdevice_set.values_list("name", flat=True)), {"TOTP 3"}
+        )
 
     def test_totp(self) -> None:
         test_name = "test totp name"
@@ -128,7 +164,7 @@ class TwoFactorTestCase(FixtureTestCase):
         device = self.add_totp(test_name)
 
         # Remove it
-        response = self.client.post(
+        response = self.post_with_callbacks(
             reverse("totp-detail", kwargs={"pk": device.pk}),
             {"delete": "1"},
             follow=True,
@@ -158,7 +194,7 @@ class TwoFactorTestCase(FixtureTestCase):
         expected_url = reverse("2fa-login", kwargs={"backend": "totp"})
         self.assertRedirects(response, expected_url)
 
-        # We should be on 2fa page without an user set now
+        # We should be on 2fa page without a user set now
         self.assertNotEqual(response.context["user"], self.user)
 
         totp_response = totp(
@@ -171,6 +207,64 @@ class TwoFactorTestCase(FixtureTestCase):
         response = self.client.post(
             expected_url, {"otp_token": totp_response}, follow=True
         )
+        self.assertEqual(response.context["user"], self.user)
+        self.assertEqual(
+            self.client.session.get_expiry_age(),
+            settings.SESSION_COOKIE_AGE_AUTHENTICATED,
+        )
+
+    def test_login_totp_saml_expiry(self) -> None:
+        device = self.add_totp()
+        self.client.logout()
+        response = self.client.post(
+            reverse("login"),
+            {
+                "username": "testuser",
+                "password": "testpassword",
+                "next": "/idp/login/process/",
+            },
+        )
+
+        second_factor_url = response["Location"]
+        totp_response = totp(
+            device.bin_key, device.step, device.t0, device.digits, device.drift
+        )
+        response = self.client.post(second_factor_url, {"otp_token": totp_response})
+
+        self.assertRedirects(
+            response, "/idp/login/process/", fetch_redirect_response=False
+        )
+        self.assertEqual(self.client.session.get_expiry_age(), 60)
+
+    def test_login_totp_rejects_unsafe_next(self) -> None:
+        device = self.add_totp()
+        self.client.logout()
+
+        response = self.client.post(
+            reverse("login"),
+            {
+                "username": "testuser",
+                "password": "testpassword",
+                "next": "https://evil.example/",
+            },
+        )
+
+        second_factor_url = response["Location"]
+        self.assertTrue(
+            second_factor_url.startswith(
+                reverse("2fa-login", kwargs={"backend": "totp"})
+            )
+        )
+        self.assertIn("next=https%3A%2F%2Fevil.example%2F", second_factor_url)
+
+        totp_response = totp(
+            device.bin_key, device.step, device.t0, device.digits, device.drift
+        )
+        response = self.client.post(
+            second_factor_url, {"otp_token": totp_response}, follow=True
+        )
+
+        self.assertRedirects(response, reverse("home"))
         self.assertEqual(response.context["user"], self.user)
 
     def test_team_enforced_2fa(self) -> None:
@@ -187,6 +281,41 @@ class TwoFactorTestCase(FixtureTestCase):
         self.test_login_totp()
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
+
+    def test_password_requires_recent_second_factor(self) -> None:
+        self.add_totp()
+
+        with mock.patch("weblate.accounts.views.time.time") as mocked_time:
+            mocked_time.return_value = 2_000_000_000
+
+            stale_session = self.client.session
+            stale_session[SESSION_SECOND_FACTOR_TIMESTAMP] = int(
+                mocked_time.return_value
+            ) - (SECOND_FACTOR_VERIFY_SECONDS + 1)
+            stale_session.save()
+
+            response = self.client.get(reverse("password"))
+
+        self.assertRedirects(
+            response,
+            f"{reverse('2fa-login', kwargs={'backend': 'totp'})}?next={reverse('password')}",
+        )
+
+    def test_password_allows_recent_second_factor(self) -> None:
+        self.add_totp()
+
+        with mock.patch("weblate.accounts.views.time.time") as mocked_time:
+            mocked_time.return_value = 2_000_000_000
+
+            session = self.client.session
+            session[SESSION_SECOND_FACTOR_TIMESTAMP] = (
+                int(mocked_time.return_value) - SECOND_FACTOR_VERIFY_SECONDS
+            )
+            session.save()
+
+            response = self.client.get(reverse("password"))
+
+        self.assertContains(response, "Current password")
 
     def test_project_enforced_2fa(self) -> None:
         # Turn on enforcement on project and make user an admin

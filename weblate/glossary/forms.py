@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from django import forms
 from django.core.exceptions import ValidationError
@@ -15,7 +15,7 @@ from weblate.trans.models import Translation, Unit
 
 if TYPE_CHECKING:
     from weblate.auth.models import User
-    from weblate.trans.models.translation import NewUnitParams
+    from weblate.trans.models.translation import NewUnitParams, TranslationQuerySet
 
 
 class CommaSeparatedIntegerField(forms.Field):
@@ -41,32 +41,50 @@ class TermForm(NewBilingualGlossaryUnitForm, forms.ModelForm):
 
     class Meta:
         model = Unit
-        fields = ["context", "source", "target", "translation", "explanation"]
+        # ruff: ignore[mutable-class-default]
+        fields = [
+            "context",
+            "source",
+            "target",
+            "translation",
+            "explanation",
+        ]
+        # ruff: ignore[mutable-class-default]
         widgets = {
             "context": forms.TextInput,
             "source": forms.TextInput,
             "target": forms.TextInput,
             "explanation": forms.TextInput,
         }
+        # ruff: ignore[mutable-class-default]
         field_classes = {
             "translation": GlossaryModelChoiceField,
         }
 
-    def __init__(self, unit: Unit, user: User, data: dict | None = None) -> None:
+    def __init__(
+        self,
+        unit: Unit,
+        user: User,
+        data: dict | None = None,
+        glossaries: TranslationQuerySet | None = None,
+        filter_permissions: bool = True,
+    ) -> None:
         self.unit = unit
         translation = unit.translation
-        self.glossaries = Translation.objects.filter(
-            language=translation.language,
-            component__in=translation.component.project.glossaries,
-            component__manage_units=True,
-        )
-        exclude = [
-            glossary.pk
-            for glossary in self.glossaries
-            if not user.has_perm("unit.add", glossary)
-        ]
-        if exclude:
-            self.glossaries = self.glossaries.exclude(pk__in=exclude)
+        if glossaries is None:
+            glossaries = Translation.objects.filter(
+                language=translation.language,
+                component__in=translation.component.project.glossaries,
+            ).prefetch()
+        self.glossaries = glossaries.filter(component__manage_units=True)
+        if filter_permissions:
+            exclude = [
+                glossary.pk
+                for glossary in self.glossaries
+                if not user.has_perm("unit.add", glossary)
+            ]
+            if exclude:
+                self.glossaries = self.glossaries.exclude(pk__in=exclude)
 
         super().__init__(
             translation=translation,
@@ -90,7 +108,7 @@ class TermForm(NewBilingualGlossaryUnitForm, forms.ModelForm):
             self.fields["target"].widget = forms.HiddenInput()
 
     def clean(self) -> None:
-        self.translation = self.cleaned_data.get("translation")
+        self.translation = cast("Translation", self.cleaned_data.get("translation"))
         # Validate fields only if translation is valid
         if self.translation:
             super().clean()

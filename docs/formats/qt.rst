@@ -13,14 +13,16 @@ Qt Linguist files are used as both bilingual and monolingual translations.
 
 .. seealso::
 
-    `Qt Linguist manual <https://doc.qt.io/qt-5/qtlinguist-index.html>`_,
-    :doc:`tt:formats/ts`,
-    :ref:`bimono`
+    * `Qt Linguist manual <https://doc.qt.io/qt-6/qtlinguist-index.html>`_
+    * :doc:`tt:formats/ts`
+    * :ref:`bimono`
 
 Example file:
 
 .. literalinclude:: ../../weblate/trans/tests/data/cs.ts
     :language: xml
+
+.. include:: /snippets/format-features/ts-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

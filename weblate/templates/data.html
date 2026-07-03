@@ -3,10 +3,10 @@
 {% load i18n icons translations %}
 
 {% block breadcrumbs %}
-  <li>
+  <li class="breadcrumb-item">
     <a href="{{ object.get_absolute_url }}">{{ object }}</a>
   </li>
-  <li>
+  <li class="breadcrumb-item">
     <a href="{% url 'data_project' project=object.slug %}">{% translate "Data exports" %}</a>
   </li>
 {% endblock breadcrumbs %}
@@ -89,7 +89,7 @@
       <p>{% translate "You can fetch statistics for all translations in one component like this:" %}</p>
 
       <pre>
-<button type="button" class="btn btn-link btn-xs pull-right" data-visibility=".auth-token" title="{% translate "Toggle API key visibility" %}">{% icon "eye.svg" %}</button>curl \
+<button type="button" class="btn btn-link btn-xs float-end" data-visibility=".auth-token" title="{% translate "Toggle API key visibility" %}">{% icon "eye.svg" %}</button>curl \
     -H "Authorization: Token <span class="auth-token">{{ request.user.auth_token.key|default:"TOKEN" }}</span>" \
     {{ site_url }}{% url 'api:component-translations' project__slug=object.slug slug=component.slug %}
 </pre>
@@ -138,7 +138,7 @@
   <p>{% translate "You pull changes from a remote repository to Weblate like this:" %}</p>
 
   <pre>
-<button type="button" class="btn btn-link btn-xs pull-right" data-visibility=".auth-token" title="{% translate "Toggle API key visibility" %}">{% icon "eye.svg" %}</button>curl \
+<button type="button" class="btn btn-link btn-xs float-end" data-visibility=".auth-token" title="{% translate "Toggle API key visibility" %}">{% icon "eye.svg" %}</button>curl \
     -d operation=pull \
     -H "Authorization: Token <span class="auth-token">{{ request.user.auth_token.key|default:"TOKEN" }}</span>" \
     {{ site_url }}{% url 'api:project-repository' slug=object.slug %}
@@ -163,7 +163,7 @@
         </th>
         <td>{{ site_url }}{% url 'webhook' service='github' %}</td>
         <td>
-          <a href="{% documentation "admin/continuous" "github-setup" %}">{% translate "The documentation has detailed instructions" %}</a>
+          <a href="{% documentation "admin/code-hosting" "code-hosting-github-notifications" %}">{% translate "The documentation has detailed instructions" %}</a>
         </td>
       </tr>
       <tr>
@@ -172,7 +172,7 @@
         </th>
         <td>{{ site_url }}{% url 'webhook' service='gitlab' %}</td>
         <td>
-          <a href="{% documentation "admin/continuous" "gitlab-setup" %}">{% translate "The documentation has detailed instructions" %}</a>
+          <a href="{% documentation "admin/code-hosting" "code-hosting-gitlab-notifications" %}">{% translate "The documentation has detailed instructions" %}</a>
         </td>
       </tr>
       <tr>
@@ -181,7 +181,7 @@
         </th>
         <td>{{ site_url }}{% url 'webhook' service='bitbucket' %}</td>
         <td>
-          <a href="{% documentation "admin/continuous" "bitbucket-setup" %}">{% translate "The documentation has detailed instructions" %}</a>
+          <a href="{% documentation "admin/code-hosting" "code-hosting-bitbucket-notifications" %}">{% translate "The documentation has detailed instructions" %}</a>
         </td>
       </tr>
       <tr>
@@ -190,7 +190,7 @@
         </th>
         <td>{{ site_url }}{% url 'webhook' service='pagure' %}</td>
         <td>
-          <a href="{% documentation "admin/continuous" "pagure-setup" %}">{% translate "The documentation has detailed instructions" %}</a>
+          <a href="{% documentation "admin/code-hosting" "code-hosting-pagure-notifications" %}">{% translate "The documentation has detailed instructions" %}</a>
         </td>
       </tr>
       <tr>
@@ -199,7 +199,7 @@
         </th>
         <td>{{ site_url }}{% url 'webhook' service='azure' %}</td>
         <td>
-          <a href="{% documentation "admin/continuous" "azure-setup" %}">{% translate "The documentation has detailed instructions" %}</a>
+          <a href="{% documentation "admin/code-hosting" "code-hosting-azure-repos-notifications" %}">{% translate "The documentation has detailed instructions" %}</a>
         </td>
       </tr>
       <tr>
@@ -208,7 +208,16 @@
         </th>
         <td>{{ site_url }}{% url 'webhook' service='gitea' %}</td>
         <td>
-          <a href="{% documentation "admin/continuous" "gitea-setup" %}">{% translate "The documentation has detailed instructions" %}</a>
+          <a href="{% documentation "admin/code-hosting" "code-hosting-gitea-notifications" %}">{% translate "The documentation has detailed instructions" %}</a>
+        </td>
+      </tr>
+      <tr>
+        <th>
+          <a href="https://forgejo.org/">Forgejo</a>
+        </th>
+        <td>{{ site_url }}{% url 'webhook' service='forgejo' %}</td>
+        <td>
+          <a href="{% documentation "admin/code-hosting" "code-hosting-forgejo-notifications" %}">{% translate "The documentation has detailed instructions" %}</a>
         </td>
       </tr>
     </tbody>

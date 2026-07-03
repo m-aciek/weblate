@@ -9,7 +9,11 @@ from __future__ import annotations
 import os
 import time
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from pathlib import Path
+
+# pylint: disable-next=unused-import
+from typing import TYPE_CHECKING, BinaryIO, cast
+from uuid import UUID
 from zipfile import ZipFile
 
 from django.conf import settings
@@ -17,9 +21,7 @@ from django.core.paginator import EmptyPage, Paginator
 from django.http import (
     FileResponse,
     Http404,
-    HttpRequest,
     HttpResponse,
-    HttpResponseBase,
     HttpResponseRedirect,
 )
 from django.shortcuts import get_object_or_404
@@ -35,19 +37,24 @@ from weblate.lang.models import Language
 from weblate.trans.models import Category, Component, Project, Translation, Unit
 from weblate.utils import messages
 from weblate.utils.errors import report_error
-from weblate.utils.stats import (
-    BaseStats,
-    CategoryLanguage,
-    ProjectLanguage,
-    prefetch_stats,
+from weblate.utils.files import (
+    is_path_within_resolved_directory,
+    is_unsafe_path,
+    is_vcs_metadata_path,
 )
+from weblate.utils.stats import CategoryLanguage, ProjectLanguage, prefetch_stats
 from weblate.vcs.git import LocalRepository
+from weblate.workspaces.models import Workspace
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from django.db.models import Model
+    from django.http import HttpRequest, HttpResponseBase, QueryDict
 
     from weblate.auth.models import AuthenticatedHttpRequest
     from weblate.trans.mixins import BaseURLMixin
+    from weblate.utils.stats import BaseStats
 
 
 class UnsupportedPathObjectError(Http404):
@@ -55,6 +62,7 @@ class UnsupportedPathObjectError(Http404):
 
 
 def key_name(instance):
+    # ruff: ignore[import-outside-top-level]
     from weblate.trans.templatetags.translations import get_breadcrumbs
 
     return "/".join(
@@ -64,6 +72,22 @@ def key_name(instance):
 
 def key_translated(instance):
     return instance.stats.translated_percent
+
+
+def key_approved(instance):
+    stats = instance.stats
+    # Mixed listings can include objects without review workflow enabled.
+    if stats.has_review:
+        return stats.approved_percent + stats.readonly_percent
+    return 0
+
+
+def key_unreviewed(instance):
+    stats = instance.stats
+    # Mixed listings can include objects without review workflow enabled.
+    if stats.has_review:
+        return stats.waiting_review
+    return 0
 
 
 def key_untranslated(instance):
@@ -96,7 +120,9 @@ def key_comments(instance):
 
 SORT_KEYS = {
     "name": key_name,
+    "approved": key_approved,
     "translated": key_translated,
+    "unreviewed": key_unreviewed,
     "untranslated": key_untranslated,
     "untranslated_words": key_untranslated_words,
     "untranslated_chars": key_untranslated_chars,
@@ -115,10 +141,10 @@ def optional_form(form, perm_user, perm, perm_obj, **kwargs):
 
 def get_percent_color(percent) -> str:
     if percent >= 85:
-        return "#2eccaa"
+        return "#158068"
     if percent >= 50:
-        return "#38f"
-    return "#f6664c"
+        return "#1565c0"
+    return "#cc3d20"
 
 
 def get_page_limit(request: AuthenticatedHttpRequest, default: int) -> tuple[int, int]:
@@ -157,10 +183,10 @@ def get_paginator(
     *,
     page_limit: int | None = None,
     stats: bool = False,
+    sort_by: str | None = None,
 ):
     """Return paginator and current page."""
     page, limit = get_page_limit(request, page_limit or settings.DEFAULT_PAGE_LIMIT)
-    sort_by = request.GET.get("sort_by")
     stats_fetched = False
     if sort_by:
         # All but ordering by name needs stats
@@ -170,7 +196,7 @@ def get_paginator(
 
         object_list, sort_by = sort_objects(object_list, sort_by)
     paginator = Paginator(object_list, limit)
-    paginator.sort_by = sort_by
+    paginator.sort_by = sort_by  # type: ignore[attr-defined]
     try:
         result = paginator.page(page)
     except EmptyPage:
@@ -220,15 +246,20 @@ SORT_CHOICES = {
 SORT_LOOKUP = {key.replace("-", ""): value for key, value in SORT_CHOICES.items()}
 
 
-def get_sort_name(request: AuthenticatedHttpRequest, obj=None):
+def get_sort_name(
+    request: AuthenticatedHttpRequest, obj=None, query_data: QueryDict | None = None
+):
     """Get sort name."""
-    if isinstance(obj, Project | Category):
+    if isinstance(
+        obj, (Project, Category, ProjectLanguage, CategoryLanguage, Workspace)
+    ):
         default = "component,-priority"
     elif hasattr(obj, "component") and obj.component.is_glossary:
         default = "source"
     else:
         default = "-priority,position"
-    sort_query = request.GET.get("sort_by", default)
+    data = request.GET if query_data is None else query_data
+    sort_query = data.get("sort_by", default)
     sort_params = sort_query.replace("-", "")
     sort_name = SORT_LOOKUP.get(sort_params, gettext("Position and priority"))
     return {
@@ -237,18 +268,14 @@ def get_sort_name(request: AuthenticatedHttpRequest, obj=None):
     }
 
 
-def parse_path(  # noqa: C901
+# ruff: ignore[complex-structure]
+def parse_path(
     request: AuthenticatedHttpRequest | None,
     path: list[str] | tuple[str, ...] | None,
     types: tuple[type[Model | BaseURLMixin] | None, ...],
-    *,
-    skip_acl: bool = False,
 ):
     if None in types and not path:
         return None
-    if not skip_acl and request is None:
-        msg = "Request needs to be provided for ACL check"
-        raise TypeError(msg)
 
     allowed_types = {x for x in types if x is not None}
     acting_user = request.user if request else None
@@ -264,6 +291,24 @@ def parse_path(  # noqa: C901
 
     path = list(path)
 
+    # Workspace URL
+    if path[:2] == ["-", "workspace"]:
+        check_type(Workspace)
+        if len(path) != 3:
+            msg = "Invalid workspace path"
+            raise UnsupportedPathObjectError(msg)
+        try:
+            workspace_id = UUID(path[2])
+        except ValueError as error:
+            msg = "Invalid workspace id"
+            raise Http404(msg) from error
+        workspace = get_object_or_404(Workspace, pk=workspace_id)
+        if request is not None and not workspace.can_view(request.user):
+            msg = "Access denied"
+            raise Http404(msg)
+        workspace.acting_user = acting_user
+        return workspace
+
     # Language URL
     if path[:2] == ["-", "-"] and len(path) == 3:
         if path[2] == "-" and None in types:
@@ -272,8 +317,10 @@ def parse_path(  # noqa: C901
         return get_object_or_404(Language, code=path[2])
 
     # First level is always project
-    project = get_object_or_404(Project, slug=path.pop(0))
-    if not skip_acl:
+    project = get_object_or_404(
+        Project.objects.select_related("workspace"), slug=path.pop(0)
+    )
+    if request is not None:
         request.user.check_access(project)
     project.acting_user = acting_user
     if not path:
@@ -300,19 +347,23 @@ def parse_path(  # noqa: C901
         if slug == "-" and len(path) == 1:
             language = get_object_or_404(Language, code=path[0])
             check_type(CategoryLanguage)
+            if not isinstance(current, Category):
+                raise TypeError
             return CategoryLanguage(current, language)
 
         # Try component first
         with suppress(Component.DoesNotExist):
             current = current.component_set.get(slug=slug, **category_args)
-            if not skip_acl:
+            if request is not None:
                 request.user.check_access_component(current)
             current.acting_user = acting_user
             break
 
         # Try category
         with suppress(Category.DoesNotExist):
-            current = current.category_set.get(slug=slug, **category_args)
+            current = cast("Project | Category", current).category_set.get(
+                slug=slug, **category_args
+            )
             current.acting_user = acting_user
             category_args = {}
             continue
@@ -332,7 +383,10 @@ def parse_path(  # noqa: C901
         msg = "No remaining supported object type"
         raise UnsupportedPathObjectError(msg)
 
-    translation = get_object_or_404(current.translation_set, language__code=path.pop(0))
+    translation = get_object_or_404(
+        cast("Component", current).translation_set.select_related("language", "plural"),
+        language__code=path.pop(0),
+    )
     if not path:
         check_type(Translation)
         return translation
@@ -352,55 +406,60 @@ def parse_path(  # noqa: C901
 
 
 def parse_path_units(
-    request,
+    request: AuthenticatedHttpRequest,
     path: list[str] | tuple[str, ...],
     types: tuple[type[Model | BaseURLMixin] | None, ...],
 ):
     obj = parse_path(request, path, types)
 
+    access_units = Unit.objects.filter_access(request.user)
+
     context = {"components": None, "path_object": obj}
     if isinstance(obj, Translation):
+        # Not using access_units because parse_path performed the permission check
         unit_set = obj.unit_set.all()
         context["translation"] = obj
         context["component"] = obj.component
         context["project"] = obj.component.project
         context["components"] = [obj.component]
     elif isinstance(obj, Component):
+        # Not using access_units because parse_path performed the permission check
         unit_set = Unit.objects.filter(translation__component=obj).prefetch()
         context["component"] = obj
         context["project"] = obj.project
         context["components"] = [obj]
     elif isinstance(obj, Project):
-        unit_set = Unit.objects.filter(translation__component__project=obj).prefetch()
+        unit_set = access_units.filter(translation__component__project=obj).prefetch()
         context["project"] = obj
+    elif isinstance(obj, Workspace):
+        unit_set = access_units.filter(
+            translation__component__project__workspace=obj
+        ).prefetch()
+        context["workspace"] = obj
     elif isinstance(obj, ProjectLanguage):
-        unit_set = Unit.objects.filter(
+        unit_set = access_units.filter(
             translation__component__project=obj.project,
             translation__language=obj.language,
         ).prefetch()
         context["project"] = obj.project
         context["language"] = obj.language
     elif isinstance(obj, Category):
-        unit_set = Unit.objects.filter(
+        unit_set = access_units.filter(
             translation__component_id__in=obj.all_component_ids
         ).prefetch()
         context["project"] = obj.project
     elif isinstance(obj, CategoryLanguage):
-        unit_set = Unit.objects.filter(
+        unit_set = access_units.filter(
             translation__component_id__in=obj.category.all_component_ids,
             translation__language=obj.language,
         ).prefetch()
         context["project"] = obj.category.project
         context["language"] = obj.language
     elif isinstance(obj, Language):
-        unit_set = (
-            Unit.objects.filter_access(request.user)
-            .filter(translation__language=obj)
-            .prefetch()
-        )
+        unit_set = access_units.filter(translation__language=obj).prefetch()
         context["language"] = obj
     elif obj is None:
-        unit_set = Unit.objects.filter_access(request.user)
+        unit_set = access_units.prefetch()
     else:
         msg = f"Unsupported result: {obj}"
         raise TypeError(msg)
@@ -422,7 +481,7 @@ def guess_filemask_from_doc(data, docfile=None) -> None:
     if not ext and "file_format" in data and data["file_format"] in FILE_FORMATS:
         ext = FILE_FORMATS[data["file_format"]].extension()
 
-    data["filemask"] = "{}/{}{}".format(data.get("slug", "translations"), "*", ext)
+    data["filemask"] = f"{data.get('slug', 'translations')}/*{ext}"
 
 
 def create_component_from_doc(data, docfile, target_language: Language | None = None):
@@ -491,13 +550,83 @@ def import_message(
         messages.success(request, message)
 
 
-def iter_files(filenames):
+def _get_allowed_roots(
+    root: str, allowed_roots: list[str] | None
+) -> list[tuple[Path, Path]]:
+    roots = [root] if allowed_roots is None else allowed_roots
+    result = []
+    for allowed_root in roots:
+        absolute_root = Path(os.path.abspath(allowed_root))
+        try:
+            resolved_root = absolute_root.resolve(strict=False)
+        except OSError:
+            continue
+        result.append((absolute_root, resolved_root))
+    result.sort(key=lambda paths: len(paths[0].parts), reverse=True)
+    return result
+
+
+def _get_containing_root(
+    filename: str, allowed_roots: list[tuple[Path, Path]]
+) -> tuple[Path, Path] | None:
+    absolute_filename = Path(os.path.abspath(filename))
+    for absolute_root, resolved_root in allowed_roots:
+        if absolute_filename.is_relative_to(absolute_root):
+            return absolute_root, resolved_root
+    return None
+
+
+def _is_download_path(
+    filename: str, root: str, allowed_roots: list[tuple[Path, Path]]
+) -> bool:
+    relative_filename = os.path.relpath(filename, root)
+    if is_unsafe_path(relative_filename) or is_vcs_metadata_path(relative_filename):
+        return False
+
+    containing_root = _get_containing_root(filename, allowed_roots)
+    if containing_root is None:
+        return False
+    _absolute_root, resolved_root = containing_root
+
+    try:
+        resolved_filename = Path(filename).resolve(strict=False)
+    except OSError:
+        return False
+    resolved_relative_filename = os.path.relpath(resolved_filename, resolved_root)
+
+    return (
+        is_path_within_resolved_directory(filename, resolved_root)
+        and not is_unsafe_path(resolved_relative_filename)
+        and not is_vcs_metadata_path(resolved_relative_filename)
+    )
+
+
+def iter_files(
+    filenames: list[str], root: str, allowed_roots: list[str] | None = None
+) -> Generator[str]:
+    prepared_allowed_roots = _get_allowed_roots(root, allowed_roots)
+    if not prepared_allowed_roots:
+        return
+
     for filename in filenames:
+        if not _is_download_path(filename, root, prepared_allowed_roots):
+            continue
         if os.path.isdir(filename):
-            for root, _unused, files in os.walk(filename):
-                if "/.git/" in root or "/.hg/" in root:
+            for current_root, dirs, files in os.walk(filename):
+                dirs[:] = [
+                    name
+                    for name in dirs
+                    if _is_download_path(
+                        os.path.join(current_root, name), root, prepared_allowed_roots
+                    )
+                ]
+                if not _is_download_path(current_root, root, prepared_allowed_roots):
                     continue
-                yield from (os.path.join(root, name) for name in files)
+                for name in files:
+                    fullname = os.path.join(current_root, name)
+                    if not _is_download_path(fullname, root, prepared_allowed_roots):
+                        continue
+                    yield fullname
         else:
             yield filename
 
@@ -507,10 +636,11 @@ def zip_download(
     filenames: list[str],
     name: str = "translations",
     extra: dict[str, bytes | str] | None = None,
-):
+    allowed_roots: list[str] | None = None,
+) -> HttpResponse:
     response = HttpResponse(content_type="application/zip")
-    with ZipFile(response, "w", strict_timestamps=False) as zipfile:
-        for filename in iter_files(filenames):
+    with ZipFile(cast("BinaryIO", response), "w", strict_timestamps=False) as zipfile:
+        for filename in iter_files(filenames, root, allowed_roots):
             try:
                 zipfile.write(filename, arcname=os.path.relpath(filename, root))
             except FileNotFoundError:
@@ -571,22 +701,28 @@ def download_translation_file(
         filenames = translation.filenames
 
         if len(filenames) == 1:
+            filename = filenames[0]
             extension = (
-                os.path.splitext(translation.filename)[1]
+                os.path.splitext(filename)[1]
                 or f".{translation.component.file_format_cls.extension()}"
             )
-            if not os.path.exists(filenames[0]):
+            if not os.path.exists(filename):
                 msg = "File not found"
                 raise Http404(msg)
             # Create response
             response = FileResponse(
-                open(filenames[0], "rb"),  # noqa: SIM115
+                # pylint: disable-next=consider-using-with
+                open(filename, "rb"),  # ruff: ignore[open-file-with-context-handler]
                 content_type=translation.component.file_format_cls.mimetype(),
             )
         else:
             extension = ".zip"
+            filename = translation.get_filename()  # type: ignore[assignment]
+            if not filename:
+                msg = "No file to download"
+                raise Http404(msg)
             response = zip_download(
-                translation.get_filename(),
+                filename,
                 filenames,
                 translation.full_slug.replace("/", "-"),
             )
@@ -617,8 +753,7 @@ def get_form_data(data: dict[str, str | int | None]) -> dict[str, str | int]:
 
 
 def get_form_errors(form):
-    for error in form.non_field_errors():
-        yield error
+    yield from form.non_field_errors()
     for field in form:
         for error in field.errors:
             yield gettext("Error in parameter %(field)s: %(error)s") % {
@@ -641,6 +776,6 @@ class ErrorFormView(FormView):
         show_form_errors(self.request, form)
         return HttpResponseRedirect(self.get_success_url())
 
-    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):
+    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         """There is no GET view here."""
         return HttpResponseRedirect(self.get_success_url())

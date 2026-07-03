@@ -1,4 +1,5 @@
 .. _resourcedict:
+.. _resourcedictionary:
 
 ResourceDictionary files
 ------------------------
@@ -15,15 +16,17 @@ applications.
 
 .. seealso::
 
-    :doc:`tt:formats/flatxml`,
-    :ref:`flatxml`,
-    :ref:`updating-target-files`,
-    :ref:`addon-weblate.cleanup.generic`
+    * :doc:`tt:formats/flatxml`
+    * :ref:`flatxml`
+    * :ref:`updating-target-files`
+    * :ref:`addon-weblate.cleanup.generic`
 
 Example file:
 
 .. literalinclude:: ../../weblate/trans/tests/data/cs.xaml
     :language: xml
+
+.. include:: /snippets/format-features/resourcedictionary-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

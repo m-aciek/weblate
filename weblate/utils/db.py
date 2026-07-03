@@ -7,59 +7,46 @@
 from __future__ import annotations
 
 import time
+from shutil import disk_usage
+from typing import TYPE_CHECKING
 
-from django.db import ProgrammingError, connections, models, transaction
-from django.db.models.lookups import PatternLookup, Regex
+from django.db import DatabaseError, ProgrammingError, connections, transaction
+from django.db.models.lookups import Lookup, PatternLookup, Regex
 
 from .inv_regex import invert_re
+
+if TYPE_CHECKING:
+    from django.db.backends.base.base import BaseDatabaseWrapper
 
 ESCAPED = frozenset(".\\+*?[^]$(){}=!<>|:-")
 
 PG_TRGM = "CREATE INDEX {0}_{1}_fulltext ON trans_{0} USING GIN ({1} gin_trgm_ops {2})"
 PG_DROP = "DROP INDEX {0}_{1}_fulltext"
 
-MY_FTX = "CREATE FULLTEXT INDEX {0}_{1}_fulltext ON trans_{0}({1})"
-MY_DROP = "ALTER TABLE trans_{0} DROP INDEX {0}_{1}_fulltext"
-
 
 class MissingTransactionError(ProgrammingError):
     pass
 
 
-def using_postgresql():
-    return connections["default"].vendor == "postgresql"
-
-
-class TransactionsTestMixin:
-    @classmethod
-    def _databases_support_transactions(cls):
-        # This is workaround for MySQL as FULL TEXT index does not work
-        # well inside a transaction, so we avoid using transactions for
-        # tests. Otherwise we end up with no matches for the query.
-        # See https://dev.mysql.com/doc/refman/5.6/en/innodb-fulltext-index.html
-        if not using_postgresql():
-            return False
-        return super()._databases_support_transactions()  # type: ignore[misc]
-
-
-def adjust_similarity_threshold(value: float) -> None:
+def adjust_similarity_threshold(value: float, *, alias: str | None = None) -> None:
     """
     Adjust pg_trgm.similarity_threshold for the % operator.
 
     Ideally we would use directly similarity() in the search, but that doesn't seem
     to use index, while using % does.
     """
-    if not using_postgresql():
-        return
-
-    if "memory_db" in connections:
+    if alias is not None:
+        connection = connections[alias]
+    elif "memory_db" in connections:
         connection = connections["memory_db"]
     else:
         connection = connections["default"]
 
     current_similarity = getattr(connection, "weblate_similarity", -1)
-    # Ignore small differences
-    if abs(current_similarity - value) < 0.05:
+    # Ignore only values that are effectively identical at the precision used
+    # by callers. Nearby values can affect whether boundary matches pass the
+    # pg_trgm % operator.
+    if round(current_similarity, 3) == round(value, 3):
         return
 
     with connection.cursor() as cursor:
@@ -73,11 +60,57 @@ def adjust_similarity_threshold(value: float) -> None:
         connection.weblate_similarity = value  # type: ignore[attr-defined]
 
 
+def is_local_database(connection: BaseDatabaseWrapper) -> bool:
+    """Return whether the database connection points to the local host."""
+    host = connection.settings_dict.get("HOST", "")
+    return host in {"", "localhost", "127.0.0.1", "::1"} or host.startswith("/")
+
+
+def get_database_disk_usage(*, alias: str = "default"):
+    """Return disk usage for the local PostgreSQL data directory."""
+    connection = connections[alias]
+    if connection.vendor != "postgresql" or not is_local_database(connection):
+        return None
+
+    def get_data_directory() -> str:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_setting('data_directory')")
+            return cursor.fetchone()[0]
+
+    try:
+        if connection.in_atomic_block is True:
+            with transaction.atomic(using=alias):
+                data_directory = get_data_directory()
+        else:
+            data_directory = get_data_directory()
+        return disk_usage(data_directory)
+    except (DatabaseError, OSError):
+        return None
+
+
+def get_database_size(*, alias: str = "default") -> int | None:
+    """Return size of the current PostgreSQL database in bytes."""
+    connection = connections[alias]
+    if connection.vendor != "postgresql":
+        return None
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_database_size(current_database())")
+            return cursor.fetchone()[0]
+    except DatabaseError:
+        return None
+
+
 def count_alnum(string):
     return sum(map(str.isalnum, string))
 
 
-class PostgreSQLFallbackLookupMixin:
+def use_trgm_fallback(string: str) -> bool:
+    return count_alnum(string) <= 3
+
+
+class PostgreSQLFallbackLookupMixin(Lookup):
     """
     Mixin to block PostgreSQL from using trigram index.
 
@@ -91,13 +124,17 @@ class PostgreSQLFallbackLookupMixin:
     def process_lhs(self, compiler, connection, lhs=None):
         if self._needs_fallback:  # type: ignore[attr-defined]
             lhs_sql, params = super().process_lhs(compiler, connection, lhs)  # type: ignore[misc]
+            if self.lookup_name in {"trgm_search", "substring"}:
+                # These are matched against UPPER, so convert them
+                return f"UPPER({lhs_sql})", params
+            # This concatenation will prevent using trigram index
             return f"{lhs_sql} || ''", params
         return super().process_lhs(compiler, connection, lhs)  # type: ignore[misc]
 
 
 class PostgreSQLFallbackLookup(PostgreSQLFallbackLookupMixin, PatternLookup):
     def __init__(self, lhs, rhs) -> None:
-        self._needs_fallback = isinstance(rhs, str) and count_alnum(rhs) <= 3
+        self._needs_fallback = isinstance(rhs, str) and use_trgm_fallback(rhs)
         super().__init__(lhs, rhs)
 
 
@@ -110,7 +147,7 @@ class PostgreSQLRegexLookup(PostgreSQLFallbackLookupMixin, Regex):
 
 
 class PostgreSQLSearchLookup(PostgreSQLFallbackLookup):
-    lookup_name = "search"
+    lookup_name = "trgm_search"
 
     def process_rhs(self, qn, connection):
         if not self._needs_fallback:
@@ -119,18 +156,8 @@ class PostgreSQLSearchLookup(PostgreSQLFallbackLookup):
 
     def get_rhs_op(self, connection, rhs):
         if self._needs_fallback:
-            return connection.operators["contains"] % rhs
+            return connection.operators["icontains"] % rhs
         return f"%% {rhs} = true"
-
-
-class MySQLSearchLookup(models.Lookup):
-    lookup_name = "search"
-
-    def as_sql(self, compiler, connection):
-        lhs, lhs_params = self.process_lhs(compiler, connection)
-        rhs, rhs_params = self.process_rhs(compiler, connection)
-        params = lhs_params + rhs_params
-        return f"MATCH ({lhs}) AGAINST ({rhs} IN NATURAL LANGUAGE MODE)", params
 
 
 class PostgreSQLSubstringLookup(PostgreSQLFallbackLookup):
@@ -145,7 +172,7 @@ class PostgreSQLSubstringLookup(PostgreSQLFallbackLookup):
 
     def get_rhs_op(self, connection, rhs):
         if self._needs_fallback:
-            return connection.operators["contains"] % rhs
+            return connection.operators["icontains"] % rhs
         return f"ILIKE {rhs}"
 
 
@@ -165,6 +192,7 @@ def re_escape(pattern: str) -> str:
 
 
 def measure_database_latency() -> float:
+    # ruff: ignore[import-outside-top-level]
     from weblate.trans.models import Project
 
     start = time.monotonic()

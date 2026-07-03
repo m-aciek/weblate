@@ -17,14 +17,16 @@ except that ``.resw`` files may contain only strings and file paths.
 
 .. seealso::
 
-    :doc:`tt:formats/resx`,
-    :ref:`updating-target-files`,
-    :ref:`addon-weblate.cleanup.generic`
+    * :doc:`tt:formats/resx`
+    * :ref:`updating-target-files`
+    * :ref:`addon-weblate.cleanup.generic`
 
 Example file:
 
 .. literalinclude:: ../../weblate/trans/tests/data/cs.resx
     :language: xml
+
+.. include:: /snippets/format-features/resx-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

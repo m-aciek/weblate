@@ -4,10 +4,18 @@
 
 """Test for adding new language."""
 
+import os
+import tempfile
+from unittest.mock import patch
+
 from django.core import mail
+from django.test.utils import override_settings
 from django.urls import reverse
 
 from weblate.auth.models import Permission, Role
+from weblate.lang.models import Language
+from weblate.trans.tasks import perform_load
+from weblate.trans.views.basic import add_languages_to_component
 from weblate.utils.ratelimit import reset_rate_limit
 
 from .test_views import ViewTestCase
@@ -55,6 +63,16 @@ class NewLangTest(ViewTestCase):
         self.assertNotContains(response, "Start new translation")
         self.assertNotContains(response, "/new-lang/")
 
+    def test_inherited_none(self) -> None:
+        self.project.new_lang = "none"
+        self.project.save(update_fields=["new_lang"])
+        self.component.inherit_new_lang = True
+        self.component.save(update_fields=["inherit_new_lang"])
+
+        response = self.client.get(self.component.get_absolute_url())
+        self.assertNotContains(response, "Start new translation")
+        self.assertNotContains(response, "/new-lang/")
+
     def test_url(self) -> None:
         self.component.new_lang = "url"
         self.component.save()
@@ -64,6 +82,20 @@ class NewLangTest(ViewTestCase):
         response = self.client.get(self.component.get_absolute_url())
         self.assertContains(response, "Start new translation")
         self.assertContains(response, "http://example.com/instructions")
+
+    def test_inherited_url(self) -> None:
+        self.project.new_lang = "url"
+        self.project.instructions = "http://example.com/instructions"
+        self.project.save(update_fields=["new_lang", "instructions"])
+        self.component.inherit_new_lang = True
+        self.component.save(update_fields=["inherit_new_lang"])
+
+        response = self.client.get(reverse("new-language", kwargs=self.kw_component))
+        self.assertContains(
+            response,
+            "The translator instructions has info on how to start translating",
+        )
+        self.assertNotContains(response, "Please choose the language")
 
     def test_contact(self) -> None:
         # Make admin to receive notifications
@@ -76,10 +108,11 @@ class NewLangTest(ViewTestCase):
         self.assertContains(response, "Start new translation")
         self.assertContains(response, "/new-lang/")
 
-        response = self.client.post(
-            reverse("new-language", kwargs=self.kw_component),
-            {"lang": "af"},
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("new-language", kwargs=self.kw_component),
+                {"lang": "af"},
+            )
         self.assertRedirects(response, self.component.get_absolute_url())
 
         # Verify mail
@@ -87,6 +120,19 @@ class NewLangTest(ViewTestCase):
         self.assertEqual(
             mail.outbox[0].subject, "[Weblate] New language request in Test/Test"
         )
+
+    def test_inherited_contact(self) -> None:
+        self.project.new_lang = "contact"
+        self.project.save(update_fields=["new_lang"])
+        self.component.inherit_new_lang = True
+        self.component.save(update_fields=["inherit_new_lang"])
+
+        response = self.client.get(reverse("new-language", kwargs=self.kw_component))
+        self.assertContains(
+            response,
+            "Project maintainers are notified of this request",
+        )
+        self.assertContains(response, "Request new translation")
 
     def test_add(self) -> None:
         # Make admin to receive notifications
@@ -101,9 +147,10 @@ class NewLangTest(ViewTestCase):
         self.assertContains(response, "/new-lang/")
 
         lang = {"lang": "af"}
-        response = self.client.post(
-            reverse("new-language", kwargs=self.kw_component), lang, follow=True
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("new-language", kwargs=self.kw_component), lang, follow=True
+            )
         translation = self.component.translation_set.get(language__code="af")
         self.assertRedirects(response, translation.get_absolute_url())
 
@@ -219,9 +266,99 @@ class AndroidNewLangTest(NewLangTest):
     def create_component(self):
         return self.create_android(new_lang="add")
 
+    def test_add_rejects_symlinked_target(self) -> None:
+        request = self.get_request()
+        target_dir = os.path.join(self.component.full_path, "android", "values-af")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            os.symlink(tempdir, target_dir)
+
+            self.assertIsNone(
+                self.component.add_new_language(
+                    Language.objects.get(code="af"), request, show_messages=True
+                )
+            )
+            self.assertFalse(os.path.exists(os.path.join(tempdir, "strings.xml")))
+
+        self.assertFalse(
+            self.component.translation_set.filter(language__code="af").exists()
+        )
+
 
 class AppStoreNewLangTest(NewLangTest):
     expected_lang_code = "pt-BR"
 
     def create_component(self):
         return self.create_appstore(new_lang="add")
+
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+    def test_add_queues_background_force_scan_for_added_language(self) -> None:
+        request = self.get_request()
+
+        with patch.object(self.component, "queue_background_task") as queue_task:
+            translation = self.component.add_new_language(
+                Language.objects.get(code="af"),
+                request,
+                show_messages=False,
+            )
+
+        self.assertIsNotNone(translation)
+        queue_task.assert_called_once()
+        self.assertIs(queue_task.call_args.args[0], perform_load)
+        self.assertEqual(queue_task.call_args.kwargs["pk"], self.component.pk)
+        self.assertTrue(queue_task.call_args.kwargs["force_scan"])
+        self.assertEqual(
+            queue_task.call_args.kwargs["langs"], [translation.language_code]
+        )
+
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+    def test_add_languages_to_component_queues_only_added_languages(self) -> None:
+        request = self.get_request()
+        languages = [
+            Language.objects.get(code="af"),
+            Language.objects.get(code="pt_BR"),
+        ]
+
+        with patch.object(self.component, "queue_background_task") as queue_task:
+            add_languages_to_component(
+                request,
+                self.user,
+                languages,
+                self.component,
+                show_messages=False,
+            )
+
+        added_codes = list(
+            self.component.translation_set.filter(language__code__in=["af", "pt_BR"])
+            .order_by("language__code")
+            .values_list("language_code", flat=True)
+        )
+
+        queue_task.assert_called_once()
+        self.assertIs(queue_task.call_args.args[0], perform_load)
+        self.assertEqual(queue_task.call_args.kwargs["pk"], self.component.pk)
+        self.assertTrue(queue_task.call_args.kwargs["force_scan"])
+        self.assertEqual(
+            sorted(queue_task.call_args.kwargs["langs"]),
+            sorted(added_codes),
+        )
+
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=False)
+    def test_add_languages_to_component_deduplicates_scan_languages(self) -> None:
+        request = self.get_request()
+        language = Language.objects.get(code="af")
+
+        with patch.object(self.component, "queue_background_task") as queue_task:
+            add_languages_to_component(
+                request,
+                self.user,
+                [language, language],
+                self.component,
+                show_messages=False,
+            )
+
+        queue_task.assert_called_once()
+        self.assertIs(queue_task.call_args.args[0], perform_load)
+        self.assertEqual(queue_task.call_args.kwargs["pk"], self.component.pk)
+        self.assertTrue(queue_task.call_args.kwargs["force_scan"])
+        self.assertEqual(queue_task.call_args.kwargs["langs"], ["af"])

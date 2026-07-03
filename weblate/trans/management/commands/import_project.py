@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 from django.core.management.base import CommandError
@@ -21,13 +22,16 @@ from weblate.utils.management.base import BaseCommand
 from weblate.vcs.base import RepositoryError
 from weblate.vcs.models import VCS_REGISTRY
 
+if TYPE_CHECKING:
+    from django.core.management.base import CommandParser
+
 
 class Command(BaseCommand):
     """Command for mass importing of repositories into Weblate."""
 
     help = "imports projects with more components"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: CommandParser) -> None:
         super().add_arguments(parser)
         parser.add_argument(
             "--name-template",
@@ -131,7 +135,7 @@ class Command(BaseCommand):
         # Create temporary working dir
         workdir = tempfile.mkdtemp(dir=project.full_path)
         # Make the temporary directory readable by others
-        os.chmod(workdir, 0o755)  # noqa: S103, nosec
+        os.chmod(workdir, 0o755)  # ruff: ignore[bad-file-permissions]  # nosec
 
         # Initialize git repository
         self.logger.info("Cloning git repository...")
@@ -172,12 +176,12 @@ class Command(BaseCommand):
 
         # Is file format supported?
         if self.file_format not in FILE_FORMATS:
-            msg = "Invalid file format: {}".format(options["file_format"])
+            msg = f"Invalid file format: {options['file_format']}"
             raise CommandError(msg)
 
         # Is vcs supported?
         if self.vcs not in VCS_REGISTRY:
-            msg = "Invalid vcs: {}".format(options["vcs"])
+            msg = f"Invalid vcs: {options['vcs']}"
             raise CommandError(msg)
 
         # Do we have correct mask?
@@ -218,9 +222,7 @@ class Command(BaseCommand):
         try:
             project = Project.objects.get(slug=options["project"])
         except Project.DoesNotExist as error:
-            msg = 'Project "{}" not found, please create it first!'.format(
-                options["project"]
-            )
+            msg = f'Project "{options["project"]}" not found, please create it first!'
             raise CommandError(msg) from error
 
         # Get or create main component

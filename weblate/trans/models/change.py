@@ -4,48 +4,53 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, overload
-from uuid import UUID, uuid5
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypedDict, cast, overload
+from uuid import uuid5
 
-import sentry_sdk
 from django.conf import settings
 from django.core.cache import cache
-from django.db import connection, models, transaction
-from django.db.models import Count, Q
+from django.db import models, transaction
+from django.db.models import Count, F, OuterRef, Q, Subquery
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
-from django.utils.html import escape, format_html
-from django.utils.translation import gettext, gettext_lazy, pgettext
+from django.utils.translation import gettext, gettext_lazy
 from rapidfuzz.distance import DamerauLevenshtein
 
-from weblate.lang.models import Language
 from weblate.trans.actions import (
     ACTIONS_ADDON,
     ACTIONS_CONTENT,
+    ACTIONS_LOG,
     ACTIONS_MERGE_FAILURE,
     ACTIONS_REPOSITORY,
+    ACTIONS_REPOSITORY_STATUS,
     ACTIONS_REVERTABLE,
     ACTIONS_SHOW_CONTENT,
     ActionEvents,
 )
 from weblate.trans.mixins import UserDisplayMixin
-from weblate.trans.models.alert import ALERTS
 from weblate.trans.models.project import Project
 from weblate.trans.signals import change_bulk_create
+from weblate.trans.util import split_plural
 from weblate.utils.const import WEBLATE_UUID_NAMESPACE
 from weblate.utils.decorators import disable_for_loaddata
-from weblate.utils.files import FileUploadMethod, get_upload_message
-from weblate.utils.pii import mask_email
 from weblate.utils.state import StringState
+from weblate.utils.tracing import start_span
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Collection, Iterable
+    from uuid import UUID
+
+    from django_stubs_ext import StrOrPromise
 
     from weblate.auth.models import User
-    from weblate.trans.models import Translation
+    from weblate.lang.models import Language
+    from weblate.trans.models import Category, Component, Translation, Unit
+    from weblate.workspaces.models import Workspace
 
+LOGGER = logging.getLogger("weblate.change")
 
 CHANGE_PROJECT_LOOKUP_KEY = "change:project-lookup"
 
@@ -53,12 +58,16 @@ PREFETCH_FIELDS = (
     "user",
     "author",
     "translation",
+    "language",
     "component",
+    "category",
+    "workspace",
     "project",
     "component__source_language",
+    "component__secondary_language",
+    "project__secondary_language",
     "unit",
     "unit__source_unit",
-    "translation__language",
     "translation__plural",
 )
 
@@ -70,6 +79,13 @@ COMPONENT_ORIGINS = {
     "zip": gettext_lazy("Component created via ZIP upload"),
     "document": gettext_lazy("Component created via document upload"),
 }
+
+
+class RevertUserEditsResult(TypedDict):
+    reverted: int
+    skipped: int
+    skipped_newer: int
+    skipped_failed: int
 
 
 def dt_as_day_range(dt: datetime | date) -> tuple[datetime, datetime]:
@@ -87,20 +103,20 @@ def dt_as_day_range(dt: datetime | date) -> tuple[datetime, datetime]:
     )
 
 
-class ChangeQuerySet(models.QuerySet["Change"]):
-    def content(self, prefetch=False) -> ChangeQuerySet:
+class ChangeQuerySet(models.QuerySet["Change", "Change"]):
+    def content(self, prefetch: bool = False) -> Self:
         """Return queryset with content changes."""
         base = self
         if prefetch:
             base = base.prefetch()
         return base.filter(action__in=ACTIONS_CONTENT)
 
-    def for_category(self, category) -> ChangeQuerySet:
+    def for_category(self, category: Category) -> Self:
         return self.filter(
             Q(component_id__in=category.all_component_ids) | Q(category=category)
         )
 
-    def filter_announcements(self) -> ChangeQuerySet:
+    def filter_announcements(self) -> Self:
         return self.filter(action=ActionEvents.ANNOUNCEMENT)
 
     def count_stats(
@@ -130,11 +146,11 @@ class ChangeQuerySet(models.QuerySet["Change"]):
         self,
         days: int,
         step: int,
-        project=None,
-        component=None,
-        translation=None,
-        language=None,
-        user=None,
+        project: Project | None = None,
+        component: Component | None = None,
+        translation: Translation | None = None,
+        language: Language | None = None,
+        user: User | None = None,
     ) -> list[tuple[datetime, int]]:
         """Core of daily/weekly/monthly stats calculation."""
         # Get range (actually start)
@@ -161,7 +177,12 @@ class ChangeQuerySet(models.QuerySet["Change"]):
 
         return base.count_stats(days, step, dtstart)
 
-    def prefetch_for_render(self) -> ChangeQuerySet:
+    def prefetch_for_render(self) -> Self:
+        """
+        Prefetch needed related fields for rendering.
+
+        Might be used with Change.fill_in_prefetched.
+        """
         return self.prefetch().select_related(
             "alert",
             "screenshot",
@@ -170,7 +191,7 @@ class ChangeQuerySet(models.QuerySet["Change"]):
             "comment",
         )
 
-    def prefetch(self) -> ChangeQuerySet:
+    def prefetch(self) -> Self:
         """
         Fetch related fields at once to avoid loading them individually.
 
@@ -189,10 +210,14 @@ class ChangeQuerySet(models.QuerySet["Change"]):
     def preload_list(self, results, skip=None):
         """Companion for prefetch to fill in nested references."""
         for item in results:
+            if item.project and skip != "project":
+                item.project.workspace = item.workspace
             if item.component and skip != "component":
                 item.component.project = item.project
             if item.translation and skip != "translation":
                 item.translation.component = item.component
+                if item.language_id is not None:
+                    item.translation.language = item.language
             if item.unit and skip != "unit":
                 item.unit.translation = item.translation
         return results
@@ -220,7 +245,7 @@ class ChangeQuerySet(models.QuerySet["Change"]):
             )
         )
 
-    def order(self) -> ChangeQuerySet:
+    def order(self) -> Self:
         return self.order_by("-timestamp")
 
     def recent(
@@ -233,36 +258,50 @@ class ChangeQuerySet(models.QuerySet["Change"]):
         more effective here.
         """
         result: list[Change] = []
-        with transaction.atomic(), sentry_sdk.start_span(op="change.recent"):
+        with transaction.atomic(), start_span(op="change.recent"):
             for change in self.order().iterator(chunk_size=count):
                 result.append(change)
                 if len(result) >= count:
                     break
             return self.preload_list(result, skip_preload)
 
-    def bulk_create(self, *args, **kwargs) -> list[Change]:
+    def bulk_create(  # type: ignore[override]
+        self,
+        objs: Iterable[Change],
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: Collection[str] | None = None,
+        unique_fields: Collection[str] | None = None,
+    ) -> list[Change]:
         """
         Bulk creation of changes.
 
         Add processing to bulk creation.
         """
-        from weblate.accounts.notifications import dispatch_changes_notifications
+        # ruff: ignore[import-outside-top-level]
+        from weblate.accounts.notifications import (
+            dispatch_changes_notifications,
+        )
 
-        if connection.features.can_return_rows_from_bulk_insert:
-            changes = super().bulk_create(*args, **kwargs)
+        objs = list(objs)
+        for change in objs:
+            change.fixup_references()
 
-            # Dispatch notifications
-            dispatch_changes_notifications(changes)
+        changes: list[Change] = super().bulk_create(  # type: ignore[assignment]
+            objs,  # type: ignore[arg-type]
+            batch_size=batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=update_conflicts,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
 
-            # Executes post save to ensure messages are sent to fedora messaging
-            change_bulk_create.send(Change, instances=changes)
-        else:
-            # bulk_create doesn't set the .pk of instance with MySQL
-            # Save each instance individually in order to set it
-            changes = []
-            for change in args[0]:
-                change.save()
-                changes.append(change)
+        # Dispatch notifications
+        dispatch_changes_notifications(changes)
+
+        # Executes post save to ensure messages are sent to fedora messaging
+        change_bulk_create.send(Change, instances=changes)
 
         # Store last content change in cache for improved performance
         translations = set()
@@ -275,9 +314,14 @@ class ChangeQuerySet(models.QuerySet["Change"]):
             ):
                 transaction.on_commit(change.update_cache_last_change)
                 translations.add(change.translation_id)
+
+        # Log to the log
+        for change in changes:
+            change.log_event()
+
         return changes
 
-    def filter_components(self, user: User) -> ChangeQuerySet:
+    def filter_components(self, user: User) -> Self:
         if not user.needs_component_restrictions_filter:
             return self
         return self.filter(
@@ -286,10 +330,10 @@ class ChangeQuerySet(models.QuerySet["Change"]):
             | Q(component_id__in=user.component_permissions)
         )
 
-    def filter_projects(self, user: User) -> ChangeQuerySet:
+    def filter_projects(self, user: User) -> Self:
         if not user.needs_project_filter:
             return self
-        return self.filter(project__in=user.allowed_projects)
+        return self.filter(user.get_project_access_query("project"))
 
     def lookup_project_rename(self, name: str) -> Project | None:
         lookup = cache.get(CHANGE_PROJECT_LOOKUP_KEY)
@@ -310,7 +354,7 @@ class ChangeQuerySet(models.QuerySet["Change"]):
         cache.set(CHANGE_PROJECT_LOOKUP_KEY, lookup, 3600 * 24 * 7)
         return lookup
 
-    def filter_by_day(self, dt: datetime | date) -> ChangeQuerySet:
+    def filter_by_day(self, dt: datetime | date) -> Self:
         """
         Filter changes by given date.
 
@@ -318,7 +362,7 @@ class ChangeQuerySet(models.QuerySet["Change"]):
         """
         return self.filter(timestamp__range=dt_as_day_range(dt))
 
-    def since_day(self, dt: datetime | date) -> ChangeQuerySet:
+    def since_day(self, dt: datetime | date) -> Self:
         """
         Filter changes since given date.
 
@@ -341,7 +385,7 @@ class ChangeQuerySet(models.QuerySet["Change"]):
 
 
 class ChangeManager(models.Manager["Change"]):
-    def create(self, *, user=None, **kwargs):
+    def create(self, *, user: User | None = None, **kwargs) -> Change:
         """
         Create a change object.
 
@@ -353,62 +397,149 @@ class ChangeManager(models.Manager["Change"]):
 
     def last_changes(
         self,
-        user,
-        unit=None,
-        translation=None,
-        component=None,
-        project=None,
-        category=None,
-        language=None,
-    ):
+        user: User,
+        unit: Unit | None = None,
+        translation: Translation | None = None,
+        component: Component | None = None,
+        project: Project | None = None,
+        category: Category | None = None,
+        language: Language | None = None,
+        workspace: Workspace | None = None,
+    ) -> ChangeQuerySet:
         """
-        Return the most recent changes for an user.
+        Return the most recent changes for a user.
 
         Filters Change objects by user permissions and fetches related fields for
         last changes display.
         """
+        result: models.QuerySet[Change, Change]
         if unit is not None:
             if not user.can_access_component(unit.translation.component):
-                return self.none()
+                return cast("ChangeQuerySet", self.none())
             result = unit.change_set.all()
         elif translation is not None:
             if not user.can_access_component(translation.component):
-                return self.none()
+                return cast("ChangeQuerySet", self.none())
             result = translation.change_set.all()
         elif component is not None:
             if not user.can_access_component(component):
-                return self.none()
+                return cast("ChangeQuerySet", self.none())
             result = component.change_set.all()
         elif project is not None:
             if not user.can_access_project(project):
-                return self.none()
+                return cast("ChangeQuerySet", self.none())
             result = project.change_set.filter_components(user)
             if language is not None:
                 result = result.filter(language=language)
             if category is not None:
                 result = result.filter(category=category)
+        elif workspace is not None:
+            if not workspace.can_view(user):
+                return cast("ChangeQuerySet", self.none())
+            result = cast("ChangeQuerySet", self.filter(workspace=workspace))
+            if user.needs_project_filter:
+                result = cast(
+                    "ChangeQuerySet",
+                    result.filter(
+                        Q(project__isnull=True)
+                        | user.get_project_access_query("project")
+                    ),
+                )
+            result = result.filter_components(user)
         elif language is not None:
             result = language.change_set.filter_projects(user).filter_components(user)
         else:
-            result = self.filter_projects(user).filter_components(user)
-        return result.prefetch_for_render().order()
+            result = self.filter_projects(user).filter_components(user)  # type: ignore[attr-defined]
+        return cast("ChangeQuerySet", result).prefetch_for_render().order()
+
+    def latest_revertable_changes(
+        self,
+        user: User,
+        *,
+        project: Project | None = None,
+    ) -> ChangeQuerySet:
+        latest_revertable_change = (
+            self.filter(unit=OuterRef("unit"), action__in=ACTIONS_REVERTABLE)
+            .order_by("-timestamp", "-pk")
+            .values("pk")[:1]
+        )
+        result = self.filter(
+            user=user,
+            unit__isnull=False,
+            action__in=ACTIONS_REVERTABLE,
+        )
+        if project is not None:
+            result = result.filter(project=project)
+        return cast(
+            "ChangeQuerySet",
+            result.annotate(
+                latest_revertable_change_id=Subquery(latest_revertable_change)
+            )
+            .filter(pk=F("latest_revertable_change_id"))
+            .select_related("unit"),
+        )
+
+    def revert_user_edits(
+        self,
+        target_user: User,
+        acting_user: User,
+        *,
+        project: Project | None = None,
+        request=None,
+    ) -> RevertUserEditsResult:
+        base = self.filter(
+            user=target_user,
+            unit__isnull=False,
+            action__in=ACTIONS_REVERTABLE,
+        )
+        if project is not None:
+            base = base.filter(project=project)
+
+        reverted = 0
+        attempted = 0
+        skipped_failed = 0
+        total = base.values("unit_id").distinct().count()
+        for change in self.latest_revertable_changes(
+            target_user, project=project
+        ).iterator(chunk_size=100):
+            attempted += 1
+            if change.revert_user_edits(
+                acting_user,
+                change_action=ActionEvents.USER_REVERT,
+                request=request,
+                change_details={"username": target_user.username},
+            ):
+                reverted += 1
+            else:
+                skipped_failed += 1
+
+        skipped_newer = total - attempted
+        return {
+            "reverted": reverted,
+            "skipped": skipped_newer + skipped_failed,
+            "skipped_newer": skipped_newer,
+            "skipped_failed": skipped_failed,
+        }
 
 
 class Change(models.Model, UserDisplayMixin):
-    ACTIONS_DICT = dict(ActionEvents.choices)
-    ACTION_STRINGS = {
+    ACTIONS_DICT: ClassVar[dict[int, StrOrPromise]] = dict(ActionEvents.choices)
+    ACTION_STRINGS: ClassVar[dict[str, int]] = {
         name.lower().replace(" ", "-"): value for value, name in ActionEvents.choices
     }
 
     ACTIONS_REVERTABLE = ACTIONS_REVERTABLE
     ACTIONS_CONTENT = ACTIONS_CONTENT
     ACTIONS_REPOSITORY = ACTIONS_REPOSITORY
+    ACTIONS_REPOSITORY_STATUS = ACTIONS_REPOSITORY_STATUS
     ACTIONS_SHOW_CONTENT = ACTIONS_SHOW_CONTENT
     ACTIONS_MERGE_FAILURE = ACTIONS_MERGE_FAILURE
     ACTIONS_ADDON = ACTIONS_ADDON
 
-    ACTION_NAMES = {str(name): value for value, name in ActionEvents.choices}
-    AUTO_ACTIONS = {
+    ACTION_NAMES: ClassVar[dict[str, int]] = {
+        str(name): value for value, name in ActionEvents.choices
+    }
+    AUTO_ACTIONS: ClassVar[dict[ActionEvents, StrOrPromise]] = {
         # Translators: Name of event in the history
         ActionEvents.LOCK: gettext_lazy(
             "The component was automatically locked because of an alert."
@@ -427,6 +558,12 @@ class Change(models.Model, UserDisplayMixin):
     )
     project = models.ForeignKey(
         "trans.Project", null=True, on_delete=models.deletion.CASCADE, db_index=False
+    )
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        null=True,
+        on_delete=models.deletion.CASCADE,
+        db_index=False,
     )
     category = models.ForeignKey(
         "trans.Category", null=True, on_delete=models.deletion.CASCADE, db_index=False
@@ -479,6 +616,7 @@ class Change(models.Model, UserDisplayMixin):
 
     class Meta:
         app_label = "trans"
+        # ruff: ignore[mutable-class-default]
         indexes = [
             models.Index(
                 fields=["-timestamp", "action"],
@@ -488,6 +626,11 @@ class Change(models.Model, UserDisplayMixin):
                 fields=["project", "-timestamp", "action"],
                 condition=Q(project__isnull=False),
                 name="trans_change_project_idx",
+            ),
+            models.Index(
+                fields=["workspace", "-timestamp", "action"],
+                condition=Q(workspace__isnull=False),
+                name="trans_change_workspace_idx",
             ),
             models.Index(
                 fields=["language", "-timestamp", "action"],
@@ -510,9 +653,29 @@ class Change(models.Model, UserDisplayMixin):
                 name="trans_change_translation_idx",
             ),
             models.Index(
+                fields=["category", "-timestamp", "action"],
+                condition=Q(category__isnull=False),
+                name="trans_change_category_idx",
+            ),
+            models.Index(
                 fields=["unit", "-timestamp", "action"],
                 condition=Q(unit__isnull=False),
                 name="trans_change_unit_idx",
+            ),
+            models.Index(
+                fields=["-timestamp"],
+                condition=Q(action__in=ACTIONS_ADDON)
+                & Q(project__isnull=True)
+                & Q(category__isnull=True)
+                & Q(component__isnull=True),
+                name="trans_change_site_addon_idx",
+            ),
+            models.Index(
+                fields=["project", "-timestamp"],
+                condition=Q(action__in=ACTIONS_ADDON)
+                & Q(project__isnull=False)
+                & Q(component__isnull=True),
+                name="trans_change_proj_addon_idx",
             ),
             models.Index(
                 fields=["user", "-timestamp", "action"],
@@ -528,18 +691,23 @@ class Change(models.Model, UserDisplayMixin):
             return gettext("%(action)s at %(time)s on %(translation)s by %(user)s") % {
                 "action": self.get_action_display(),
                 "time": self.timestamp,
-                "translation": self.translation or self.component or self.project,
+                "translation": self.translation
+                or self.component
+                or self.project
+                or self.workspace,
                 "user": self.get_user_display(False),
             }
         # Translators: condensed rendering of a change action in history
         return gettext("%(action)s at %(time)s on %(translation)s") % {
             "action": self.get_action_display(),
             "time": self.timestamp,
-            "translation": self.translation or self.component or self.project,
+            "translation": self.translation
+            or self.component
+            or self.project
+            or self.workspace,
         }
 
     def __init__(self, *args, **kwargs) -> None:
-        self.notify_state = {}
         for attr in ("user", "author"):
             user = kwargs.get(attr)
             if user is not None and hasattr(user, "get_token_user"):
@@ -547,27 +715,30 @@ class Change(models.Model, UserDisplayMixin):
                 kwargs[attr] = user.get_token_user()
         super().__init__(*args, **kwargs)
         if not self.pk:
-            self.fixup_refereces()
+            self.fixup_references()
 
     def save(self, *args, **kwargs) -> None:
-        self.fixup_refereces()
+        self.fixup_references()
 
         super().save(*args, **kwargs)
 
         if self.is_last_content_change_storable():
+            translation = cast("Translation", self.translation)
             # Update cache for stats so that it does not have to hit
             # the database again
-            self.translation.stats.last_change_cache = self
+            translation.stats.last_change_cache = self
             # Update currently loaded
-            if self.translation.stats.is_loaded:
-                self.translation.stats.fetch_last_change()
+            if translation.stats.is_loaded:
+                translation.stats.fetch_last_change()
             # Update stats at the end of transaction
             transaction.on_commit(self.update_cache_last_change)
             # Make sure stats is updated at the end of transaction
-            self.translation.invalidate_cache()
+            translation.invalidate_cache()
 
         if self.action == ActionEvents.RENAME_PROJECT:
             Change.objects.generate_project_rename_lookup()
+
+        self.log_event()
 
     def get_absolute_url(self) -> str:
         """Return link either to unit or translation."""
@@ -583,11 +754,33 @@ class Change(models.Model, UserDisplayMixin):
             return self.category.get_absolute_url()
         if self.project is not None:
             return self.project.get_absolute_url()
+        if self.workspace is not None:
+            return self.workspace.get_absolute_url()
         return "/"
 
+    def log_event(self) -> None:
+        if self.action in ACTIONS_LOG:
+            message = self.get_action_display()
+            if self.user:
+                message = f"{message} ({self.user.username})"
+            if self.author and self.author != self.user:
+                message = f"{message} ({self.author.username})"
+            if self.target:
+                message = f"{message}: {self.target}"
+            if self.translation:
+                self.translation.log_info("%s", message)
+            elif self.component:
+                self.component.log_info("%s", message)
+            elif self.project:
+                self.project.log_info("%s", message)
+            else:
+                LOGGER.info("%s", message)
+
     @property
-    def path_object(self):
-        """Return link either to unit or translation."""
+    def path_object(
+        self,
+    ) -> Translation | Component | Category | Project | Workspace | None:
+        """Object linked from the change path."""
         if self.translation is not None:
             return self.translation
         if self.component is not None:
@@ -596,6 +789,8 @@ class Change(models.Model, UserDisplayMixin):
             return self.category
         if self.project is not None:
             return self.project
+        if self.workspace is not None:
+            return self.workspace
         return None
 
     @staticmethod
@@ -612,10 +807,14 @@ class Change(models.Model, UserDisplayMixin):
         return self.translation_id is not None
 
     def update_cache_last_change(self) -> None:
-        self.store_last_change(self.translation, self)
+        self.store_last_change(cast("Translation", self.translation), self)
 
-    def fixup_refereces(self) -> None:
-        """Update references based to least specific one."""
+    def fixup_references(self) -> None:
+        """
+        Update references based to least specific one.
+
+        Update Change.fill_in_prefetched together with this one
+        """
         if self.unit:
             self.translation = self.unit.translation
         if self.screenshot:
@@ -626,208 +825,174 @@ class Change(models.Model, UserDisplayMixin):
         if self.component:
             self.project = self.component.project
             self.category = self.component.category
+        if self.project:
+            self.workspace = self.project.workspace
         if (self.user is None or not self.user.is_authenticated) and (
             ip_address := self.get_ip_address()
         ):
             self.details["ip_address"] = ip_address
 
     @property
-    def plural_count(self):
+    def plural_count(self) -> int:
         return self.details.get("count", 1)
 
     @property
-    def auto_status(self):
+    def auto_status(self) -> bool:
         return self.details.get("auto", False)
 
-    def get_action_display(self):
+    def get_action_display(self) -> str:  # type: ignore[no-redef]
         return str(self.ACTIONS_DICT.get(self.action, self.action))
 
-    def get_state_display(self):
+    def get_state_display(self) -> StrOrPromise:
         state = self.details.get("state")
         if state is None:
             return ""
         return StringState(state).label
 
-    def is_merge_failure(self):
+    def is_merge_failure(self) -> bool:
         return self.action in ACTIONS_MERGE_FAILURE
 
-    def can_revert(self):
-        return self.unit is not None and self.old and self.action in ACTIONS_REVERTABLE
+    def can_revert(self) -> bool:
+        return (
+            self.unit is not None
+            and self.action in ACTIONS_REVERTABLE
+            and self.get_revert_state() is not None
+        )
 
-    def show_source(self):
+    @staticmethod
+    def parse_revert_state(details: dict[str, Any]) -> StringState | None:
+        try:
+            return StringState(details["old_state"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def get_revert_state(self) -> StringState | None:
+        return self.parse_revert_state(self.details)
+
+    def get_latest_user_revert_target(self) -> tuple[str, StringState] | None:
+        if self.unit_id is None or self.user_id is None:
+            return None
+
+        boundary_old: str | None = None
+        boundary_state: StringState | None = None
+        history = (
+            Change.objects.filter(unit_id=self.unit_id, action__in=ACTIONS_REVERTABLE)
+            .order_by("-timestamp", "-pk")
+            .values_list("pk", "user_id", "old", "details")
+        )
+        for pk, user_id, old, details in history.iterator(chunk_size=100):
+            if boundary_old is None and (pk != self.pk or user_id != self.user_id):
+                return None
+            if user_id != self.user_id:
+                break
+            boundary_state = self.parse_revert_state(details)
+            if boundary_state is None:
+                return None
+            boundary_old = old
+
+        if boundary_old is None or boundary_state is None:
+            return None
+        return boundary_old, boundary_state
+
+    @transaction.atomic
+    def revert_user_edits(
+        self,
+        user: User,
+        *,
+        change_action: ActionEvents = ActionEvents.USER_REVERT,
+        author: User | None = None,
+        request=None,
+        change_details: dict[str, str] | None = None,
+    ) -> bool:
+        if self.unit is None or self.action not in ACTIONS_REVERTABLE:
+            return False
+
+        unit = cast("Unit", self.unit)
+        locked_unit = unit.__class__.objects.select_for_update().get(pk=unit.pk)
+        revert_target = self.get_latest_user_revert_target()
+        if revert_target is None:
+            return False
+
+        target, state = revert_target
+        return locked_unit.translate(
+            user,
+            split_plural(target),
+            state,
+            change_action=change_action,
+            author=author,
+            request=request,
+            select_for_update=False,
+            change_details=change_details,
+        )
+
+    @transaction.atomic
+    def revert(
+        self,
+        user: User,
+        *,
+        change_action: ActionEvents = ActionEvents.REVERT,
+        author: User | None = None,
+        request=None,
+        change_details: dict[str, str] | None = None,
+    ) -> bool:
+        if self.unit is None or self.action not in ACTIONS_REVERTABLE:
+            return False
+
+        unit = cast("Unit", self.unit)
+        locked_unit = unit.__class__.objects.select_for_update().get(pk=unit.pk)
+        state = self.get_revert_state()
+        if state is None:
+            return False
+
+        return locked_unit.translate(
+            user,
+            split_plural(self.old),
+            state,
+            change_action=change_action,
+            author=author,
+            request=request,
+            select_for_update=False,
+            change_details=change_details,
+        )
+
+    def show_source(self) -> bool:
         """Whether to show content as source change."""
         return self.action in {
             ActionEvents.SOURCE_CHANGE,
             ActionEvents.NEW_SOURCE,
+            ActionEvents.NEW_SOURCE_UPLOAD,
+            ActionEvents.NEW_SOURCE_REPO,
         }
 
-    def show_diff(self):
+    def show_diff(self) -> bool:
         """Whether to show content as diff."""
         return self.action in {
             ActionEvents.EXPLANATION,
             ActionEvents.EXTRA_FLAGS,
         }
 
-    def show_removed_string(self):
+    def show_removed_string(self) -> bool:
         """Whether to show content as source change."""
         return self.action == ActionEvents.STRING_REMOVE
 
-    def show_content(self):
+    def show_content(self) -> bool:
         """Whether to show content as translation."""
         return self.action in ACTIONS_SHOW_CONTENT or self.action in ACTIONS_REVERTABLE
 
-    def get_details_display(self):  # noqa: C901, PLR0911
-        from weblate.addons.models import ADDONS
-        from weblate.utils.markdown import render_markdown
+    def get_details_display(self) -> StrOrPromise:
+        # ruff: ignore[import-outside-top-level]
+        from weblate.trans.change_display import (
+            ChangeDetailsRenderFactory,
+        )
 
-        details = self.details
-        action = self.action
+        strategy = ChangeDetailsRenderFactory.get_strategy(self)
+        return strategy.render_details(self)
 
-        if action == ActionEvents.CREATE_COMPONENT:
-            try:
-                origin = details["origin"]
-            except KeyError:
-                return ActionEvents.CREATE_COMPONENT.label
-            try:
-                return COMPONENT_ORIGINS[origin]
-            except KeyError:
-                return f"{ActionEvents.CREATE_COMPONENT.label} ({origin})"
-
-        if action == ActionEvents.FILE_UPLOAD:
-            try:
-                method = FileUploadMethod[details["method"].upper()].label
-            except KeyError:
-                method = details["method"]
-            return format_html(
-                "{}<br>{} {}",
-                get_upload_message(
-                    details["not_found"],
-                    details["skipped"],
-                    details["accepted"],
-                    details["total"],
-                ),
-                gettext("File upload mode:"),
-                method,
-            )
-
-        if action in {
-            ActionEvents.ANNOUNCEMENT,
-            ActionEvents.AGREEMENT_CHANGE,
-        }:
-            return render_markdown(self.target)
-
-        if action == ActionEvents.COMMENT_DELETE and "comment" in details:
-            return render_markdown(details["comment"])
-
-        if action in {
-            ActionEvents.ADDON_CREATE,
-            ActionEvents.ADDON_CHANGE,
-            ActionEvents.ADDON_REMOVE,
-        }:
-            try:
-                return ADDONS[self.target].name
-            except KeyError:
-                return self.target
-
-        if action in self.AUTO_ACTIONS and self.auto_status:
-            return str(self.AUTO_ACTIONS[action])
-
-        if action == ActionEvents.UPDATE:
-            reason = details.get("reason", "content changed")
-            filename = format_html(
-                "<code>{}</code>",
-                details.get(
-                    "filename",
-                    self.translation.filename if self.translation else "",
-                ),
-            )
-            if reason == "content changed":
-                message = gettext("The “{}” file was changed.")
-            elif reason == "check forced":
-                message = gettext("Parsing of the “{}” file was enforced.")
-            elif reason == "new file":
-                message = gettext("File “{}” was added.")
-            else:
-                msg = f"Unknown reason: {reason}"
-                raise ValueError(msg)
-            return format_html(escape(message), filename)
-
-        if action == ActionEvents.LICENSE_CHANGE:
-            not_available = pgettext("License information not available", "N/A")
-            return gettext(
-                'The license of the "%(component)s" component was changed '
-                "from %(old)s to %(target)s."
-            ) % {
-                "component": self.component,
-                "old": self.old or not_available,
-                "target": self.target or not_available,
-            }
-
-        # Following rendering relies on details present
-        if not details:
-            return ""
-        user_actions = {
-            ActionEvents.ADD_USER,
-            ActionEvents.INVITE_USER,
-            ActionEvents.REMOVE_USER,
-        }
-        if action == ActionEvents.ACCESS_EDIT:
-            for number, name in Project.ACCESS_CHOICES:
-                if number == details["access_control"]:
-                    return name
-            return "Unknown {}".format(details["access_control"])
-        if action in user_actions:
-            if "username" in details:
-                result = details["username"]
-            else:
-                result = mask_email(details["email"])
-            if "group" in details:
-                result = f"{result} ({details['group']})"
-            return result
-        if action in {
-            ActionEvents.ADDED_LANGUAGE,
-            ActionEvents.REQUESTED_LANGUAGE,
-        }:
-            try:
-                return Language.objects.get(code=details["language"])
-            except Language.DoesNotExist:
-                return details["language"]
-        if action == ActionEvents.ALERT:
-            try:
-                return ALERTS[details["alert"]].verbose
-            except KeyError:
-                return details["alert"]
-        if action == ActionEvents.PARSE_ERROR:
-            return "{filename}: {error_message}".format(**details)
-        if action == ActionEvents.HOOK:
-            return "{service_long_name}: {repo_url}, {branch}".format(**details)
-        if action == ActionEvents.COMMENT and "comment" in details:
-            return render_markdown(details["comment"])
-        if action in {
-            ActionEvents.RESET,
-            ActionEvents.MERGE,
-            ActionEvents.REBASE,
-        }:
-            return format_html(
-                "{}<br/><br/>{}<br/>{}",
-                self.get_action_display(),
-                format_html(
-                    escape(gettext("Original revision: {}")),
-                    details.get("previous_head", "N/A"),
-                ),
-                format_html(
-                    escape(gettext("New revision: {}")),
-                    details.get("new_head", "N/A"),
-                ),
-            )
-
-        return ""
-
-    def get_distance(self):
+    def get_distance(self) -> int:
         return DamerauLevenshtein.distance(self.old, self.target)
 
-    def get_source(self):
-        return self.details.get("source", self.unit.source)
+    def get_source(self) -> str:
+        return self.details.get("source", cast("Unit", self.unit).source)
 
     def get_ip_address(self) -> str | None:
         if ip_address := self.details.get("ip_address"):
@@ -840,7 +1005,7 @@ class Change(models.Model, UserDisplayMixin):
             return ip_address
         return None
 
-    def show_unit_state(self):
+    def show_unit_state(self) -> bool:
         return "state" in self.details and self.action not in {
             ActionEvents.SUGGESTION,
             ActionEvents.SUGGESTION_DELETE,
@@ -851,10 +1016,34 @@ class Change(models.Model, UserDisplayMixin):
         """Return uuid for this change."""
         return uuid5(WEBLATE_UUID_NAMESPACE, f"{self.action}.{self.id}")
 
+    def fill_in_prefetched(self) -> None:
+        """
+        Fill in prefetched data into nested objects.
+
+        - Based on fixup_references.
+        - Uses data from prefetch_for_render
+        """
+        if self.unit:
+            self.unit.translation = cast("Translation", self.translation)
+        if self.screenshot:
+            self.screenshot.translation = cast("Translation", self.translation)
+        if self.translation:
+            self.translation.component = cast("Component", self.component)
+            if self.language_id is not None:
+                self.translation.language = cast("Language", self.language)
+        if self.component:
+            self.component.project = cast("Project", self.project)
+            self.component.category = cast("Category", self.category)
+        if self.project:
+            self.project.workspace = self.workspace
+
 
 @receiver(post_save, sender=Change)
 @disable_for_loaddata
-def change_notify(sender, instance, created=False, **kwargs) -> None:
-    from weblate.accounts.notifications import dispatch_changes_notifications
+def change_notify(sender, instance: Change, created: bool = False, **kwargs) -> None:
+    # ruff: ignore[import-outside-top-level]
+    from weblate.accounts.notifications import (
+        dispatch_changes_notifications,
+    )
 
     dispatch_changes_notifications([instance])

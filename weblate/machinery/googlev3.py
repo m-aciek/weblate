@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import json
 import operator
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from django.utils.functional import cached_property
 from google.api_core.exceptions import AlreadyExists, NotFound
-from google.cloud import storage
+from google.cloud import storage  # type: ignore[attr-defined]
 from google.cloud.translate_v3 import (
     GcsSource,
     Glossary,
@@ -21,7 +22,7 @@ from google.cloud.translate_v3 import (
 from google.oauth2 import service_account
 
 from .base import (
-    DownloadTranslations,
+    MACHINERY_DEFAULT_THRESHOLD,
     GlossaryAlreadyExistsError,
     GlossaryDoesNotExistError,
     GlossaryMachineTranslationMixin,
@@ -31,7 +32,12 @@ from .forms import GoogleV3MachineryForm
 from .google import GoogleBaseTranslation
 
 if TYPE_CHECKING:
+    from weblate.checks.base import Highlight
     from weblate.trans.models import Unit
+
+    from .base import (
+        DownloadTranslations,
+    )
 
 
 class GoogleV3Translation(
@@ -98,7 +104,7 @@ class GoogleV3Translation(
         text: str,
         unit,
         user,
-        threshold: int = 75,
+        threshold: int = MACHINERY_DEFAULT_THRESHOLD,
     ) -> DownloadTranslations:
         """Download list of possible translations from a service."""
         request = {
@@ -110,10 +116,12 @@ class GoogleV3Translation(
         }
         glossary_path: str | None = None
         if self.settings.get("bucket_name"):
-            glossary_path = self.get_glossary_id(source_language, target_language, unit)
-            request["glossary_config"] = TranslateTextGlossaryConfig(
-                glossary=glossary_path
-            )
+            glossary_id = self.get_glossary_id(source_language, target_language, unit)
+            if glossary_id is not None:
+                glossary_path = self.get_glossary_resource_path(glossary_id)
+                request["glossary_config"] = TranslateTextGlossaryConfig(
+                    glossary=glossary_path
+                )
 
         response = self.client.translate_text(request)
 
@@ -129,7 +137,7 @@ class GoogleV3Translation(
         }
 
     def format_replacement(
-        self, h_start: int, h_end: int, h_text: str, h_kind: Unit | None
+        self, h_start: int, h_end: int, h_text: str, h_kind: Highlight | Unit | None
     ) -> str:
         """Generate a single replacement."""
         return f'<span translate="no" id="{h_start}">{self.escape_text(h_text)}</span>'
@@ -182,21 +190,19 @@ class GoogleV3Translation(
         except AlreadyExists as error:
             raise GlossaryAlreadyExistsError from error
 
-    def delete_glossary(self, glossary_name: str) -> None:
+    def delete_glossary(self, glossary_id: str) -> None:
         """Delete the glossary in service and storage bucket."""
         try:
             self.client.delete_glossary(
-                name=self.get_glossary_resource_path(glossary_name)
+                name=self.get_glossary_resource_path(glossary_id)
             )
         except NotFound as error:
             raise GlossaryDoesNotExistError from error
         finally:
-            try:
+            with suppress(NotFound):
                 #  delete tsv from storage bucket
-                glossary_bucket_file = self.storage_bucket.blob(f"{glossary_name}.tsv")
+                glossary_bucket_file = self.storage_bucket.blob(f"{glossary_id}.tsv")
                 glossary_bucket_file.delete()
-            except NotFound:
-                pass
 
     def delete_oldest_glossary(self) -> None:
         """Delete the oldest glossary if any."""

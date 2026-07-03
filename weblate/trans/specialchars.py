@@ -221,7 +221,21 @@ EXTRA_CHARS = {
 }
 
 # Additional characters for RTL languages
-RTL_CHARS = (8204, 8205, 8206, 8207, 8234, 8235, 8236, 8237, 8238)
+RTL_CHARS = (
+    8204,
+    8205,
+    8206,
+    8207,
+    8234,
+    8235,
+    8236,
+    8237,
+    8238,
+    8294,
+    8295,
+    8296,
+    8297,
+)
 
 
 def get_quote(code, data, name):
@@ -312,7 +326,7 @@ def get_special_chars(language, additional="", source=""):
 
 RTL_CHARS_DATA = [format_char(chr(c)) for c in RTL_CHARS]
 
-# Quotes data, generated using scripts/generate-specialchars
+# Quotes data, generated using scripts/generate-specialchars.py
 ALT_OPEN = {
     "ALL": "‘",
     "af": "‘",

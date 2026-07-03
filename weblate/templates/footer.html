@@ -6,36 +6,49 @@
       {% blocktranslate %}Powered by {{ weblate_version_link }}{% endblocktranslate %}
     </li>
     <li>
-      <a href="{% url 'about' %}">{% blocktranslate %}About Weblate{% endblocktranslate %}</a>
+      <a href="{% url 'about' %}" id="footer-about-link">{% translate "About" context "About this server" %}</a>
     </li>
     {% if has_legal %}
-      <li>
-        <a href="{% url 'legal:index' %}">{% translate "Legal" %}</a>
-      </li>
-    {% elif legal_url %}
-      <li>
-        <a href="{{ legal_url }}">{% translate "Legal" %}</a>
-      </li>
-    {% endif %}
-    {% if privacy_url %}
-      <li>
-        <a href="{{ privacy_url }}">{% translate "Privacy policy" %}</a>
-      </li>
+      {% if terms_url %}
+        <li>
+          <a href="{{ terms_url }}">{% translate "Terms" context "General terms and conditions" %}</a>
+        </li>
+      {% endif %}
+      {% if privacy_url %}
+        <li>
+          <a href="{{ privacy_url }}">{% translate "Privacy" context "Privacy policy" %}</a>
+        </li>
+      {% endif %}
+    {% else %}
+      {% if legal_url %}
+        <li>
+          <a href="{{ legal_url }}">{% translate "Legal" context "Link to legal documents" %}</a>
+        </li>
+      {% endif %}
+      {% if privacy_url %}
+        <li>
+          <a href="{{ privacy_url }}">{% translate "Privacy" context "Privacy policy" %}</a>
+        </li>
+      {% endif %}
     {% endif %}
     {% if status_url %}
       <li>
-        <a href="{{ status_url }}">{% translate "Service status" %}</a>
+        <a href="{{ status_url }}">{% translate "Status" context "Service status" %}</a>
+      </li>
+    {% endif %}
+    {% if contact_form != "disabled" %}
+      <li>
+        <a href="{% url 'contact' %}">{% translate "Contact" %}</a>
       </li>
     {% endif %}
     <li>
-      <a href="{% url 'contact' %}">{% translate "Contact" %}</a>
-    </li>
-    <li>
       <a href="{% documentation 'index' %}">{% translate "Documentation" %}</a>
     </li>
-    <li>
-      <a href="{% url 'donate' %}">{% translate "Give to Weblate" %}</a>
-    </li>
+    {% if not support_status.has_support %}
+      <li>
+        <a href="{% url 'donate' %}">{% translate "Become a Weblate supporter" context "Support Weblate financially" %}</a>
+      </li>
+    {% endif %}
   </ul>
 </footer>
 

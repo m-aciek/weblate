@@ -25,10 +25,13 @@ can browse at ``/api/docs/``.
 Authentication and generic parameters
 +++++++++++++++++++++++++++++++++++++
 
-The public project API is available without authentication, though
-unauthenticated requests are heavily throttled (by default to 100 requests per
-day), so it is recommended to use authentication. The authentication uses a
-token, which you can get in your profile. Use it in the ``Authorization`` header:
+The read-only API is available without authentication unless
+:setting:`REQUIRE_LOGIN` is turned on. Unauthenticated requests are heavily
+throttled (by default to 100 requests per day), so it is recommended to use
+authentication.
+
+The authentication uses a token, which you can get in your profile. Use it in
+the ``Authorization`` header:
 
 .. http:any:: /
 
@@ -83,9 +86,9 @@ only. These tokens can be identified by the ``wlp_`` prefix.
 
 .. seealso::
 
-   :doc:`/user/profile`,
-   :ref:`project-api`,
-   :ref:`acl`
+   * :doc:`/user/profile`
+   * :ref:`project-api`
+   * :ref:`acl`
 
 Authentication examples
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -221,10 +224,10 @@ The status of rate limiting is reported in following headers:
 
 .. seealso::
 
-   :ref:`rate-limit`,
-   :ref:`user-rate`,
-   :envvar:`WEBLATE_API_RATELIMIT_ANON`,
-   :envvar:`WEBLATE_API_RATELIMIT_USER`
+   * :ref:`rate-limit`
+   * :ref:`user-rate`
+   * :envvar:`WEBLATE_API_RATELIMIT_ANON`
+   * :envvar:`WEBLATE_API_RATELIMIT_USER`
 
 .. _api-errors:
 
@@ -287,6 +290,7 @@ Users
 
     :query string username: Username to search for
     :query int id: User ID to search for
+    :query string email: Email to search for (case-insensitive, exact match). Requires ``user.view`` or ``user.edit`` permission; the parameter is ignored for unprivileged users.
 
     .. seealso::
 
@@ -295,6 +299,9 @@ Users
 .. http:post:: /api/users/
 
     Creates a new user.
+
+    Requires the global ``user.edit`` permission. See
+    :ref:`access-control` for the user management permission model.
 
     :param username: Username
     :type username: string
@@ -354,6 +361,10 @@ Users
 
     Changes the user parameters.
 
+    Requires the global ``user.edit`` permission unless a user is updating
+    their own basic profile fields. See :ref:`access-control` for the user
+    management permission model.
+
     :param username: User's username
     :type username: string
     :>json string username: username of a user
@@ -367,6 +378,10 @@ Users
 .. http:patch:: /api/users/(str:username)/
 
     Changes the user parameters.
+
+    Requires the global ``user.edit`` permission unless a user is updating
+    their own basic profile fields. See :ref:`access-control` for the user
+    management permission model.
 
     :param username: User's username
     :type username: string
@@ -382,12 +397,18 @@ Users
 
     Deletes all user information and marks the user inactive.
 
+    Requires the global ``user.edit`` permission. See
+    :ref:`access-control` for the user management permission model.
+
     :param username: User's username
     :type username: string
 
 .. http:post:: /api/users/(str:username)/groups/
 
     Associate groups with a user.
+
+    Requires the global ``user.edit`` permission. See
+    :ref:`access-control` for the user management permission model.
 
     :param username: User's username
     :type username: string
@@ -398,6 +419,9 @@ Users
     .. versionadded:: 4.13.1
 
     Remove user from a group.
+
+    Requires the global ``user.edit`` permission. See
+    :ref:`access-control` for the user management permission model.
 
     :param username: User's username
     :type username: string
@@ -524,6 +548,7 @@ Groups
     :>json array components: link to associated components; see :http:get:`/api/components/(string:project)/(string:component)/`
     :>json array componentlists: link to associated componentlist; see :http:get:`/api/component-lists/(str:slug)/`
     :>json str defining_project: link to the defining project, used for :ref:`manage-acl`; see :http:get:`/api/projects/(string:project)/`
+    :>json array admins: link to associated administrators; see :http:get:`/api/users/(str:username)/`
 
     **Example JSON data:**
 
@@ -550,6 +575,9 @@ Groups
             "componentlist": "http://example.com/api/component-lists/new/",
             "components": [
                 "http://example.com/api/components/demo/weblate/"
+            ],
+            "admins": [
+                "http://example.com/api/users/exampleusername/"
             ]
         }
 
@@ -885,6 +913,14 @@ Projects
     :type slug: string
     :param web: Project website
     :type web: string
+    :param workspace: Optional workspace UUID. Creating a project in a workspace
+                       requires :guilabel:`Add projects to workspace` permission
+                       for that workspace. When omitted, Weblate can use the
+                       only eligible workspace. Creating a project without an
+                       eligible workspace requires the site-wide
+                       :guilabel:`Add new projects` permission. See
+                       :ref:`workspace-project-creation`.
+    :type workspace: string
 
 .. http:get:: /api/projects/(string:project)/
 
@@ -901,10 +937,13 @@ Projects
     :>json string credits_url: URL to list contributor credits; see :http:get:`/api/projects/(string:project)/credits/`
     :>json boolean translation_review: :ref:`project-translation_review`
     :>json boolean source_review: :ref:`project-source_review`
-    :>json boolean set_language_team: :ref:`project-set_language_team`
     :>json boolean enable_hooks: :ref:`project-enable_hooks`
+    :>json string workspace: workspace UUID, or ``null`` when the project is not
+                            assigned to a workspace
     :>json string instructions: :ref:`project-instructions`
     :>json string language_aliases: :ref:`project-language_aliases`
+    :>json string license: :ref:`project-license`
+    :>json string announcements_url: URL to announcements; see :http:get:`/api/projects/(string:project)/announcements/`
 
     **Example JSON data:**
 
@@ -924,10 +963,38 @@ Projects
 
     Edit a project by a :http:method:`PATCH` request.
 
+    The ``project`` value is the project slug. To avoid using a wrong
+    identifier, use the project ``url`` returned by :http:get:`/api/projects/`
+    or :http:get:`/api/projects/(string:project)/`.
+
+    The request body accepts project fields such as ``instructions`` and
+    ``license``.
+
+    **Example JSON data:**
+
+    .. code-block:: json
+
+        {
+            "instructions": "Translate consistently.",
+            "license": "MIT"
+        }
+
+    Changing ``workspace`` moves the project. Moving a project requires
+    permission to edit the project and the :guilabel:`Edit workspace settings`
+    permission for the source and target workspace. The target workspace also
+    requires the :guilabel:`Add projects to workspace` permission. Moving a
+    project out of a workspace also requires the site-wide :guilabel:`Add new
+    projects` permission. See :ref:`workspace-project-creation`.
+
     :param project: Project URL slug
     :type project: string
-    :param component: Component URL slug
-    :type component: string
+    :param instructions: :ref:`project-instructions`
+    :type instructions: string
+    :param license: :ref:`project-license`
+    :type license: string
+    :param workspace: Optional workspace UUID, or ``null`` to move the project
+                       out of a workspace
+    :type workspace: string
 
 .. http:put:: /api/projects/(string:project)/
 
@@ -935,8 +1002,15 @@ Projects
 
     Edit a project by a :http:method:`PUT` request.
 
+    Changing ``workspace`` follows the same permission checks as
+    :http:patch:`/api/projects/(string:project)/`.
+
     :param project: Project URL slug
     :type project: string
+    :param instructions: :ref:`project-instructions`
+    :type instructions: string
+    :param license: :ref:`project-license`
+    :type license: string
 
 .. http:delete:: /api/projects/(string:project)/
 
@@ -1071,6 +1145,7 @@ Projects
     :type project: string
     :form file zipfile: ZIP file to upload into Weblate for translations initialization
     :form file docfile: Document to translate
+    :form string from_component: Optional source component reference used to duplicate the new component. Accepts either a numeric component ID or a full Weblate component path. When provided, the new component inherits the source component configuration and translations into a new local repository. Repository fields such as ``repo``, ``vcs``, ``branch``, ``push``, and ``push_branch`` can not be combined with this option.
     :form boolean disable_autoshare: Disables automatic repository sharing via :ref:`internal-urls`.
     :<json object: Component parameters, see :http:get:`/api/components/(string:project)/(string:component)/`
     :>json object result: Created component object; see :http:get:`/api/components/(string:project)/(string:component)/`
@@ -1100,6 +1175,10 @@ Projects
             --data-binary '{
                 "branch": "main",
                 "file_format": "po",
+                "file_format_params": {
+                    "po_line_wrap": 65535,
+                    "po_no_location": true
+                },
                 "filemask": "po/*.po",
                 "name": "Weblate",
                 "slug": "weblate",
@@ -1126,6 +1205,10 @@ Projects
         {
             "branch": "main",
             "file_format": "po",
+            "file_format_params": {
+                "po_line_wrap": 65535,
+                "po_no_location": true
+            },
             "filemask": "po/*.po",
             "name": "Weblate",
             "slug": "weblate",
@@ -1147,14 +1230,9 @@ Projects
         Content-Length: 20
 
         {
-            "file_format": "po",
-            "filemask": "po/*.po",
+            "from_component": "hello/weblate",
             "name": "Weblate",
-            "slug": "weblate",
-            "repo": "weblate://weblate/hello",
-            "template": "",
-            "new_base": "po/hello.pot",
-            "vcs": "git"
+            "slug": "weblate"
         }
 
     **JSON response example:**
@@ -1173,6 +1251,10 @@ Projects
         {
             "branch": "main",
             "file_format": "po",
+            "file_format_params": {
+                "po_line_wrap": 65535,
+                "po_no_location": true
+            },
             "filemask": "po/*.po",
             "git_export": "",
             "license": "",
@@ -1261,6 +1343,17 @@ Projects
     :<json string name: name of the label
     :<json string color: color of the label
 
+.. http:delete:: /api/projects/(string:project)/labels/(int:label_id)/
+
+   .. versionadded:: 5.14
+
+    Deletes a label from a project.
+
+    :param project: Project URL slug
+    :type project: string
+    :param label_id: ID of the label to delete
+    :type label_id: integer
+
 .. http:get:: /api/projects/(string:project)/credits/
 
     Returns contributor credits for a project.
@@ -1280,7 +1373,7 @@ Projects
     :>json string change_count: Number of changes done in the time range
 
 
-.. http:get:: /api/projects/{string:project}/machinery_settings/
+.. http:get:: /api/projects/(string:project)/machinery_settings/
 
     .. versionadded:: 5.9
 
@@ -1291,7 +1384,7 @@ Projects
     :>json object suggestion_settings: Configuration for all installed services.
 
 
-.. http:post:: /api/projects/{string:project}/machinery_settings/
+.. http:post:: /api/projects/(string:project)/machinery_settings/
 
     .. versionadded:: 5.9
 
@@ -1302,6 +1395,145 @@ Projects
     :form string service: Service name
     :form string configuration: Service configuration in JSON
 
+.. http:get:: /api/projects/(string:project)/languages/(string:language_code)/file/
+
+    .. versionchanged:: 5.15.1
+
+       Added ability to download ZIP file of all components translations in a project for 1 specific language.
+
+    Download a ZIP file of all translation files for a specified ``language_code`` across all components for a given ``project`` rather than downloading individual translated files and manually zipping them, with the archive named `{project-slug}-{language-code}.zip` and organized by component paths (e.g., `component-slug/po/lang.po`).
+
+    :param project: Project URL slug
+    :type project: string
+    :param language_code: Language code
+    :type language_code: string
+    :query string filter: Optional case-insensitive substring to filter components by slug (e.g., ``?filter=core`` will match components with 'core' anywhere in their slug); only components whose slugs contain the substring will be included in the download.
+    :query string format: The archive format to use; If not specified, defaults to ``zip``; Supported formats: ``zip`` and ``zip:CONVERSION`` where ``CONVERSION`` is one of converters listed at :ref:`download`.
+
+    .. note::
+
+        Possible responses:
+
+        - ``200 OK`` with the ZIP file of translations for the specified language across all components in the project. If no components have translations for the specified language, an empty ZIP file will be returned.
+        - ``403 Forbidden`` if the user does not have permission to the project.
+        - ``404 Not Found`` if the project slug does not exist.
+
+.. http:get:: /api/projects/(string:project)/languages/(string:language_code)/announcements/
+
+   .. versionadded:: 2026.6
+
+    Returns announcements for a specified ``language_code`` in a project.
+
+    :param project: Project URL slug
+    :type project: string
+    :param language_code: Language code
+    :type language_code: string
+    :>json int id: ID of the announcement
+    :>json string message: announcement text
+    :>json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :>json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :>json bool notify: send notification to subscribed users? (optional)
+
+.. http:post:: /api/projects/(string:project)/languages/(string:language_code)/announcements/
+
+   .. versionadded:: 2026.6
+
+    Creates an announcement for a specified ``language_code`` in a project.
+
+    :param project: Project URL slug
+    :type project: string
+    :param language_code: Language code
+    :type language_code: string
+    :<json string message: announcement text
+    :<json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :<json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :<json bool notify: send notification to subscribed users? (optional)
+
+.. http:delete:: /api/projects/(string:project)/languages/(string:language_code)/announcements/(int:announcement_id)/
+
+   .. versionadded:: 2026.6
+
+    Deletes an announcement from a specified ``language_code`` in a project.
+
+    :param project: Project URL slug
+    :type project: string
+    :param language_code: Language code
+    :type language_code: string
+    :param announcement_id: ID of the announcement to delete
+    :type announcement_id: integer
+
+.. http:get:: /api/projects/(string:project)/announcements/
+
+   .. versionadded:: 5.17
+
+    Returns announcements for a project.
+
+    :param project: Project URL slug
+    :type project: string
+    :>json int id: ID of the announcement
+    :>json string message: announcement text
+    :>json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :>json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :>json bool notify: send notification to subscribed users? (optional)
+
+.. http:post:: /api/projects/(string:project)/announcements/
+
+   .. versionadded:: 5.17
+
+    Creates an announcement for a project.
+
+    :param project: Project URL slug
+    :type project: string
+    :<json string message: announcement text
+    :<json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :<json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :<json bool notify: send notification to subscribed users? (optional)
+
+.. http:delete:: /api/projects/(string:project)/announcements/(int:announcement_id)/
+
+   .. versionadded:: 5.17
+
+    Deletes an announcement from a project.
+
+    :param project: Project URL slug
+    :type project: string
+    :param announcement_id: ID of the announcement to delete
+    :type announcement_id: integer
+
+.. http:get:: /api/projects/(string:project)/backups/
+
+   .. versionadded:: 2026.7
+
+    Returns a list of :ref:`projectbackup` archives.
+
+    :param project: Project URL slug
+    :type project: string
+    :>json string name: Backup file name, for example ``1718803200.zip``
+    :>json string timestamp: Backup creation time in ISO 8601 format
+    :>json int size: Backup file size in bytes
+
+.. http:post:: /api/projects/(string:project)/backups/
+
+   .. versionadded:: 2026.7
+
+    Schedules creation of a new :ref:`projectbackup` archive. Once ready, the backup appears in
+    :http:get:`/api/projects/(string:project)/backups/`.
+
+    :param project: Project URL slug
+    :type project: string
+    :>json string detail: Result message
+    :>json string url: URL to list backups
+
+.. http:get:: /api/projects/(string:project)/backups/(string:backup)/
+
+   .. versionadded:: 2026.7
+
+    Downloads a :ref:`projectbackup` archive.
+
+    :param project: Project URL slug
+    :type project: string
+    :param backup: Backup file name, e.g. ``1718803200.zip``
+    :type backup: string
 
 Components
 ++++++++++
@@ -1342,6 +1574,7 @@ Components
     :>json string intermediate: :ref:`component-intermediate`
     :>json string new_base: :ref:`component-new_base`
     :>json string file_format: :ref:`component-file_format`
+    :>json object file_format_params: :ref:`component-file_format_params`
     :>json string license: :ref:`component-license`
     :>json string agreement: :ref:`component-agreement`
     :>json string new_lang: :ref:`component-new_lang`
@@ -1364,10 +1597,10 @@ Components
     :>json string enable_suggestions: :ref:`component-enable_suggestions`
     :>json string suggestion_voting: :ref:`component-suggestion_voting`
     :>json string suggestion_autoaccept: :ref:`component-suggestion_autoaccept`
-    :>json string push_on_commit: :ref:`component-push_on_commit`
+    :>json boolean push_on_commit: :ref:`component-push_on_commit`; linked repositories expose the effective value from the linked component
     :>json bool locked: Whether component is locked, this field is read-only; see :http:get:`/api/components/(string:project)/(string:component)/lock/`
-    :>json string commit_pending_age: :ref:`component-commit_pending_age`
-    :>json string auto_lock_error: :ref:`component-auto_lock_error`
+    :>json integer commit_pending_age: :ref:`component-commit_pending_age`; linked repositories expose the effective value from the linked component
+    :>json boolean auto_lock_error: :ref:`component-auto_lock_error`; linked repositories expose the effective value from the linked component
     :>json string language_regex: :ref:`component-language_regex`
     :>json string variant_regex: :ref:`component-variant_regex`
     :>json bool is_glossary: :ref:`component-is_glossary`
@@ -1378,6 +1611,7 @@ Components
     :>json string changes_list_url: URL to changes list; see :http:get:`/api/components/(string:project)/(string:component)/changes/`
     :>json string task_url: URL to a background task (if any); see :http:get:`/api/tasks/(str:uuid)/`
     :>json string credits_url: URL to list contributor credits; see :http:get:`/api/components/(string:project)/(string:component)/credits/`
+    :>json string announcements_url: URL to announcements; see :http:get:`/api/components/(string:project)/(string:component)/announcements/`
 
     **Example JSON data:**
 
@@ -1386,6 +1620,10 @@ Components
         {
             "branch": "main",
             "file_format": "po",
+            "file_format_params": {
+                "po_line_wrap": 65535,
+                "po_no_location": true
+            },
             "filemask": "po/*.po",
             "git_export": "",
             "license": "",
@@ -1478,6 +1716,10 @@ Components
         {
             "branch": "main",
             "file_format": "po",
+            "file_format_params": {
+                "po_line_wrap": 65535,
+                "po_no_location": true
+            },
             "filemask": "po/*.po",
             "git_export": "",
             "license": "",
@@ -1517,6 +1759,7 @@ Components
     :type component: string
     :<json string branch: VCS repository branch
     :<json string file_format: file format of translations
+    :<json object file_format_params: parameters related to the file
     :<json string filemask: mask of translation files in the repository
     :<json string name: name of component
     :<json string slug: slug of component
@@ -1742,6 +1985,7 @@ Components
     :param component: Component URL slug
     :type component: string
     :<json string language_code: translation language code; see :http:get:`/api/languages/(string:language)/`
+    :<json array from_component: optional ordered list of source component references used for automatic translation. Accepts numeric component IDs or full Weblate component paths. For form submissions this field can be provided multiple times.
     :>json object result: new translation object created
 
     **CURL example:**
@@ -1764,7 +2008,10 @@ Components
         Authorization: Token TOKEN
         Content-Length: 20
 
-        {"language_code": "cs"}
+        {
+            "language_code": "cs",
+            "from_component": ["hello/weblate", 123]
+        }
 
     **JSON response example:**
 
@@ -1844,12 +2091,15 @@ Components
     Associate project with a component.
 
     .. versionadded:: 4.5
+    .. versionchanged:: 5.17
 
     :param project: Project URL slug
     :type project: string
     :param component: Component URL slug
     :type component: string
     :form string project_slug: Project slug
+    :form int category_id: Category ID in the target project (optional).
+        The category must belong to the specified project.
 
 .. http:delete:: /api/components/(string:project)/(string:component)/links/(string:project_slug)/
 
@@ -1881,6 +2131,51 @@ Components
     :>json string email: Email of the contributor
     :>json string full_name: Full name of the contributor
     :>json string change_count: Number of changes done in the time range
+
+.. http:get:: /api/components/(string:project)/(string:component)/announcements/
+
+   .. versionadded:: 5.17
+
+    Returns announcements for a component.
+
+    :param project: Project URL slug
+    :type project: string
+    :param component: Component URL slug
+    :type component: string
+    :>json int id: ID of the announcement
+    :>json string message: announcement text
+    :>json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :>json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :>json bool notify: send notification to subscribed users? (optional)
+
+.. http:post:: /api/components/(string:project)/(string:component)/announcements/
+
+   .. versionadded:: 5.17
+
+    Creates an announcement for a component.
+
+    :param project: Project URL slug
+    :type project: string
+    :param component: Component URL slug
+    :type component: string
+    :<json string message: announcement text
+    :<json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :<json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :<json bool notify: send notification to subscribed users? (optional)
+
+.. http:delete:: /api/components/(string:project)/(string:component)/announcements/(int:announcement_id)/
+
+   .. versionadded:: 5.17
+
+    Deletes an announcement from a component.
+
+    :param project: Project URL slug
+    :type project: string
+    :param component: Component URL slug
+    :type component: string
+    :param announcement_id: ID of the announcement to delete
+    :type announcement_id: integer
+
 
 Translations
 ++++++++++++
@@ -1930,6 +2225,7 @@ Translations
     :>json string file_url: URL to file object; see :http:get:`/api/translations/(string:project)/(string:component)/(string:language)/file/`
     :>json string changes_list_url: URL to changes list; see :http:get:`/api/translations/(string:project)/(string:component)/(string:language)/changes/`
     :>json string units_list_url: URL to strings list; see :http:get:`/api/translations/(string:project)/(string:component)/(string:language)/units/`
+    :>json string announcements_url: URL to announcements; see :http:get:`/api/translations/(string:project)/(string:component)/(string:language)/announcements/`
 
     **Example JSON data:**
 
@@ -1939,6 +2235,10 @@ Translations
             "component": {
                 "branch": "main",
                 "file_format": "po",
+                "file_format_params": {
+                    "po_line_wrap": 65535,
+                    "po_no_location": true
+                },
                 "filemask": "po/*.po",
                 "git_export": "",
                 "license": "",
@@ -2060,10 +2360,14 @@ Translations
 
     .. seealso::
 
-       :ref:`component-manage_units`,
-       :ref:`adding-new-strings`
+       * :ref:`component-manage_units`
+       * :ref:`adding-new-strings`
 
 .. http:post:: /api/translations/(string:project)/(string:component)/(string:language)/autotranslate/
+
+    .. versionchanged:: 5.13
+
+       The ``filter_type`` parameter is no longer supported and filtering is done by the ``q`` parameter.
 
     Trigger automatic translation.
 
@@ -2074,7 +2378,7 @@ Translations
     :param language: Translation language code
     :type language: string
     :<json string mode: Automatic translation mode
-    :<json string filter_type: Automatic translation filter type
+    :<json string q: Automatic translation search string, see :ref:`search-strings`.
     :<json string auto_source: Automatic translation source - ``mt`` or ``others``
     :<json string component: Turn on contribution to shared translation memory for the project to get access to additional components.
     :<json array engines: Machine translation engines
@@ -2117,8 +2421,8 @@ Translations
     :type language: string
     :form string conflicts: How to deal with conflicts (``ignore``, ``replace-translated`` or ``replace-approved``), see :ref:`upload-conflicts`
     :form file file: Uploaded file
-    :form string email: Author e-mail
-    :form string author: Author name
+    :form string author_email: Author e-mail
+    :form string author_name: Author name
     :form string method: Upload method (``translate``, ``approve``, ``suggest``, ``fuzzy``, ``replace``, ``source``, ``add``), see :ref:`upload-method`
     :form string fuzzy: Fuzzy (marked for edit) strings processing (*empty*, ``process``, ``approve``)
 
@@ -2174,6 +2478,56 @@ Translations
 
        Returned attributes are described in :ref:`api-statistics`.
 
+.. http:get:: /api/translations/(string:project)/(string:component)/(string:language)/announcements/
+
+   .. versionadded:: 5.17
+
+    Returns announcements for a translation.
+
+    :param project: Project URL slug
+    :type project: string
+    :param component: Component URL slug
+    :type component: string
+    :param language: Translation language code
+    :type language: string
+    :>json int id: ID of the announcement
+    :>json string message: announcement text
+    :>json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :>json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :>json bool notify: send notification to subscribed users? (optional)
+
+.. http:post:: /api/translations/(string:project)/(string:component)/(string:language)/announcements/
+
+   .. versionadded:: 5.17
+
+    Creates an announcement for a translation.
+
+    :param project: Project URL slug
+    :type project: string
+    :param component: Component URL slug
+    :type component: string
+    :param language: Translation language code
+    :type language: string
+    :<json string message: announcement text
+    :<json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :<json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :<json bool notify: send notification to subscribed users? (optional)
+
+.. http:delete:: /api/translations/(string:project)/(string:component)/(string:language)/announcements/(int:announcement_id)/
+
+   .. versionadded:: 5.17
+
+    Deletes an announcement from a translation.
+
+    :param project: Project URL slug
+    :type project: string
+    :param component: Component URL slug
+    :type component: string
+    :param language: Translation language code
+    :type language: string
+    :param announcement_id: ID of the announcement to delete
+    :type announcement_id: integer
+
 
 Memory
 ++++++
@@ -2183,6 +2537,30 @@ Memory
 .. http:get:: /api/memory/
 
     Returns a list of memory results.
+
+    :query source: Case-insensitive substring filter on source text (optional)
+    :type source: string
+    :query source_language: Source language code filter (optional)
+    :type source_language: string
+    :query target_language: Target language code filter (optional)
+    :type target_language: string
+    :query project: Project slug filter (optional)
+    :type project: string
+
+.. http:post:: /api/memory/lookup/
+
+    Looks up translation memory matches for the provided source strings.
+
+    :query source_language: Source language code
+    :type source_language: string
+    :query target_language: Target language code
+    :type target_language: string
+    :query project: Project slug filter (optional)
+    :type project: string
+    :query exact: Return exact matches only and skip fuzzy matching (optional)
+    :type exact: boolean
+    :<json array strings: List of source strings to look up
+    :>json array results: Ordered lookup results with the best match for each query or ``null`` when no match was found
 
 .. http:delete:: /api/memory/(int:memory_object_id)/
 
@@ -2316,6 +2694,18 @@ and XLIFF.
     :>json string user: URL of the commenter's object
     :>json string timestamp: creation timestamp of the comment
 
+.. http:get:: /api/units/(int:id)/comments/
+
+    .. versionadded:: 5.15
+
+    Returns a list of comments on a given translation unit
+
+    :param id: Unit ID
+    :type id: int
+    :>json int id: comment identifier
+    :>json string comment: content of the comment
+    :>json string timestamp: creation timestamp of the comment
+    :>json string user: URL of the commenter's object
 
 Changes
 +++++++
@@ -2332,7 +2722,7 @@ Changes
 
         Change object attributes are documented at :http:get:`/api/changes/(int:id)/`.
 
-    :query string user: Username of user to filters
+    :query string user: Username of the user to filter by
     :query int action: Action to filter, can be used several times
     :query timestamp timestamp_after: ISO 8601 formatted timestamp to list changes after
     :query timestamp timestamp_before: ISO 8601 formatted timestamp to list changes before
@@ -2361,7 +2751,7 @@ Screenshots
 
 .. http:get:: /api/screenshots/
 
-    Returns a list of screenshot string information.
+    Returns a list of screenshots.
 
     .. seealso::
 
@@ -2374,7 +2764,8 @@ Screenshots
     :param id: Screenshot ID
     :type id: int
     :>json string name: name of a screenshot
-    :>json string component: URL of a related component object
+    :>json string repository_filename: repository path used to match repository-based screenshot updates
+    :>json string translation: URL of a related translation object
     :>json string file_url: URL to download a file; see :http:get:`/api/screenshots/(int:id)/file/`
     :>json array units: link to associated source string information; see :http:get:`/api/units/(int:id)/`
 
@@ -2432,8 +2823,10 @@ Screenshots
     :form string project_slug: Project slug
     :form string component_slug: Component slug
     :form string language_code: Language code
+    :form string repository_filename: Optional repository path used to associate later repository updates
     :>json string name: name of a screenshot
-    :>json string component: URL of a related component object
+    :>json string repository_filename: repository path used to match repository-based screenshot updates
+    :>json string translation: URL of a related translation object
     :>json string file_url: URL to download a file; see :http:get:`/api/screenshots/(int:id)/file/`
     :>json array units: link to associated source string information; see :http:get:`/api/units/(int:id)/`
 
@@ -2444,7 +2837,8 @@ Screenshots
     :param id: Screenshot ID
     :type id: int
     :>json string name: name of a screenshot
-    :>json string component: URL of a related component object
+    :>json string repository_filename: repository path used to match repository-based screenshot updates
+    :>json string translation: URL of a related translation object
     :>json string file_url: URL to download a file; see :http:get:`/api/screenshots/(int:id)/file/`
     :>json array units: link to associated source string information; see :http:get:`/api/units/(int:id)/`
 
@@ -2455,7 +2849,8 @@ Screenshots
     :param id: Screenshot ID
     :type id: int
     :>json string name: name of a screenshot
-    :>json string component: URL of a related component object
+    :>json string repository_filename: repository path used to match repository-based screenshot updates
+    :>json string translation: URL of a related translation object
     :>json string file_url: URL to download a file; see :http:get:`/api/screenshots/(int:id)/file/`
     :>json array units: link to associated source string information; see :http:get:`/api/units/(int:id)/`
 
@@ -2523,6 +2918,15 @@ Add-ons
 .. http:delete:: /api/addons/(int:id)/
 
     Delete add-on.
+
+    :param id: Add-on ID
+    :type id: int
+
+.. http:post:: /api/addons/(int:id)/trigger/
+
+    Trigger a manual run of an add-on that supports manual triggering.
+
+    .. versionadded:: 5.17.1
 
     :param id: Add-on ID
     :type id: int
@@ -2689,11 +3093,11 @@ Statistics
 
    .. seealso::
 
-      :http:get:`/api/languages/(string:language)/statistics/`,
-      :http:get:`/api/projects/(string:project)/statistics/`,
-      :http:get:`/api/categories/(int:id)/statistics/`,
-      :http:get:`/api/components/(string:project)/(string:component)/statistics/`,
-      :http:get:`/api/translations/(string:project)/(string:component)/(string:language)/statistics/`
+      * :http:get:`/api/languages/(string:language)/statistics/`
+      * :http:get:`/api/projects/(string:project)/statistics/`
+      * :http:get:`/api/categories/(int:id)/statistics/`
+      * :http:get:`/api/components/(string:project)/(string:component)/statistics/`
+      * :http:get:`/api/translations/(string:project)/(string:component)/(string:language)/statistics/`
 
 Metrics
 +++++++
@@ -2719,6 +3123,10 @@ Metrics
     :>json int suggestions: Number of pending suggestions
     :>json object celery_queues: Lengths of Celery queues, see :ref:`celery`
     :>json string name: Configured server name
+    :>json string version: Running Weblate version, included when :setting:`VERSION_DISPLAY` is ``show`` or ``soft``
+
+    In OpenMetrics format, the version is exposed as ``weblate_info{version="..."} 1``
+    when :setting:`VERSION_DISPLAY` is ``show`` or ``soft``.
 
 Search
 +++++++
@@ -2730,6 +3138,15 @@ Search
    Returns site-wide search results as a list. There is no pagination on the
    result set, only first few matches are returned for each category.
 
+   The search looks for:
+
+   - Projects
+   - Categories
+   - Components
+   - Languages
+   - Users
+
+   :param q: Search query string
    :>json str name: Name of the matched item.
    :>json str url: Web URL of the matched item.
    :>json str category: Category of the matched item.
@@ -2759,6 +3176,7 @@ Categories
    :>json str slug: Slug of category.
    :>json str project: Link to a project.
    :>json str category: Link to a parent category.
+   :>json string announcements_url: URL to announcements; see :http:get:`/api/categories/(int:id)/announcements/`
 
 .. http:patch:: /api/categories/(int:id)/
 
@@ -2795,12 +3213,50 @@ Categories
 
     Returns statistics for a category.
 
-    :param project: Category ID
-    :type project: int
+    :param id: Category ID
+    :type id: int
 
     .. seealso::
 
        Returned attributes are described in :ref:`api-statistics`.
+
+.. http:get:: /api/categories/(int:id)/announcements/
+
+   .. versionadded:: 5.17.1
+
+    Returns announcements for a category.
+
+    :param id: Category ID
+    :type id: int
+    :>json int id: ID of the announcement
+    :>json string message: announcement text
+    :>json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :>json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :>json bool notify: send notification to subscribed users? (optional)
+
+.. http:post:: /api/categories/(int:id)/announcements/
+
+   .. versionadded:: 5.17.1
+
+    Creates an announcement for a category.
+
+    :param id: Category ID
+    :type id: int
+    :<json string message: announcement text
+    :<json string severity: color of the message, one of ``info`` (light blue), ``warning`` (yellow), ``danger`` (red), ``success`` (green)
+    :<json date expiry: hide after this date, ISO 8601 extended format date (optional)
+    :<json bool notify: send notification to subscribed users? (optional)
+
+.. http:delete:: /api/categories/(int:id)/announcements/(int:announcement_id)/
+
+   .. versionadded:: 5.17.1
+
+    Deletes an announcement from a category.
+
+    :param id: Category ID
+    :type id: int
+    :param announcement_id: ID of the announcement to delete
+    :type announcement_id: integer
 
 .. _hooks:
 
@@ -2821,8 +3277,7 @@ update individual repositories; see
         Please use :http:post:`/api/components/(string:project)/(string:component)/repository/`
         instead which works properly with authentication for ACL limited projects.
 
-   Triggers update of a component (pulling from VCS and scanning for
-   translation changes).
+   .. versionremoved:: 5.14
 
 .. http:get:: /hooks/update/(string:project)/
 
@@ -2831,8 +3286,7 @@ update individual repositories; see
         Please use :http:post:`/api/projects/(string:project)/repository/`
         instead which works properly with authentication for ACL limited projects.
 
-   Triggers update of all components in a project (pulling from VCS and
-   scanning for translation changes).
+   .. versionremoved:: 5.14
 
 .. http:post:: /hooks/github/
 
@@ -2847,7 +3301,7 @@ update individual repositories; see
 
     .. seealso::
 
-        :ref:`github-setup`
+        :ref:`GitHub notifications <code-hosting-github-notifications>`
             For instruction on setting up GitHub integration
         https://docs.github.com/en/get-started/customizing-your-github-workflow/exploring-integrations/about-webhooks
             Generic information about GitHub Webhooks
@@ -2861,7 +3315,7 @@ update individual repositories; see
 
     .. seealso::
 
-        :ref:`gitlab-setup`
+        :ref:`GitLab notifications <code-hosting-gitlab-notifications>`
             For instruction on setting up GitLab integration
         https://docs.gitlab.com/user/project/integrations/webhooks/
             Generic information about GitLab Webhooks
@@ -2875,7 +3329,7 @@ update individual repositories; see
 
     .. seealso::
 
-        :ref:`bitbucket-setup`
+        :ref:`Bitbucket notifications <code-hosting-bitbucket-notifications>`
             For instruction on setting up Bitbucket integration
         https://support.atlassian.com/bitbucket-cloud/docs/manage-webhooks/
             Generic information about Bitbucket Webhooks
@@ -2889,7 +3343,7 @@ update individual repositories; see
 
     .. seealso::
 
-        :ref:`pagure-setup`
+        :ref:`Pagure notifications <code-hosting-pagure-notifications>`
             For instruction on setting up Pagure integration
         https://docs.pagure.org/pagure/usage/using_webhooks.html
             Generic information about Pagure Webhooks
@@ -2908,7 +3362,7 @@ update individual repositories; see
 
     .. seealso::
 
-        :ref:`azure-setup`
+        :ref:`Azure Repos notifications <code-hosting-azure-repos-notifications>`
             For instruction on setting up Azure integration
         https://learn.microsoft.com/en-us/azure/devops/service-hooks/services/webhooks?view=azure-devops
             Generic information about Azure DevOps Web Hooks
@@ -2922,10 +3376,24 @@ update individual repositories; see
 
     .. seealso::
 
-        :ref:`gitea-setup`
+        :ref:`Gitea notifications <code-hosting-gitea-notifications>`
             For instruction on setting up Gitea integration
         https://docs.gitea.io/en-us/webhooks/
             Generic information about Gitea Webhooks
+        :setting:`ENABLE_HOOKS`
+            For enabling hooks for whole Weblate
+
+.. http:post:: /hooks/forgejo/
+
+    Special hook for handling Forgejo Webhook notifications and automatically
+    updating matching components.
+
+    .. seealso::
+
+        :ref:`Forgejo notifications <code-hosting-forgejo-notifications>`
+            For instruction on setting up Forgejo integration
+        https://forgejo.org/docs/latest/user/webhooks/
+            Generic information about Forgejo Webhooks
         :setting:`ENABLE_HOOKS`
             For enabling hooks for whole Weblate
 
@@ -2936,9 +3404,9 @@ update individual repositories; see
 
     .. seealso::
 
-        :ref:`gitee-setup`
+        :ref:`Gitee notifications <code-hosting-gitee-notifications>`
             For instruction on setting up Gitee integration
-        https://gitee.com/help/categories/40
+        https://help.gitee.com/webhook
             Generic information about Gitee Webhooks
         :setting:`ENABLE_HOOKS`
             For enabling hooks for whole Weblate
@@ -2949,6 +3417,34 @@ RSS feeds
 +++++++++
 
 Changes in translations are exported in RSS feeds.
+
+Filtered RSS feeds are available from the changes browser. These accept the same
+filters as the changes page, for example ``action``, ``user``, ``exclude_user``,
+and ``period``.
+
+.. http:get:: /changes/rss/
+
+    Retrieves RSS feed with recent changes matching changes browsing filters.
+
+.. http:get:: /changes/rss/(string:project)/(string:component)/(string:language)/
+
+    Retrieves RSS feed with recent changes matching changes browsing filters in a
+    translation.
+
+.. http:get:: /changes/rss/(string:project)/(string:component)/
+
+    Retrieves RSS feed with recent changes matching changes browsing filters in a
+    component.
+
+.. http:get:: /changes/rss/(string:project)/-/(string:language)/
+
+    Retrieves RSS feed with recent changes matching changes browsing filters in a
+    project language.
+
+.. http:get:: /changes/rss/-/-/(string:language)/
+
+    Retrieves RSS feed with recent changes matching changes browsing filters in a
+    language.
 
 .. http:get:: /exports/rss/(string:project)/(string:component)/(string:language)/
 

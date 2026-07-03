@@ -49,7 +49,9 @@ in :doc:`psa:configuration/django`.
 
         SOCIAL_AUTH_OPENSUSE_FORCE_EMAIL_VALIDATION = True
 
-    .. seealso:: :doc:`psa:pipeline`
+    .. seealso::
+
+       :doc:`psa:pipeline`
 
 Enabling individual backends is quite easy, it's just a matter of adding an entry to
 the :setting:`django:AUTHENTICATION_BACKENDS` setting and possibly adding keys needed for a given
@@ -194,8 +196,8 @@ You need to register an application on Bitbucket and then tell Weblate all its s
 Google OAuth 2
 ~~~~~~~~~~~~~~
 
-To use Google OAuth 2, you need to register an application at
-<https://console.developers.google.com/> and enable the Google+ API.
+To use Google OAuth 2, you need to register an OAuth application at
+<https://console.developers.google.com/>.
 
 The redirect URL is ``https://WEBLATE SERVER/accounts/complete/google-oauth2/``.
 
@@ -322,9 +324,15 @@ The redirect URL is ``https://WEBLATE SERVER/accounts/complete/gitea/``.
    :doc:`psa:backends/gitea`
 
 .. _azure-auth:
+.. _entra-auth:
 
-Microsoft Azure Active Directory
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Microsoft Entra ID
+~~~~~~~~~~~~~~~~~~
+
+Azure Active Directory (Azure AD) is now Microsoft Entra ID. Weblate keeps the
+``azuread-oauth2`` and ``azuread-tenant-oauth2`` backend names for
+compatibility with the underlying Python Social Auth backends and existing
+deployments.
 
 Weblate can be configured to use common or specific tenants for authentication.
 
@@ -334,13 +342,15 @@ for tenant-specific authentication.
 
 You will need following:
 
-* *Application (client) ID* can be obtained from application page. *Object ID* is not used in Weblate.
+* *Application (client) ID* is available on the app registration overview in the
+  Microsoft Entra admin center. *Object ID* is not used in Weblate.
 * *Directory (tenant) ID* is needed for tenant scoped authentication, what is usually desired.
-* *Secret value* is displayed once you generate a secret for an application. *Secret ID* is not used in Weblate.
+* *Secret value* is displayed once you create a client secret for the app
+  registration. *Secret ID* is not used in Weblate.
 
 .. code-block:: python
 
-    # Azure AD common
+    # Microsoft Entra ID common
 
     # Authentication configuration
     AUTHENTICATION_BACKENDS = (
@@ -355,7 +365,7 @@ You will need following:
 
 .. code-block:: python
 
-    # Azure AD Tenant
+    # Microsoft Entra ID with Tenant
 
     # Authentication configuration
     AUTHENTICATION_BACKENDS = (
@@ -410,7 +420,7 @@ The redirect URL is ``https://WEBLATE SERVER/accounts/complete/slack/``.
 Overriding authentication method names and icons
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can override the authentication method display name and icon using using settings as
+You can override the authentication method display name and icon using settings as
 ``SOCIAL_AUTH_<NAME>_IMAGE`` and ``SOCIAL_AUTH_<NAME>_TITLE``. For example
 overriding naming for Auth0 would look like:
 
@@ -465,9 +475,9 @@ passwords below a certain threshold.
 
 .. seealso::
 
-   :setting:`PASSWORD_MINIMAL_STRENGTH`,
-   :envvar:`WEBLATE_MIN_PASSWORD_SCORE`,
-   :doc:`/security/passwords`
+   * :setting:`PASSWORD_MINIMAL_STRENGTH`
+   * :envvar:`WEBLATE_MIN_PASSWORD_SCORE`
+   * :doc:`/security/passwords`
 
 
 .. _saml-auth:
@@ -487,7 +497,8 @@ Please follow the Python Social Auth instructions for configuration. Notable dif
 
 * Weblate supports single IDP which has to be called ``weblate`` in
   ``SOCIAL_AUTH_SAML_ENABLED_IDPS``.
-* The SAML XML metadata URL is ``/accounts/metadata/saml/``.
+* The SAML XML metadata URL is ``/accounts/metadata/saml/``, which is also an entity ID.
+* The sign-in URL is ``/accounts/complete/saml/`` (also known as ACS URL).
 * Following settings are automatically filled in:
   ``SOCIAL_AUTH_SAML_SP_ENTITY_ID``, ``SOCIAL_AUTH_SAML_TECHNICAL_CONTACT``,
   ``SOCIAL_AUTH_SAML_SUPPORT_CONTACT``
@@ -512,9 +523,6 @@ Example configuration:
             "entity_id": "https://idp.testshib.org/idp/shibboleth",
             "url": "https://idp.testshib.org/idp/profile/SAML2/Redirect/SSO",
             "x509cert": "MIIEDjCCAvagAwIBAgIBADA ... 8Bbnl+ev0peYzxFyF5sQA==",
-            "attr_name": "full_name",
-            "attr_username": "username",
-            "attr_email": "email",
         }
     }
     SOCIAL_AUTH_SAML_ORG_INFO = {
@@ -533,8 +541,14 @@ Example configuration:
         "emailAddress": "support@example.com"
     }
 
+You can generate a new pair of keys using:
+
+.. code-block:: sh
+
+   openssl req -newkey rsa:4096 -new -x509 -days 3652 -nodes -out saml.crt -keyout saml.key
+
 The default configuration extracts user details from following attributes,
-configure your IDP to provide them:
+configure your IdP to provide them:
 
 +--------------+-----------------------------------------+
 | Attribute    | SAML URI reference                      |
@@ -550,15 +564,40 @@ configure your IDP to provide them:
 | Username     | ``urn:oid:0.9.2342.19200300.100.1.1``   |
 +--------------+-----------------------------------------+
 
+When configuring Weblate SP in your IdP, it is recommended to choose persistent
+:guilabel:`Name ID format`.
+
 .. hint::
 
-   The example above and the Docker image define an IDP called ``weblate``.
-   You might need to configure this string as :guilabel:`Relay` in your IDP.
+   Some identity providers (such as Microsoft Entra ID with multi-factor
+   authentication) require disabling the default ``requestedAuthnContext``
+   in the SAML security configuration:
+
+   .. code-block:: python
+
+      SOCIAL_AUTH_SAML_SECURITY_CONFIG = {"requestedAuthnContext": False}
+
+   In Docker, set :envvar:`WEBLATE_SAML_SECURITY_CONFIG` instead.
+
+.. hint::
+
+   The example above and the Docker image define an IdP called ``weblate``.
+   You might need to configure this string as :guilabel:`Relay` in your IdP.
+
+.. note::
+
+   Weblate authentication relies on the ``RelayState`` parameter to be passed
+   through the authentication process. This needs to be configured with some
+   identity providers:
+
+   * `How to Send a Custom RelayState with Okta`_
+
+.. _How to Send a Custom RelayState with Okta: https://support.okta.com/help/s/article/How-to-send-a-custom-relaystate-to-application-through-idp-initiated-authentication-urls
 
 .. seealso::
 
-   :ref:`Configuring SAML in Docker <docker-saml>`,
-   :doc:`psa:backends/saml`
+   * :ref:`Configuring SAML in Docker <docker-saml>`
+   * :doc:`psa:backends/saml`
 
 .. _ldap-auth:
 
@@ -619,6 +658,9 @@ Once you have the package installed, you can hook it into the Django authenticat
         # Email is required for Weblate (used in VCS commits)
         "email": "mail",
     }
+    # Optional: route "Forgot your password?" to your LDAP self-service page
+    PASSWORD_RESET_URL = "https://id.example.net/password-reset/"
+
 
     # Hide the registration form
     REGISTRATION_OPEN = False
@@ -684,7 +726,8 @@ Active Directory integration
 
 .. seealso::
 
-    :doc:`ldap:index`, :doc:`ldap:authentication`
+   * :doc:`ldap:index`
+   * :doc:`ldap:authentication`
 
 
 .. _cas-auth:
@@ -757,8 +800,8 @@ installed.
 
 .. seealso::
 
-    :ref:`ldap-auth`,
-    :ref:`cas-auth`
+   * :ref:`ldap-auth`
+   * :ref:`cas-auth`
 
 Typically the installation will consist of adding an authentication backend to
 :setting:`django:AUTHENTICATION_BACKENDS` and installing an authentication app (if
@@ -807,9 +850,15 @@ Recovery codes
 
    Keep your recovery codes as safe as your password. We recommend saving them with a password manager such as Bitwarden, 1Password, Authy, or Keeper.
 
+.. image:: /screenshots/authentication.webp
+
 Each user can configure this in :ref:`profile-account` and second factor will
 be required to sign in addition to the existing authentication method.
 
-This can be enforced for users at the project (see :ref:`project-enforced_2fa`) or team level.
+This can be enforced for users at the project (see :ref:`project-enforced_2fa`)
+or team level. In site-wide deployments, this can also be used to enforce
+two-factor authentication for all users by enabling it on the default
+:guilabel:`Users` team, which is assigned automatically to new users by
+:ref:`automatic team assignment <autoteam>`.
 
 The permissions of a team with enforced two-factor authentication won't be applied to users who do not have it configured.

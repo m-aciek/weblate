@@ -16,9 +16,11 @@
 #
 import os
 import sys
+from importlib import resources
 from pathlib import Path
 
 import sphinx.builders.gettext
+import weblate_fonts
 from matplotlib import font_manager
 from sphinx.util.tags import Tags
 
@@ -26,8 +28,9 @@ from sphinx.util.tags import Tags
 
 file_dir = Path(__file__).parent.resolve()
 font_locations = (
-    "weblate/static/js/vendor/fonts/font-source/",
-    "weblate/static/vendor/font-kurinto/",
+    "static/weblate_fonts/source-sans/ttf",
+    "static/weblate_fonts/source-code/ttf",
+    "static/weblate_fonts/kurinto/ttf",
 )
 
 weblate_dir = file_dir.parent
@@ -44,7 +47,7 @@ class WeblateTags(Tags):
 
 
 def setup(app) -> None:
-    # Monkey path gettext build tags handling, this is workaround until
+    # Monkey patch gettext build tags handling, this is workaround until
     # https://github.com/sphinx-doc/sphinx/issues/13307 is addressed.
     sphinx.builders.gettext.I18nTags = WeblateTags
     # Used in Sphinx docs, needed for intersphinx links to it
@@ -57,8 +60,10 @@ def setup(app) -> None:
 
     font_dirs: list[str] = []
 
+    package_dir = resources.files(weblate_fonts)
+
     for font_location in font_locations:
-        font_dir = weblate_dir / font_location
+        font_dir = package_dir / font_location
         if not font_dir.is_dir():
             msg = f"Font directory not found: {font_dir}"
             raise NotADirectoryError(msg)
@@ -77,7 +82,7 @@ project_copyright = "Michal Čihař"
 author = "Michal Čihař"
 
 # The full version, including alpha/beta/rc tags
-release = "5.13"
+release = "2026.7.1"
 
 # -- General configuration ---------------------------------------------------
 
@@ -88,12 +93,14 @@ extensions = [
     "djangodocs",
     "sphinxcontrib.httpdomain",
     "sphinx.ext.autodoc",
+    "autodoc_signature_filter",
     "sphinx.ext.graphviz",
     "sphinx.ext.intersphinx",
     "sphinx-jsonschema",
     "sphinx_copybutton",
     "sphinxext.opengraph",
     "sphinx_reredirects",
+    "sphinx_llm.txt",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -107,6 +114,11 @@ exclude_patterns = [
     "Thumbs.db",
     ".DS_Store",
     "devel/reporting-example.rst",
+    # exclude snippets from being treated as standalone documents
+    # as they are already included in the real pages
+    # this prevents some labels defined in snippets from being marked as duplicate
+    "snippets/*",
+    "snippets/**/*",
 ]
 
 ogp_social_cards = {
@@ -122,11 +134,11 @@ ogp_social_cards = {
         "Kurinto Sans",
     ],
 }
-ogp_custom_meta_tags = [
+ogp_custom_meta_tags = (
     '<meta property="fb:app_id" content="741121112629028" />',
     '<meta property="fb:page_id" content="371217713079025" />',
     '<meta name="twitter:site" content="@WeblateOrg" />',
-]
+)
 
 # -- Options for HTML output -------------------------------------------------
 
@@ -138,6 +150,8 @@ html_theme = "furo"
 
 # Define the canonical URL if you are using a custom domain on Read the Docs
 html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL", "")
+markdown_http_base = html_baseurl.rstrip("/")
+llms_txt_suffix_mode = "replace"
 
 # Tell Jinja2 templates the build is running on Read the Docs
 if os.environ.get("READTHEDOCS", "") == "True":
@@ -161,20 +175,20 @@ html_theme_options = {
     "dark_css_variables": {
         "font-stack": '"Source Sans 3", sans-serif',
         "font-stack--monospace": '"Source Code Pro", monospace',
-        "color-brand-primary": "#1fa385",
-        "color-brand-content": "#1fa385",
+        "color-brand-primary": "#107a62",
+        "color-brand-content": "#107a62",
     },
     "light_css_variables": {
         "font-stack": '"Source Sans 3", sans-serif',
         "font-stack--monospace": '"Source Code Pro", monospace',
-        "color-brand-primary": "#1fa385",
-        "color-brand-content": "#1fa385",
+        "color-brand-primary": "#107a62",
+        "color-brand-content": "#107a62",
     },
 }
 
 html_css_files = [
-    "https://weblate.org/static/vendor/font-source/source-sans-3.css",
-    "https://weblate.org/static/vendor/font-source/source-code-pro.css",
+    "https://weblate.org/static/weblate_fonts/source-sans-3.css",
+    "https://weblate.org/static/weblate_fonts/source-code-pro.css",
 ]
 
 # -- Options for HTMLHelp output ---------------------------------------------
@@ -315,7 +329,8 @@ elif language in {"zh_TW", "ta"}:
     sphinx_doc_url = f"https://www.sphinx-doc.org/{language}/latest/"
 
 if language != "en":
-    tags.add("i18n")  # noqa: F821
+    # ruff: ignore[undefined-name]
+    tags.add("i18n")
 
 
 # Configuration for intersphinx
@@ -328,14 +343,11 @@ intersphinx_mapping = {
         None,
     ),
     "amagama": ("https://docs.translatehouse.org/projects/amagama/en/latest/", None),
-    "virtaal": ("https://docs.translatehouse.org/projects/virtaal/en/latest/", None),
     "ldap": ("https://django-auth-ldap.readthedocs.io/en/latest/", None),
     "celery": ("https://docs.celeryq.dev/en/stable/", None),
     "sphinx": (sphinx_doc_url, None),
     "rtd": ("https://docs.readthedocs.io/en/latest/", None),
-    "venv": ("https://virtualenv.pypa.io/en/stable/", None),
     "borg": ("https://borgbackup.readthedocs.io/en/stable/", None),
-    "pip": ("https://pip.pypa.io/en/stable/", None),
     "compressor": ("https://django-compressor.readthedocs.io/en/stable/", None),
     "drf-standardized-error": (
         "https://drf-standardized-errors.readthedocs.io/en/latest/",
@@ -355,6 +367,12 @@ nitpick_ignore = [
     ("http:obj", "string"),
     ("http:obj", "timestamp"),
     ("http:obj", "file"),
+    # Autodoc renders these standard-library type annotations from wlc
+    # signatures, but intersphinx references for them are disabled here.
+    ("py:class", "Path"),
+    ("py:class", "builtins.list"),
+    ("py:class", "collections.abc.Iterator"),
+    ("py:class", "collections.abc.Mapping"),
 ]
 
 # Number of retries and timeout for linkcheck
@@ -376,21 +394,37 @@ linkcheck_ignore = [
     "https://my-instance.openai.azure.com",
     # These are PDF and fails with Unicode decode error
     "http://ftp.pwg.org/",
-    # Access to our service has been temporarily blocked
-    "https://yandex.com/dev/translate/",
+    # Times out in CI
+    "https://ai.youdao.com/product-fanyi-text.s",
+    "https://help.gitee.com/webhook",
     # 403
     "https://openai.com/",
     "https://platform.openai.com/api-keys",
     "https://platform.openai.com/docs/models",
     "https://translate.systran.net/en/account",
+    "https://api.sap.com/api/translationhub/overview",
+    # Anchor is not there for linkcheck
+    "https://hub.docker.com/_/postgres#pgdata",
+    "https://github.com/SAML-Toolkits/python3-saml#settings",
+    # Protected by Anubis
+    "https://anubis.techaro.lol/",
     # Seems unstable
     "https://pagure.io/",
+    "https://cgit.git.savannah.gnu.org/cgit/gettext.git/",
     "https://azure.microsoft.com/en-us/products/ai-services/ai-translator",
+    "https://wiki.gnupg.org/",
+    "https://www.bis.gov/",
+    "https://www.libravatar.org/",
+    "https://glosbe.com/",
     # These seems to block bots/GitHub
     "https://docs.github.com/",
     "https://translate.yandex.com/",
     "https://www.gnu.org/",
-    "https://dev.mysql.com/",
+    "https://www.contributor-covenant.org/",
+    "https://mymemory.translated.net/",
+    "https://docs.oasis-open.org/",
+    # Responds with HTTP 418 I'm a teapot
+    "https://www.freedesktop.org/",
 ]
 
 # HTTP docs
@@ -439,11 +473,13 @@ autodoc_mock_imports = [
     "rest_framework",
 ]
 
-# Create single gettext PO file for while documentation,
+# Create single gettext PO file for whole documentation,
 # instead of having one file per chapter.
 gettext_compact = "docs"
 
 redirects = {
     "devel/thirdparty": "third-party.html",  # codespell:ignore thirdparty
     "contributing/security": "security/index.html",
+    "formats/moko": "formats/moko-resources.html",
+    "legal": "security/index.html",
 }

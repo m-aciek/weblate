@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from crispy_forms.layout import Div, Field
-from crispy_forms.utils import TEMPLATE_PACK
+from crispy_forms.layout import Div, Field, LayoutObject
+from crispy_forms.utils import TEMPLATE_PACK, render_field
 from django import forms
 from django.core.exceptions import ValidationError
 from django.db.models import Q
@@ -14,20 +14,28 @@ from django.forms.models import ModelChoiceIterator
 from django.template.loader import render_to_string
 from django.utils.text import normalize_newlines
 from django.utils.translation import gettext, gettext_lazy
-from pyparsing import ParseException
 
 from weblate.formats.helpers import CONTROLCHARS
 from weblate.trans.defines import EMAIL_LENGTH, USERNAME_LENGTH
 from weblate.trans.filter import FILTERS
 from weblate.trans.util import sort_unicode
-from weblate.utils.errors import report_error
 
-from .validators import WeblateServiceURLValidator, validate_email, validate_username
+from .validators import (
+    WeblateServiceURLValidator,
+    validate_email,
+    validate_upload_size,
+    validate_username,
+)
+
+if TYPE_CHECKING:
+    from django_stubs_ext import StrOrPromise
 
 
 class QueryField(forms.CharField):
     def __init__(
-        self, parser: Literal["unit", "user", "superuser"] = "unit", **kwargs
+        self,
+        parser: Literal["unit", "user", "superuser", "screenshot"] = "unit",
+        **kwargs,
     ) -> None:
         if "label" not in kwargs:
             kwargs["label"] = gettext_lazy("Query")
@@ -39,20 +47,24 @@ class QueryField(forms.CharField):
         super().__init__(**kwargs)
 
     def clean(self, value):
-        from weblate.utils.search import parse_query
+        # ruff: ignore[import-outside-top-level]
+        from weblate.auth.models import (
+            get_anonymous,
+        )
+        from weblate.utils.search import (  # ruff: ignore[import-outside-top-level]
+            SearchQueryError,
+            parse_query,
+        )
 
         if not value:
             if self.required:
                 raise ValidationError(gettext("Missing query string."))
             return ""
         try:
-            parse_query(value, parser=self.parser)
-        except (ValueError, ParseException) as error:
-            raise ValidationError(
-                gettext("Could not parse query string: {}").format(error)
-            ) from error
-        except Exception as error:
-            report_error("Error parsing search query")
+            # Use anonymous user for parsing here, it is needed for some searches
+            # and anonymous user will serve well for the validation.
+            parse_query(value, parser=self.parser, user=get_anonymous())
+        except SearchQueryError as error:
             raise ValidationError(
                 gettext("Could not parse query string: {}").format(error)
             ) from error
@@ -60,34 +72,36 @@ class QueryField(forms.CharField):
 
 
 class UsernameField(forms.CharField):
-    default_validators = [validate_username]
+    default_validators = [validate_username]  # ruff: ignore[mutable-class-default]
 
     def __init__(
         self,
         *,
-        max_length: int | None = None,
+        max_length: int | None = USERNAME_LENGTH,
         min_length: int | None = None,
         strip: bool = True,
         empty_value: str = "",
+        required: bool = True,
+        label: StrOrPromise | None = None,
+        help_text: StrOrPromise | None = None,
         **kwargs,
     ) -> None:
-        params = {
-            "max_length": USERNAME_LENGTH,
-            "help_text": gettext_lazy(
-                "Username may only contain letters, "
-                "numbers or the following characters: @ . + - _"
-            ),
-            "label": gettext_lazy("Username"),
-            "required": True,
-        }
-        params.update(kwargs)
-        self.valid = None
+        self.valid: str | None = None
+        if not label:
+            label = gettext_lazy("Username")
+        if not help_text:
+            help_text = gettext_lazy(
+                "Username may only contain letters, numbers or the following characters: @ . + - _"
+            )
 
         super().__init__(
             max_length=max_length,
             min_length=min_length,
             strip=strip,
             empty_value=empty_value,
+            help_text=help_text,
+            label=label,
+            required=required,
             **kwargs,
         )
 
@@ -116,7 +130,7 @@ class UserField(forms.CharField):
         return attrs
 
     def clean(self, value):
-        from weblate.auth.models import User
+        from weblate.auth.models import User  # ruff: ignore[import-outside-top-level]
 
         if not value:
             if self.required:
@@ -141,11 +155,25 @@ class EmailField(forms.EmailField):
     We block some additional local parts and customize error messages.
     """
 
-    default_validators = [validate_email]
+    default_validators = [validate_email]  # ruff: ignore[mutable-class-default]
 
     def __init__(self, *args, **kwargs) -> None:
         kwargs.setdefault("max_length", EMAIL_LENGTH)
         super().__init__(*args, **kwargs)
+
+
+class AssetFileField(forms.FileField):
+    def __init__(self, *args, **kwargs) -> None:
+        validators = list(kwargs.pop("validators", ()))
+        validators.insert(0, validate_upload_size)
+        super().__init__(*args, validators=validators, **kwargs)
+
+
+class AssetImageField(forms.ImageField):
+    def to_python(self, data):
+        if data is not None:
+            validate_upload_size(data)
+        return super().to_python(data)
 
 
 class SortedChoiceWidget(forms.widgets.ChoiceWidget):
@@ -170,6 +198,18 @@ class SortedSelectMultiple(SortedSelect, forms.SelectMultiple):
     """Wrapper class to sort choices alphabetically."""
 
 
+class SearchableSelect(forms.Select):
+    """Select widget with search on client side."""
+
+    def __init__(self, attrs=None, choices=()) -> None:
+        attrs = {**(attrs or {})}
+        existing = attrs.get("class", "").split()
+        if "searchable-select" not in existing:
+            existing.append("searchable-select")
+        attrs["class"] = " ".join(existing)
+        super().__init__(attrs, choices)
+
+
 class ContextDiv(Div):
     def __init__(self, *fields, **kwargs) -> None:
         self.context = kwargs.pop("context", {})
@@ -180,12 +220,63 @@ class ContextDiv(Div):
         return render_to_string(template, self.context)
 
 
+class InheritedSetting(LayoutObject):
+    template = "%s/layout/inherited_setting.html"
+
+    def __init__(self, field: str, inherit_field: str | None = None) -> None:
+        self.field = field
+        self.inherit_field = inherit_field or f"inherit_{field}"
+        self.fields = [self.inherit_field, self.field]
+
+    def render(self, form, context, template_pack=TEMPLATE_PACK, **kwargs):
+        if self.inherit_field not in form.fields:
+            return render_field(
+                self.field, form, context, template_pack=template_pack, **kwargs
+            )
+
+        inherit_widget = form.fields[self.inherit_field].widget
+        if inherit_widget.is_hidden:
+            return render_field(
+                self.field, form, context, template_pack=template_pack, **kwargs
+            )
+
+        template = self.get_template_name(template_pack)
+        inherit_field = render_field(
+            self.inherit_field,
+            form,
+            context,
+            template_pack=template_pack,
+            extra_context={"wrapper_class": "inherited-setting-checkbox"},
+            **kwargs,
+        )
+        value_field = render_field(
+            self.field,
+            form,
+            context,
+            template_pack=template_pack,
+            extra_context={"wrapper_class": "inherited-setting-value"},
+            **kwargs,
+        )
+        return render_to_string(
+            template,
+            {
+                "field_name": self.field,
+                "inherit_field": inherit_field,
+                "value_field": value_field,
+            },
+        )
+
+
 class SearchField(Field):
     def __init__(self, *args, **kwargs) -> None:
         kwargs["template"] = "snippets/query-field.html"
         super().__init__(*args, **kwargs)
 
-    def render(self, form, context, template_pack=TEMPLATE_PACK, **kwargs):
+    def render(
+        self, form, context, template_pack=TEMPLATE_PACK, extra_context=None, **kwargs
+    ):
+        if extra_context is not None:
+            raise TypeError
         extra_context = {"custom_filter_list": self.get_search_query_choices()}
         return super().render(form, context, template_pack, extra_context, **kwargs)
 
@@ -253,9 +344,13 @@ class CachedModelMultipleChoiceField(
 
 
 class WeblateServiceURLField(forms.URLField):
-    default_validators = [WeblateServiceURLValidator()]
+    default_validators = [WeblateServiceURLValidator()]  # ruff: ignore[mutable-class-default]
 
 
 class NormalizedNewlineCharField(forms.CharField):
     def to_python(self, value):
-        return normalize_newlines(super().to_python(value))
+        return normalize_newlines(str(super().to_python(value)))
+
+
+class WeblateDateInput(forms.DateInput):
+    input_type = "date"

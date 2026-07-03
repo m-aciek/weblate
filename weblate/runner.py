@@ -4,12 +4,16 @@
 
 import os
 import sys
+from contextlib import suppress
 
 
 def main(argv=None, developer_mode: bool = False) -> None:
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "weblate.settings")
 
-    from weblate.utils.management import WeblateManagementUtility
+    # ruff: ignore[import-outside-top-level]
+    from weblate.utils.management.utility import (
+        WeblateManagementUtility,
+    )
 
     if argv is None:
         argv = sys.argv
@@ -18,12 +22,11 @@ def main(argv=None, developer_mode: bool = False) -> None:
         utility = WeblateManagementUtility(argv=argv, developer_mode=developer_mode)
         utility.execute()
     except Exception:
-        try:
+        with suppress(ImportError):
+            # ruff: ignore[import-outside-top-level]
             from weblate.utils.errors import report_error
 
             report_error("Command failed")
-        except ImportError:
-            pass
         raise
 
 

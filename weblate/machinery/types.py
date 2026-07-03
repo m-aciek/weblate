@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, NotRequired, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from django.db.models import TextChoices
 from django.utils.translation import pgettext_lazy
 
 if TYPE_CHECKING:
+    from weblate.trans.models import Project
+
     from .base import BatchMachineTranslation
 
 
@@ -48,12 +50,14 @@ class SettingsDict(TypedDict, total=False):
     model: str
     persona: str
     style: str
+    language_instructions: dict[str, str]
     custom_model: str
     bucket_name: str
     context_vector: str
     deployment: str
     azure_endpoint: str
     source_language: SourceLanguageChoices
+    _project: Project
 
 
 class TranslationResultDict(TypedDict):
@@ -64,8 +68,8 @@ class TranslationResultDict(TypedDict):
     original_source: NotRequired[str]
     show_quality: NotRequired[bool]
     origin: NotRequired[str | None]
-    origin_url: NotRequired[str]
-    delete_url: NotRequired[str]
+    origin_url: NotRequired[str | None]
+    delete_url: NotRequired[str | None]
 
 
 class UnitMemoryResultDict(TypedDict, total=False):
@@ -74,5 +78,5 @@ class UnitMemoryResultDict(TypedDict, total=False):
     origin: list[BatchMachineTranslation | None]
 
 
-DownloadTranslations: TypeAlias = Iterable[TranslationResultDict]
-DownloadMultipleTranslations: TypeAlias = dict[str, list[TranslationResultDict]]
+type DownloadTranslations = Iterable[TranslationResultDict]
+type DownloadMultipleTranslations = dict[str, list[TranslationResultDict]]

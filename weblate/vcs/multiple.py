@@ -27,7 +27,6 @@ class MultipleRepositories(Repository):
         branch: str | None = None,
         component=None,
         local: bool = False,
-        skip_init: bool = False,
         repo: str | None = None,
     ) -> None:
         super().__init__(
@@ -35,9 +34,10 @@ class MultipleRepositories(Repository):
             branch=branch,
             component=component,
             local=local,
-            skip_init=skip_init,
         )
-        self.repo_configs = self.parse_repo_config(repo)
+        self.repo_configs = self.parse_repo_config(
+            repo if repo is not None else getattr(component, "repo", None)
+        )
         self.repositories: list[Repository] = []
         self.repositories_by_key: dict[str, Repository] = {}
         self._locks: list[WeblateLock] = []
@@ -48,7 +48,6 @@ class MultipleRepositories(Repository):
                 branch=branch,
                 component=component,
                 local=local,
-                skip_init=skip_init,
                 repo=config["repo"],
             )
             self.repositories.append(repository)

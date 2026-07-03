@@ -15,20 +15,27 @@ from django.utils.translation import gettext_lazy
 from translate.storage.csvl10n import csv
 
 from weblate.formats.helpers import CONTROLCHARS_TRANS, NamedBytesIO
-from weblate.formats.ttkit import CSVUtf8Format
+from weblate.formats.ttkit import CSVFormat
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from weblate.lang.models import Language
+    from weblate.trans.file_format_params import FileFormatParams
+
 CSV_DIALECT = "unix"
 
 
-class XlsxFormat(CSVUtf8Format):
+class XlsxFormat(CSVFormat):
     name = gettext_lazy("Excel Open XML")
     format_id = "xlsx"
     autoload = ("*.xlsx",)
 
+    def get_encoding(self) -> str | None:
+        return "utf-8"
+
     def write_cell(self, worksheet, column: int, row: int, value: str):
+        # ruff: ignore[import-outside-top-level]
         from openpyxl.cell.cell import TYPE_STRING
 
         cell = worksheet.cell(column=column, row=row)
@@ -38,6 +45,7 @@ class XlsxFormat(CSVUtf8Format):
         return cell
 
     def get_title(self, fallback: str = "Weblate"):
+        # ruff: ignore[import-outside-top-level]
         from openpyxl.workbook.child import INVALID_TITLE_REGEX
 
         title = self.store.targetlanguage
@@ -50,10 +58,14 @@ class XlsxFormat(CSVUtf8Format):
         return title
 
     def save_content(self, handle) -> None:
+        # ruff: ignore[import-outside-top-level]
         from openpyxl import Workbook
 
         workbook = Workbook()
         worksheet = workbook.active
+        if worksheet is None:
+            msg = "Workbook without an active sheet!"
+            raise TypeError(msg)
         worksheet.title = self.get_title()
         fieldnames = self.store.fieldnames
 
@@ -81,7 +93,9 @@ class XlsxFormat(CSVUtf8Format):
         XlsxFormat(store).save_content(output)
         return output.getvalue()
 
+    # pylint: disable-next=arguments-differ
     def parse_store(self, storefile):
+        # ruff: ignore[import-outside-top-level]
         from openpyxl import load_workbook
 
         # try to load the given file via openpyxl
@@ -92,6 +106,10 @@ class XlsxFormat(CSVUtf8Format):
             worksheet = workbook.active
         except BadZipFile:
             return None, None
+
+        if worksheet is None:
+            msg = "Workbook without an active sheet!"
+            raise TypeError(msg)
 
         output = StringIO()
 
@@ -110,15 +128,15 @@ class XlsxFormat(CSVUtf8Format):
             writer.writerow(values)
 
         if isinstance(storefile, str):
-            name = os.path.basename(storefile) + ".csv"
+            name = f"{os.path.basename(storefile)}.csv"
         else:
-            name = os.path.basename(storefile.name) + ".csv"
+            name = f"{os.path.basename(storefile.name)}.csv"
 
         # return the new csv as bytes
         content = output.getvalue().encode("utf-8")
 
         # Load the file as CSV
-        return super().parse_store(NamedBytesIO(name, content), dialect=CSV_DIALECT)
+        return self.parse_csv(NamedBytesIO(name, content), dialect=CSV_DIALECT)
 
     @staticmethod
     def mimetype() -> str:
@@ -134,18 +152,19 @@ class XlsxFormat(CSVUtf8Format):
     def create_new_file(
         cls,
         filename: str,
-        language: str,
+        language: Language,
         base: str,
         callback: Callable | None = None,
+        file_format_params: FileFormatParams | None = None,
     ) -> None:
         """Handle creation of new translation file."""
         if not base:
             msg = "Not supported"
             raise ValueError(msg)
         # Parse file
-        store = cls(base)
+        store = cls(base, file_format_params=file_format_params)
         if callback:
             callback(store)
-        store.untranslate_store(language)
+        store.untranslate_store(language, file_format_params=file_format_params)
         with open(filename, "wb") as handle:
             XlsxFormat(store.store).save_content(handle)

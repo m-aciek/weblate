@@ -10,36 +10,224 @@ import hashlib
 import logging
 import os
 import os.path
-import subprocess
-from typing import TYPE_CHECKING
+import signal
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    NotRequired,
+    Required,
+    Self,
+    TypedDict,
+)
 
 from dateutil import parser
+from django.conf import settings
 from django.core.cache import cache
+from django.utils import timezone
 from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy
 from packaging.version import Version
 
-from weblate.trans.util import get_clean_env, path_separator
+from weblate.trans.util import path_separator
+from weblate.utils.commands import get_clean_env
 from weblate.utils.data import data_path
 from weblate.utils.errors import add_breadcrumb
+from weblate.utils.files import (
+    REPO_TEMP_DIRNAME,
+    is_path_within_resolved_directory,
+    is_unsafe_path,
+    is_vcs_metadata_path,
+    remove_tree,
+)
 from weblate.utils.lock import WeblateLock
 from weblate.vcs.ssh import SSH_WRAPPER
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from datetime import datetime
+    from collections.abc import Generator, Iterator
 
+    import requests
     from django_stubs_ext import StrOrPromise
 
     from weblate.trans.models import Component
 
 LOGGER = logging.getLogger("weblate.vcs")
 
+SSH_HOST_KEY_VERIFICATION_FAILED = "Host key verification failed"
+# Bump when check_config() gains settings existing repositories must refresh.
+CONFIG_CHECK_CACHE_VERSION = 2
+
+
+def get_config_check_cache_key(component_pk: int) -> str:
+    """Build cache key for repository configuration refresh."""
+    wrapper_hash = hashlib.sha256(
+        SSH_WRAPPER.filename.as_posix().encode("utf-8")
+    ).hexdigest()
+    return (
+        f"sp-config-check-v{CONFIG_CHECK_CACHE_VERSION}-{wrapper_hash}-{component_pk}"
+    )
+
+
+def get_repository_lock_key(base_path: str, component: Component | None) -> int | str:
+    """Build lock key for repository operations."""
+    if component is not None and component.pk is not None:
+        return component.pk
+    return hashlib.sha256(base_path.encode("utf-8")).hexdigest()
+
+
+class SubprocessArgs(TypedDict, total=False):
+    stdin: int
+    input: str
+
+
+class RawCommitInfo(TypedDict):
+    """Detailed revision information returned by VCS implementations."""
+
+    revision: Required[str]
+    shortrevision: Required[str]
+    author: Required[str]
+    authordate: Required[str]
+    commit: Required[str]
+    commitdate: Required[str]
+    message: Required[str]
+    summary: Required[str]
+    author_name: NotRequired[str]
+    author_email: NotRequired[str]
+    commit_name: NotRequired[str]
+    commit_email: NotRequired[str]
+    committerdate: NotRequired[str]
+    date: NotRequired[str]
+
+
+class CommitInfo(TypedDict):
+    """Detailed revision information exposed to callers."""
+
+    revision: Required[str]
+    shortrevision: Required[str]
+    author: Required[str]
+    authordate: Required[datetime]
+    commit: Required[str]
+    commitdate: Required[datetime]
+    message: Required[str]
+    summary: Required[str]
+    author_name: NotRequired[str]
+    author_email: NotRequired[str]
+    commit_name: NotRequired[str]
+    commit_email: NotRequired[str]
+    committerdate: NotRequired[datetime]
+    date: NotRequired[datetime]
+
+
+type RemoteOperation = Literal["none", "pull", "push"]
+
+
+@dataclass(slots=True)
+class RepositoryRecoveryEvent:
+    operation: str
+    details: dict[str, Any]
+
+
+@dataclass(slots=True)
+class RepositoryLockSkipState:
+    count: int = 0
+
+
+def parse_commit_date(value: str | datetime) -> datetime:
+    """Parse a commit date string into a datetime object."""
+    result = value if isinstance(value, datetime) else parser.parse(value)
+    if settings.USE_TZ and timezone.is_naive(result):
+        return timezone.make_aware(result)
+    return result
+
+
+class RepositoryLock:
+    def __init__(self, repository: Repository, lock: WeblateLock) -> None:
+        self.repository = repository
+        self._lock = lock
+        self._recovery_pending = False
+        self._recovering = False
+        self._skip_recovery = RepositoryLockSkipState()
+
+    @property
+    def lock_object(self) -> WeblateLock:
+        return self._lock
+
+    def replace_lock(self, lock: Self) -> None:
+        self._lock = lock._lock
+        self._recovery_pending = lock._recovery_pending
+        self._recovering = lock._recovering
+        self._skip_recovery = lock._skip_recovery
+
+    def replace_lock_if_matching(self, lock: Self) -> bool:
+        if self._lock.name != lock._lock.name:
+            return False
+        self.replace_lock(lock)
+        return True
+
+    def __enter__(self) -> None:
+        outermost_enter = not self._lock.is_locked
+        self._lock.__enter__()
+        if outermost_enter and not self._skip_recovery.count:
+            self._recovery_pending = True
+        try:
+            if not self._skip_recovery.count:
+                self.repository.ensure_lock_session_recovered()
+        except Exception as error:
+            self._lock.__exit__(type(error), error, error.__traceback__)
+            if not self._lock.is_locked:
+                self._reset_recovery_state()
+            raise
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback,
+    ) -> None:
+        self._lock.__exit__(exc_type, exc_value, traceback)
+        if not self._lock.is_locked:
+            self._reset_recovery_state()
+
+    def begin_recovery(self) -> bool:
+        if not self.is_locked or self._recovering or not self._recovery_pending:
+            return False
+        self._recovering = True
+        self._recovery_pending = False
+        return True
+
+    def fail_recovery(self) -> None:
+        self._recovering = False
+        self._recovery_pending = True
+
+    def finish_recovery(self) -> None:
+        self._recovering = False
+
+    @contextmanager
+    def without_recovery(self) -> Generator[None]:
+        self._skip_recovery.count += 1
+        try:
+            yield
+        finally:
+            self._skip_recovery.count -= 1
+
+    def _reset_recovery_state(self) -> None:
+        self._recovering = False
+        self._recovery_pending = False
+
+    def __getattr__(self, name: str):
+        return getattr(self._lock, name)
+
 
 class RepositoryError(Exception):
     """Error while working with a repository."""
 
-    def __init__(self, retcode, message) -> None:
+    def __init__(self, retcode: int, message: str) -> None:
         super().__init__(message)
         self.retcode = retcode
 
@@ -52,28 +240,95 @@ class RepositoryError(Exception):
         return self.get_message()
 
 
+class RepositoryCommandError(RepositoryError):
+    """Error raised by the underlying VCS command."""
+
+    def get_message(self):
+        if self.retcode < 0:
+            signum = -self.retcode
+            with suppress(ValueError):
+                signal_name = signal.Signals(signum).name
+                if signum == signal.SIGTERM:
+                    hint = (
+                        "The underlying command was terminated by signal "
+                        f"{signal_name}, usually because the worker or host was "
+                        "restarted or stopped during the operation."
+                    )
+                else:
+                    hint = (
+                        "The underlying command was terminated by signal "
+                        f"{signal_name}."
+                    )
+                message = self.args[0].rstrip()
+                if message:
+                    return f"{message}\n\n{hint} ({self.retcode})"
+                return f"{hint} ({self.retcode})"
+        return super().get_message()
+
+
+class RepositoryValidationError(RepositoryError):
+    """Error raised when repository configuration violates runtime policy."""
+
+
+class RepositorySymlinkError(ValueError):
+    """Raised when symlink resolution fails due to links outside the repository tree or excessive symlink depth."""
+
+
+class RepositoryRestrictedPathError(RepositorySymlinkError):
+    """Raised when a resolved repository path points to a restricted location."""
+
+
+def is_ssh_host_key_verification_error(errormessage: str) -> bool:
+    """Detect SSH host key verification failures."""
+    return SSH_HOST_KEY_VERIFICATION_FAILED.lower() in errormessage.lower()
+
+
+def is_ssh_host_key_mismatch_error(errormessage: str) -> bool:
+    """Detect SSH host key mismatch warnings for changed remote identities."""
+    normalized = errormessage.lower()
+    return (
+        "remote host identification has changed" in normalized
+        or "possible dns spoofing detected" in normalized
+        or ("host key for" in normalized and "has changed" in normalized)
+    )
+
+
+def should_auto_add_ssh_host_key(errormessage: str) -> bool:
+    """Allow TOFU host key acceptance only for first-seen hosts."""
+    return is_ssh_host_key_verification_error(
+        errormessage
+    ) and not is_ssh_host_key_mismatch_error(errormessage)
+
+
 class Repository:
     """Basic repository object."""
 
-    _cmd = "false"
-    _cmd_last_revision: list[str]
-    _cmd_last_remote_revision: list[str]
-    _cmd_status = ["status"]
-    _cmd_list_changed_files: list[str]
+    _cmd: ClassVar[str] = "false"
+    _cmd_last_revision: ClassVar[list[str]]
+    _cmd_last_remote_revision: ClassVar[list[str]]
+    _cmd_status: ClassVar[list[str]] = ["status"]
+    _cmd_list_changed_files: ClassVar[list[str]]
 
-    name: StrOrPromise = ""
-    identifier: str = ""
-    req_version: str | None = None
-    default_branch: str = ""
-    needs_push_url: bool = True
-    supports_push: bool = True
-    push_label: StrOrPromise = gettext_lazy(
+    name: ClassVar[StrOrPromise] = ""
+    identifier: ClassVar[str] = ""
+    manual_component_creation: ClassVar[bool] = True
+    component_lock_fields: ClassVar[tuple[str, ...]] = ()
+    component_clear_fields: ClassVar[tuple[str, ...]] = ()
+    component_requires_branch: ClassVar[bool] = False
+    req_version: ClassVar[str | None] = None
+    default_branch: ClassVar[str] = ""
+    needs_push_url: ClassVar[bool] = True
+    supports_push: ClassVar[bool] = True
+    pushes_to_different_location: ClassVar[bool] = False
+    push_label: ClassVar[StrOrPromise] = gettext_lazy(
         "This will push changes to the upstream repository."
     )
-    ref_to_remote: str
-    ref_from_remote: str
-
-    _version = None
+    ref_to_remote: ClassVar[str]
+    ref_from_remote: ClassVar[str]
+    metadata_dir_name: ClassVar[str | None] = None
+    supports_remote_compatibility_validation: ClassVar[bool] = False
+    _version: ClassVar[str | None] = None
+    _version_error: ClassVar[Exception | None] = None
 
     @classmethod
     def get_identifier(cls) -> str:
@@ -86,45 +341,48 @@ class Repository:
         branch: str | None = None,
         component: Component | None = None,
         local: bool = False,
-        skip_init: bool = False,
-        repo: str = None,
     ) -> None:
-        self.path = path
-        if branch is None:
+        self.path: str = path
+        if not branch:
             self.branch = self.default_branch
         else:
             self.branch = branch
         self.component = component
         self.last_output = ""
         base_path = self.path.rstrip("/").rstrip("\\")
-        self.lock = WeblateLock(
-            lock_path=os.path.dirname(base_path),
-            scope="repo",
-            key=component.pk if component else os.path.basename(base_path),
+        lock = WeblateLock(
+            scope="repository",
+            key=get_repository_lock_key(base_path, component),
             slug=os.path.basename(base_path),
-            file_template="{slug}.lock",
             timeout=120,
             origin=component.full_slug if component else base_path,
         )
+        self.lock = RepositoryLock(self, lock)
         self._config_updated = False
         self.local = local
+        # Create ssh wrapper for possible use
         if not local:
-            # Create ssh wrapper for possible use
             SSH_WRAPPER.create()
-            if not skip_init and not self.is_valid():
-                with self.lock:
-                    self.create_blank_repository(self.path)
 
     @classmethod
-    def get_remote_branch(cls, repo: str):  # noqa: ARG003
+    # ruff: ignore[unused-class-method-argument]
+    def get_remote_branch(cls, repo: str) -> str:
         return cls.default_branch
 
     @classmethod
-    def add_breadcrumb(cls, message, **data) -> None:
+    def validate_branch_name(cls, branch: str) -> str:
+        return branch
+
+    @classmethod
+    def validate_component(cls, component: Component) -> None:
+        """Validate repository-specific component constraints."""
+
+    @classmethod
+    def add_breadcrumb(cls, message: str, **data) -> None:
         add_breadcrumb(category="vcs", message=message, **data)
 
     @classmethod
-    def add_response_breadcrumb(cls, response) -> None:
+    def add_response_breadcrumb(cls, response: requests.Response) -> None:
         cls.add_breadcrumb(
             "http.response",
             status_code=response.status_code,
@@ -133,14 +391,17 @@ class Repository:
         )
 
     @classmethod
-    def log(cls, message, level: int = logging.DEBUG):
+    def log(cls, message: str, level: int = logging.DEBUG) -> None:
         return LOGGER.log(level, "%s: %s", cls._cmd, message)
 
     def ensure_config_updated(self) -> None:
         """Ensure the configuration is periodically checked."""
         if self._config_updated:
             return
-        cache_key = f"sp-config-check-{self.component.pk}"
+        if self.component is None:
+            msg = "Component not set!"
+            raise TypeError(msg)
+        cache_key = get_config_check_cache_key(self.component.pk)
         if cache.get(cache_key) is None:
             self.check_config()
             cache.set(cache_key, True, 86400)
@@ -149,6 +410,39 @@ class Repository:
     def check_config(self) -> None:
         """Check VCS configuration."""
         raise NotImplementedError
+
+    def get_metadata_dir(self) -> Path | None:
+        if self.metadata_dir_name is None:
+            return None
+        metadata_dir = Path(self.path) / self.metadata_dir_name
+        if not metadata_dir.is_dir():
+            return None
+        return metadata_dir
+
+    def get_repo_temp_dir(self, create: bool = True) -> Path | None:
+        metadata_dir = self.get_metadata_dir()
+        if metadata_dir is None:
+            return None
+        temp_dir = metadata_dir / REPO_TEMP_DIRNAME
+        if create:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        return temp_dir
+
+    def cleanup_repo_temp_dir(self) -> None:
+        temp_dir = self.get_repo_temp_dir(create=False)
+        if temp_dir is None or not temp_dir.is_dir():
+            return
+        for item in temp_dir.iterdir():
+            try:
+                if item.is_symlink() or not item.is_dir():
+                    item.unlink(missing_ok=True)
+                else:
+                    remove_tree(item)
+            except OSError as error:
+                self.log(
+                    f"Failed to clean repository temp entry {item}: {error}",
+                    level=logging.WARNING,
+                )
 
     def is_valid(self) -> bool:
         """Check whether this is a valid repository."""
@@ -159,30 +453,47 @@ class Repository:
         """Initialize the repository."""
         raise NotImplementedError
 
-    def resolve_symlinks(self, path):
+    def resolve_symlinks(self, path: str) -> str:
         """Resolve any symlinks in the path."""
         # Resolve symlinks first
-        real_path = path_separator(os.path.realpath(os.path.join(self.path, path)))
-        repository_path = path_separator(os.path.realpath(self.path))
+        real_path = Path(os.path.realpath(os.path.join(self.path, path)))
+        repository_path = Path(os.path.realpath(self.path))
 
-        if not real_path.startswith(repository_path):
+        if not is_path_within_resolved_directory(real_path, repository_path):
             msg = "Too many symlinks or link outside tree"
-            raise ValueError(msg)
+            raise RepositorySymlinkError(msg)
 
-        return real_path[len(repository_path) :].lstrip("/")
+        relative_path = os.path.relpath(real_path, repository_path)
+
+        resolved_path = path_separator(relative_path)
+        if is_unsafe_path(resolved_path) or is_vcs_metadata_path(resolved_path):
+            msg = "Link to a restricted location"
+            raise RepositoryRestrictedPathError(msg)
+
+        if relative_path == ".":
+            return ""
+        return resolved_path
 
     @staticmethod
-    def _getenv(environment: dict[str, str] | None = None) -> dict[str, str]:
+    def _getenv(
+        environment: dict[str, str] | None = None,
+        *,
+        cwd: str | None = None,
+    ) -> dict[str, str]:
         """Generate environment for process execution."""
         base: dict[str, str] = {
             # Avoid prompts from Git
             "GIT_TERMINAL_PROMPT": "0",
+            # Avoid git advises like merge conflicts resolution
+            "GIT_ADVICE": "0",
             # Avoid Git traversing outside the data dir
             "GIT_CEILING_DIRECTORIES": data_path("vcs").as_posix(),
             # Use ssh wrapper
-            "GIT_SSH": SSH_WRAPPER.filename.as_posix(),
+            "GIT_SSH_COMMAND": SSH_WRAPPER.filename.as_posix(),
             "SVN_SSH": SSH_WRAPPER.filename.as_posix(),
         }
+        if cwd:
+            base["GIT_DIR"] = os.path.join(cwd, ".git")
         if environment:
             base.update(environment)
         return get_clean_env(base, extra_path=SSH_WRAPPER.path.as_posix())
@@ -199,21 +510,26 @@ class Repository:
         local: bool = False,
         stdin: str | None = None,
         environment: dict[str, str] | None = None,
+        retry: bool = True,
     ):
         """Execute the command using popen."""
         if args is None:
             raise RepositoryError(0, "Not supported functionality")
-        if not fullcmd:
-            args = [cls._cmd, *list(args)]
-        text_cmd = " ".join(args)
+        cmd = args if fullcmd else [cls._cmd, *args]
+        text_cmd = " ".join(cmd)
+        # These are mutually exclusive, gevent actually checks
+        # for their presence, not a value.
+        kwargs: SubprocessArgs = {}
+        if stdin is None:
+            kwargs["stdin"] = subprocess.PIPE
+        else:
+            kwargs["input"] = stdin
+
         try:
-            # These are mutually exclusive, gevent actually checks
-            # for their presence, not a avalue
-            kwargs = {"stdin": subprocess.PIPE} if stdin is None else {"input": stdin}
             process = subprocess.run(
-                args,
+                args=cmd,
                 cwd=cwd,
-                env=environment or {} if local else cls._getenv(environment),
+                env=environment or {} if local else cls._getenv(environment, cwd=cwd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT if merge_err else subprocess.PIPE,
                 text=not raw,
@@ -222,10 +538,26 @@ class Repository:
                 timeout=3600,
                 **kwargs,
             )
+        except OSError as error:
+            if cwd is None or error.filename != cwd:
+                raise
+            raise RepositoryCommandError(
+                error.errno or 1, cls.sanitize_error_message(str(error))
+            ) from error
         except subprocess.TimeoutExpired as error:
-            raise RepositoryError(
+            stdout = (
+                error.stdout.decode()
+                if isinstance(error.stdout, bytes)
+                else error.stdout
+            )
+            stderr = (
+                error.stderr.decode()
+                if isinstance(error.stderr, bytes)
+                else error.stderr
+            )
+            raise RepositoryCommandError(
                 0,
-                f"Subprocess didn't complete before {error.timeout} seconds\n{error.stdout}{error.stderr or ''}",
+                f"Subprocess didn't complete before {error.timeout} seconds\n{stdout}{stderr or ''}",
             ) from error
         cls.add_breadcrumb(
             text_cmd,
@@ -235,15 +567,58 @@ class Repository:
             cwd=cwd,
         )
         if process.returncode:
-            raise RepositoryError(
-                process.returncode, process.stdout + (process.stderr or "")
+            errormessage: str = cls.sanitize_error_message(
+                process.stdout + (process.stderr or "")
             )
+            if retry and cls.should_retry_popen(errormessage):
+                return cls._popen(
+                    args,
+                    cwd=cwd,
+                    merge_err=merge_err,
+                    fullcmd=fullcmd,
+                    raw=raw,
+                    local=local,
+                    stdin=stdin,
+                    environment=environment,
+                    retry=False,
+                )
+
+            raise RepositoryCommandError(process.returncode, errormessage)
         return process.stdout
+
+    @staticmethod
+    def sanitize_error_message(errormessage: str) -> str:
+        return errormessage
+
+    @staticmethod
+    # ruff: ignore[unused-static-method-argument]
+    def should_retry_popen(errormessage: str) -> bool:
+        return False
+
+    def recover_lock_session(self) -> list[RepositoryRecoveryEvent]:
+        self.cleanup_repo_temp_dir()
+        return []
+
+    def ensure_lock_session_recovered(self) -> None:
+        if not self.lock.begin_recovery():
+            return
+        try:
+            recovery_events = self.recover_lock_session()
+            if self.component is not None:
+                self.component.handle_repository_recovery(recovery_events)
+        except Exception as error:
+            if self.component is not None:
+                with suppress(Exception):
+                    self.component.handle_repository_recovery_failure(error)
+            self.lock.fail_recovery()
+            raise
+        self.lock.finish_recovery()
 
     def execute(
         self,
         args: list[str],
         *,
+        remote_op: RemoteOperation,
         needs_lock: bool = True,
         fullcmd: bool = False,
         merge_err: bool = True,
@@ -251,12 +626,17 @@ class Repository:
         environment: dict[str, str] | None = None,
     ):
         """Execute command and caches its output."""
+        self.ensure_lock_session_recovered()
         if needs_lock:
             if not self.lock.is_locked:
                 msg = "Repository operation without lock held!"
                 raise RuntimeError(msg)
             if self.component:
                 self.ensure_config_updated()
+        if remote_op == "pull":
+            self.validate_pull_url()
+        elif remote_op == "push":
+            self.validate_push_url()
         is_status = args[0] == self._cmd_status[0]
         try:
             self.last_output = self._popen(
@@ -268,18 +648,16 @@ class Repository:
                 stdin=stdin,
                 environment=environment,
             )
-        except RepositoryError as error:
+        except RepositoryCommandError as error:
             if not is_status and not self.local:
                 self.log_status(error)
             raise
         return self.last_output
 
-    def log_status(self, error) -> None:
-        try:
+    def log_status(self, error: str | RepositoryError) -> None:
+        with suppress(RepositoryCommandError):
             self.log(f"failure {error}")
             self.log(self.status())
-        except RepositoryError:
-            pass
 
     def clean_revision_cache(self) -> None:
         if "last_revision" in self.__dict__:
@@ -293,37 +671,81 @@ class Repository:
         return self.get_last_revision()
 
     def get_last_revision(self):
-        return self.execute(self._cmd_last_revision, needs_lock=False, merge_err=False)
+        return self.execute(
+            self._cmd_last_revision,
+            remote_op="none",
+            needs_lock=False,
+            merge_err=False,
+        )
 
     @cached_property
     def last_remote_revision(self):
         """Return last remote revision."""
         return self.execute(
-            self._cmd_last_remote_revision, needs_lock=False, merge_err=False
+            self._cmd_last_remote_revision,
+            remote_op="none",
+            needs_lock=False,
+            merge_err=False,
         )
 
-    @classmethod
-    def _clone(cls, source: str, target: str, branch: str) -> None:
+    def _clone(self, source: str, target: str, branch: str) -> None:
         """Clone repository."""
         raise NotImplementedError
 
+    @staticmethod
+    def validate_remote_url(url: str) -> None:
+        """Revalidate a remote URL before using it."""
+        from django.core.exceptions import ValidationError  # ruff: ignore[import-outside-top-level, unsorted-imports]
+
+        from weblate.utils.validators import validate_repo_url  # ruff: ignore[import-outside-top-level]
+
+        try:
+            validate_repo_url(url)
+        except ValidationError as error:
+            raise RepositoryValidationError(0, "; ".join(error.messages)) from error
+
+    def validate_pull_url(self, url: str | None = None) -> None:
+        """Validate the pull URL in the current runtime context."""
+        if url is None and self.component is not None:
+            url = self.component.repo
+        if url:
+            self.validate_remote_url(url)
+
+    def validate_push_url(self, url: str | None = None) -> None:
+        """Validate the push URL in the current runtime context."""
+        if url is None and self.component is not None:
+            url = self.component.push or self.component.repo
+        if url:
+            self.validate_remote_url(url)
+
+    def validate_remote_compatibility(self, pull_url: str, branch: str) -> None:
+        """Validate that a remote branch is compatible with this checkout."""
+        raise NotImplementedError
+
+    def clone_from(self, source: str) -> None:
+        """Clone repository into current one."""
+        self.validate_pull_url(source)
+        self._clone(source, self.path, self.branch)
+
     @classmethod
-    def clone(cls, source: str, target: str, branch: str, component=None):
+    def clone(
+        cls, source: str, target: str, branch: str, component: Component | None = None
+    ) -> Self:
         """Clone repository and return object for cloned repository."""
-        repo = cls(target, branch=branch, component=component, skip_init=True)
+        repo = cls(target, branch=branch, component=component)
         with repo.lock:
-            cls._clone(source, target, branch)
+            repo.clone_from(source)
         return repo
 
     def update_remote(self) -> None:
         """Update remote repository."""
         raise NotImplementedError
 
-    def status(self):
+    def status(self) -> str:
         """Return status of the repository."""
-        return self.execute(self._cmd_status, needs_lock=False)
+        return self.execute(self._cmd_status, remote_op="none", needs_lock=False)
 
-    def push(self, branch) -> None:
+    def push(self, branch: str) -> None:
         """Push given branch to remote repository."""
         raise NotImplementedError
 
@@ -335,13 +757,17 @@ class Repository:
         """Reset working copy to match remote branch."""
         raise NotImplementedError
 
+    def reset_to_revision(self, revision: str) -> None:
+        """Reset working copy to a local revision."""
+        raise NotImplementedError
+
     def merge(
         self, abort: bool = False, message: str | None = None, no_ff: bool = False
     ) -> None:
         """Merge remote branch or reverts the merge."""
         raise NotImplementedError
 
-    def rebase(self, abort=False) -> None:
+    def rebase(self, abort: bool = False) -> None:
         """Rebase working copy on top of remote branch."""
         raise NotImplementedError
 
@@ -355,13 +781,41 @@ class Repository:
             self.log_revisions(self.ref_to_remote.format(self.get_remote_branch_name()))
         )
 
+    def get_outgoing_revisions(self, branch: str | None = None) -> list[str]:
+        """List outgoing revisions."""
+        return self.log_revisions(
+            self.ref_from_remote.format(self.get_remote_branch_name(branch))
+        )
+
+    def get_tracked_outgoing_revisions(self) -> list[str]:
+        """List revisions missing from the tracked upstream branch."""
+        return self.get_outgoing_revisions()
+
+    def get_push_revisions(self, branch: str | None = None) -> list[str]:
+        """
+        List revisions that still need to be pushed.
+
+        When a separate push branch is configured, only revisions missing from
+        both the tracked upstream branch and the push branch need to be pushed.
+        """
+        outgoing = (
+            self.get_tracked_outgoing_revisions()
+            if branch
+            else self.get_outgoing_revisions()
+        )
+        if not outgoing:
+            return []
+        if not branch:
+            return outgoing
+        try:
+            branch_outgoing = set(self.get_outgoing_revisions(branch))
+        except RepositoryError:
+            return outgoing
+        return [revision for revision in outgoing if revision in branch_outgoing]
+
     def count_outgoing(self, branch: str | None = None):
         """Count outgoing commits."""
-        return len(
-            self.log_revisions(
-                self.ref_from_remote.format(self.get_remote_branch_name(branch))
-            )
-        )
+        return len(self.get_outgoing_revisions(branch))
 
     def needs_merge(self):
         """
@@ -371,33 +825,47 @@ class Repository:
         """
         return self.count_missing() > 0
 
-    def needs_push(self):
-        """
-        Check whether repository needs push to upstream.
+    def needs_push(self, branch: str | None = None):
+        """Check whether repository needs push."""
+        return bool(self.get_push_revisions(branch))
 
-        It has additional revisions.
-        """
-        return self.count_outgoing() > 0
-
-    def _get_revision_info(self, revision) -> dict[str, str]:
+    def _get_revision_info(self, revision: str) -> RawCommitInfo:
         """Return dictionary with detailed revision information."""
         raise NotImplementedError
 
-    def get_revision_info(self, revision):
+    def get_revision_info(self, revision: str) -> CommitInfo:
         """Return dictionary with detailed revision information."""
         key = f"rev-info-{self.get_identifier()}-{revision}"
-        result = cache.get(key)
+        result: RawCommitInfo | None = cache.get(key)
         if not result:
             result = self._get_revision_info(revision)
             # Keep the cache for one day
             cache.set(key, result, 86400)
 
-        # Parse timestamps into datetime objects
-        for name, value in result.items():
-            if "date" in name:
-                result[name] = parser.parse(value)
+        commit_info: CommitInfo = {
+            "revision": result["revision"],
+            "shortrevision": result["shortrevision"],
+            "author": result["author"],
+            "authordate": parse_commit_date(result["authordate"]),
+            "commit": result["commit"],
+            "commitdate": parse_commit_date(result["commitdate"]),
+            "message": result["message"],
+            "summary": result["summary"],
+        }
+        if "author_name" in result:
+            commit_info["author_name"] = result["author_name"]
+        if "author_email" in result:
+            commit_info["author_email"] = result["author_email"]
+        if "commit_name" in result:
+            commit_info["commit_name"] = result["commit_name"]
+        if "commit_email" in result:
+            commit_info["commit_email"] = result["commit_email"]
+        if "committerdate" in result:
+            commit_info["committerdate"] = parse_commit_date(result["committerdate"])
+        if "date" in result:
+            commit_info["date"] = parse_commit_date(result["date"])
 
-        return result
+        return commit_info
 
     @classmethod
     def is_configured(cls) -> bool:
@@ -419,21 +887,27 @@ class Repository:
     @classmethod
     def get_version(cls):
         """Get cached backend version."""
-        if cls._version is None:
+        version = cls.__dict__.get("_version")
+        version_error = cls.__dict__.get("_version_error")
+
+        if version is None and version_error is None:
             try:
                 cls._version = cls._get_version()
             except Exception as error:
-                cls._version = error
-        if isinstance(cls._version, Exception):
-            raise cls._version
-        return cls._version
+                cls._version_error = error
+            version = cls.__dict__.get("_version")
+            version_error = cls.__dict__.get("_version_error")
+
+        if version_error is not None:
+            raise version_error
+        return version
 
     @classmethod
     def _get_version(cls):
         """Return VCS program version."""
         return cls._popen(["--version"], merge_err=False)
 
-    def set_committer(self, name, mail) -> None:
+    def set_committer(self, name: str, mail: str) -> None:
         """Configure committer name."""
         raise NotImplementedError
 
@@ -447,25 +921,32 @@ class Repository:
         """Create new revision."""
         raise NotImplementedError
 
-    def remove(self, files: list[str], message: str, author: str | None = None) -> None:
+    def remove(
+        self,
+        files: list[str],
+        message: str,
+        author: str | None = None,
+        extra_commit_files: list[str] | None = None,
+    ) -> None:
         """Remove files and creates new revision."""
         raise NotImplementedError
 
     @staticmethod
-    def update_hash(objhash, filename, extra=None) -> None:
+    def update_hash(
+        objhash: hashlib._Hash, filename: str, extra: str | None = None
+    ) -> None:
         if os.path.islink(filename):
             objtype = "symlink"
             data = os.readlink(filename).encode()
         else:
             objtype = "blob"
-            with open(filename, "rb") as handle:
-                data = handle.read()
+            data = Path(filename).read_bytes()
         if extra:
             objhash.update(extra.encode())
         objhash.update(f"{objtype} {len(data)}\0".encode("ascii"))
         objhash.update(data)
 
-    def get_object_hash(self, path):
+    def get_object_hash(self, path: str) -> str:
         """
         Return hash of object in the VCS.
 
@@ -495,7 +976,7 @@ class Repository:
         """Configure remote repository."""
         raise NotImplementedError
 
-    def configure_branch(self, branch) -> None:
+    def configure_branch(self, branch: str) -> None:
         """Configure repository branch."""
         raise NotImplementedError
 
@@ -503,12 +984,12 @@ class Repository:
         """Verbosely describes current revision."""
         raise NotImplementedError
 
-    def get_file(self, path, revision) -> str:
+    def get_file(self, path: str, revision: str) -> str:
         """Return content of file at given revision."""
         raise NotImplementedError
 
     @staticmethod
-    def get_examples_paths():
+    def get_examples_paths() -> Generator[str]:
         """
         List possible paths for shipped examples.
 
@@ -517,7 +998,7 @@ class Repository:
         yield os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples")
 
     @classmethod
-    def find_merge_driver(cls, name):
+    def find_merge_driver(cls, name: str) -> str | None:
         for path in cls.get_examples_paths():
             result = os.path.join(path, name)
             if os.path.exists(result):
@@ -525,7 +1006,7 @@ class Repository:
         return None
 
     @classmethod
-    def get_merge_driver(cls, file_format):
+    def get_merge_driver(cls, file_format: str) -> str | None:
         merge_driver = None
         if file_format == "po":
             merge_driver = cls.find_merge_driver("git-merge-gettext-po")
@@ -533,11 +1014,27 @@ class Repository:
             return None
         return merge_driver
 
-    def cleanup(self) -> None:
+    def remove_stale_branches(self) -> None:
+        """Remove stale branches and tags from the repository."""
+        raise NotImplementedError
+
+    def cleanup_files(self) -> None:
         """Remove not tracked files from the repository."""
         raise NotImplementedError
 
-    def log_revisions(self, refspec) -> list[str]:
+    def cleanup(self) -> None:
+        """Cleanup repository status."""
+        # Recover from failed merge/rebase
+        with suppress(RepositoryCommandError):
+            self.merge(abort=True)
+        with suppress(RepositoryCommandError):
+            self.rebase(abort=True)
+        # Remove stale branches
+        self.remove_stale_branches()
+        # Cleanup files
+        self.cleanup_files()
+
+    def log_revisions(self, refspec: str) -> list[str]:
         """
         Log revisions for given refspec.
 
@@ -552,7 +1049,10 @@ class Repository:
         This is not universal as refspec is different per vcs.
         """
         lines = self.execute(
-            [*self._cmd_list_changed_files, refspec], needs_lock=False, merge_err=False
+            [*self._cmd_list_changed_files, refspec],
+            remote_op="none",
+            needs_lock=False,
+            merge_err=False,
         ).splitlines()
         return list(self.parse_changed_files(lines))
 
@@ -568,10 +1068,18 @@ class Repository:
         return self.list_changed_files(self.ref_to_remote.format(compare_to))
 
     def get_remote_branch_name(self, branch: str | None = None) -> str:
-        return f"origin/{self.branch if branch is None else branch}"
+        branch_name = branch or self.branch
+        return f"origin/{self.validate_branch_name(branch_name)}"
 
-    def list_remote_branches(self):
+    def list_remote_branches(self) -> list[str]:
         return []
 
     def compact(self) -> None:
         return
+
+    def show(self, revision: str) -> str:
+        raise NotImplementedError
+
+    def maintenance(self) -> None:
+        self.remove_stale_branches()
+        self.compact()

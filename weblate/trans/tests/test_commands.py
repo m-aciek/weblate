@@ -6,6 +6,7 @@
 
 import sys
 from io import StringIO
+from typing import cast
 
 import requests
 from django.core.management import call_command
@@ -15,10 +16,24 @@ from django.test.utils import override_settings
 
 from weblate.accounts.models import Profile
 from weblate.runner import main
-from weblate.trans.models import Component, Translation
+from weblate.trans.actions import ActionEvents
+from weblate.trans.file_format_params import (
+    FILE_FORMATS_PARAMS,
+    BaseFileFormatParam,
+    register_file_format_param,
+)
+from weblate.trans.models import Change, Component, Translation
 from weblate.trans.tests.test_models import RepoTestCase
-from weblate.trans.tests.test_views import FixtureTestCase, ViewTestCase
-from weblate.trans.tests.utils import create_test_user, get_test_file
+from weblate.trans.tests.test_views import (
+    ComponentTestCase,
+    FixtureComponentTestCase,
+    ViewTestCase,
+)
+from weblate.trans.tests.utils import (
+    create_another_user,
+    create_test_user,
+    get_test_file,
+)
 from weblate.vcs.mercurial import HgRepository
 
 TEST_PO = get_test_file("cs.po")
@@ -37,6 +52,61 @@ class RunnerTest(SimpleTestCase):
             sys.stdout = restore
 
 
+class AnalyzeTranslatorWorkTest(ComponentTestCase):
+    def create_change(self, author, user) -> None:
+        unit = self.get_unit()
+        Change.objects.create(
+            action=ActionEvents.ACCEPT,
+            author=author,
+            user=user,
+            unit=unit,
+            translation=self.translation,
+            component=self.component,
+            project=self.project,
+            language=self.translation.language,
+        )
+
+    def test_accepted_suggestions_are_grouped_by_author(self) -> None:
+        reviewer = self.user
+        first_author = create_another_user("-first")
+        second_author = create_another_user("-second")
+        for _unused in range(3):
+            self.create_change(first_author, reviewer)
+            self.create_change(second_author, reviewer)
+
+        output = StringIO()
+        call_command(
+            "analyze_translator_work",
+            days=1,
+            min_changes=1,
+            stdout=output,
+        )
+
+        result = output.getvalue()
+        self.assertIn("User days: 2 included, 0 excluded", result)
+        self.assertIn("  median: 3", result)
+
+    def test_component_filter_uses_full_path(self) -> None:
+        category = self.create_category(self.project)
+        self.component.category = category
+        self.component.save(update_fields=["category"])
+        for _unused in range(3):
+            self.create_change(self.user, self.user)
+
+        output = StringIO()
+        call_command(
+            "analyze_translator_work",
+            component="/".join(self.component.get_url_path()),
+            days=1,
+            min_changes=1,
+            stdout=output,
+        )
+
+        result = output.getvalue()
+        self.assertIn("User days: 1 included, 0 excluded", result)
+        self.assertIn("  median: 3", result)
+
+
 class ImportProjectTest(RepoTestCase):
     def do_import(self, path=None, **kwargs) -> None:
         with override_settings(CREATE_GLOSSARIES=self.CREATE_GLOSSARIES):
@@ -52,7 +122,7 @@ class ImportProjectTest(RepoTestCase):
     def test_import(self) -> None:
         project = self.create_project()
         self.do_import()
-        self.assertEqual(project.component_set.count(), 4)
+        self.assertEqual(project.component_set.count(), 5)
 
     def test_import_deep(self) -> None:
         project = self.create_project()
@@ -70,13 +140,13 @@ class ImportProjectTest(RepoTestCase):
         project = self.create_project()
         self.do_import()
         self.do_import()
-        self.assertEqual(project.component_set.count(), 4)
+        self.assertEqual(project.component_set.count(), 5)
 
     def test_import_duplicate(self) -> None:
         project = self.create_project()
         self.do_import()
         self.do_import(path="weblate://test/po")
-        self.assertEqual(project.component_set.count(), 4)
+        self.assertEqual(project.component_set.count(), 5)
 
     def test_import_main_1(self, name="po-mono") -> None:
         project = self.create_project()
@@ -111,7 +181,7 @@ class ImportProjectTest(RepoTestCase):
                 "**/*.po",
                 language_regex="cs",
             )
-        self.assertEqual(project.component_set.count(), 4)
+        self.assertEqual(project.component_set.count(), 5)
         for component in project.component_set.filter(is_glossary=False).iterator():
             self.assertEqual(component.translation_set.count(), 2)
 
@@ -178,7 +248,7 @@ class ImportProjectTest(RepoTestCase):
                 "**/*.po",
                 file_format="po",
             )
-        self.assertEqual(project.component_set.count(), 4)
+        self.assertEqual(project.component_set.count(), 5)
 
     def test_import_invalid(self) -> None:
         project = self.create_project()
@@ -230,13 +300,13 @@ class ImportProjectTest(RepoTestCase):
             call_command(
                 "import_project", "test", self.git_repo_path, "main", "**/*.po"
             )
-        self.assertEqual(project.component_set.count(), 4)
+        self.assertEqual(project.component_set.count(), 5)
 
         with override_settings(CREATE_GLOSSARIES=self.CREATE_GLOSSARIES):
             call_command(
                 "import_project", "test", self.git_repo_path, "main", "**/*.po"
             )
-        self.assertEqual(project.component_set.count(), 4)
+        self.assertEqual(project.component_set.count(), 5)
 
     def test_import_against_existing(self) -> None:
         """Test importing with a weblate:// URL."""
@@ -251,7 +321,7 @@ class ImportProjectTest(RepoTestCase):
                 "main",
                 "**/*.po",
             )
-        self.assertEqual(project.component_set.count(), 5)
+        self.assertEqual(project.component_set.count(), 6)
 
     def test_import_missing_project(self) -> None:
         """Test of correct handling of missing project."""
@@ -299,7 +369,7 @@ class ImportProjectTest(RepoTestCase):
                 "**/*.po",
                 vcs="mercurial",
             )
-        self.assertEqual(project.component_set.count(), 4)
+        self.assertEqual(project.component_set.count(), 5)
 
     def test_import_mercurial_mixed(self) -> None:
         """Test importing Mercurial project with mixed component/lang."""
@@ -320,7 +390,7 @@ class ImportProjectTest(RepoTestCase):
             )
 
 
-class BasicCommandTest(FixtureTestCase):
+class BasicCommandTest(FixtureComponentTestCase):
     def test_versions(self) -> None:
         output = StringIO()
         call_command("list_versions", stdout=output)
@@ -331,19 +401,20 @@ class BasicCommandTest(FixtureTestCase):
             call_command("check", "--deploy")
 
 
-class WeblateComponentCommandTestCase(ViewTestCase):
+class WeblateComponentCommandMixin:
     """Base class for handling tests of WeblateComponentCommand based commands."""
 
     command_name = "checkgit"
     expected_string = "On branch main"
 
     def do_test(self, *args, **kwargs) -> None:
+        test_case = cast("TestCase", self)
         output = StringIO()
         call_command(self.command_name, *args, stdout=output, **kwargs)
         if self.expected_string:
-            self.assertIn(self.expected_string, output.getvalue())
+            test_case.assertIn(self.expected_string, output.getvalue())
         else:
-            self.assertEqual("", output.getvalue())
+            test_case.assertEqual("", output.getvalue())
 
     def test_all(self) -> None:
         self.do_test(all=True)
@@ -355,15 +426,21 @@ class WeblateComponentCommandTestCase(ViewTestCase):
         self.do_test("test/test")
 
     def test_nonexisting_project(self) -> None:
-        with self.assertRaises(CommandError):
+        test_case = cast("TestCase", self)
+        with test_case.assertRaises(CommandError):
             self.do_test("notest")
 
     def test_nonexisting_component(self) -> None:
-        with self.assertRaises(CommandError):
+        test_case = cast("TestCase", self)
+        with test_case.assertRaises(CommandError):
             self.do_test("test/notest")
 
 
-class CommitPendingTest(WeblateComponentCommandTestCase):
+class WeblateComponentCommandTestCase(ComponentTestCase, WeblateComponentCommandMixin):
+    pass
+
+
+class CommitPendingCommandMixin(WeblateComponentCommandMixin):
     command_name = "commit_pending"
     expected_string = ""
 
@@ -371,7 +448,11 @@ class CommitPendingTest(WeblateComponentCommandTestCase):
         self.do_test("test", "--age", "1")
 
 
-class CommitPendingChangesTest(CommitPendingTest):
+class CommitPendingTest(ComponentTestCase, CommitPendingCommandMixin):
+    pass
+
+
+class CommitPendingChangesTest(ViewTestCase, CommitPendingCommandMixin):
     def setUp(self) -> None:
         super().setUp()
         self.edit_unit("Hello, world!\n", "Nazdar svete!\n")
@@ -479,9 +560,16 @@ class BenchmarkCommandTest(RepoTestCase):
         output = StringIO()
         with override_settings(CREATE_GLOSSARIES=self.CREATE_GLOSSARIES):
             call_command(
-                "benchmark", "test", "weblate://test/test", "po/*.po", stdout=output
+                "benchmark",
+                "--project",
+                "test",
+                "--repo",
+                "weblate://test/test",
+                "--filemask",
+                "po/*.po",
+                stdout=output,
             )
-        self.assertIn("function calls", output.getvalue())
+        self.assertEqual("", output.getvalue())
 
 
 class SuggestionCommandTest(RepoTestCase):
@@ -667,3 +755,30 @@ class ImportCommandTest(RepoTestCase):
             override_settings(CREATE_GLOSSARIES=self.CREATE_GLOSSARIES),
         ):
             call_command("import_json", "--project", "test", "/nonexisting/dfile")
+
+
+class DocumentationCommandTest(TestCase):
+    def test_list_file_format_params(self) -> None:
+        class TestJSONFileFormatParam(BaseFileFormatParam):
+            name = "json-test"
+            label = "JSONTest"
+            file_formats = ("test", "json")
+            help_text = "Test JSON file format parameter"
+
+        register_file_format_param(TestJSONFileFormatParam)
+
+        output = StringIO()
+        call_command("list_file_format_params", stdout=output)
+        self.assertIn("JSONTest", output.getvalue())
+        self.assertIn("Test JSON file format parameter", output.getvalue())
+        self.assertIn("json-test", output.getvalue())
+
+        FILE_FORMATS_PARAMS.remove(TestJSONFileFormatParam)
+
+    def test_list_change_events(self) -> None:
+        output = StringIO()
+        call_command("list_change_events", stdout=output)
+        result = output.getvalue()
+        self.assertIn("``83``", result)
+        self.assertIn("``forced_synchronization_of_translations``", result)
+        self.assertIn("Forced synchronization of translations", result)

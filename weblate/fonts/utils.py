@@ -9,24 +9,36 @@ from __future__ import annotations
 import os
 from functools import cache, lru_cache
 from io import BytesIO
-from typing import NamedTuple
+from math import ceil
+from typing import TYPE_CHECKING, NamedTuple
 
 import cairo
 import gi
 from django.core.cache import cache as django_cache
-from django.db.models.fields.files import FieldFile
+from PIL import ImageFont
 
-from weblate.utils.data import data_dir
+from weblate.utils.data import data_path
+from weblate.utils.files import read_file_bytes
+from weblate.utils.hash import calculate_hash
 from weblate.utils.icons import find_static_file
 
 gi.require_version("PangoCairo", "1.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import Pango, PangoCairo  # noqa: E402
+
+# pylint: disable-next=wrong-import-position,wrong-import-order
+from gi.repository import Pango, PangoCairo  # ruff: ignore[module-import-not-at-top-of-file, unsorted-imports]
+
+if TYPE_CHECKING:
+    from django.core.files.base import File
+    from django.db.models.fields.files import FieldFile
 
 
 class Dimensions(NamedTuple):
     width: int
     height: int
+
+
+MAX_RENDERED_TEXT_OVERFLOW = 1000
 
 
 FONTCONFIG_CONFIG = """<?xml version="1.0"?>
@@ -97,107 +109,114 @@ FONT_WEIGHTS = {
 @cache
 def configure_fontconfig() -> None:
     """Configure fontconfig to use custom configuration."""
-    fonts_dir = data_dir("fonts")
-    config_name = os.path.join(fonts_dir, "fonts.conf")
-
-    if not os.path.exists(fonts_dir):
-        os.makedirs(fonts_dir)
+    fonts_dir = data_path("fonts")
+    cache_dir = data_path("cache") / "fonts"
+    fonts_dir.mkdir(parents=True, exist_ok=True)
+    config_file = fonts_dir / "fonts.conf"
 
     # Generate the configuration
-    with open(config_name, "w") as handle:
-        handle.write(
-            FONTCONFIG_CONFIG.format(
-                data_dir("cache", "fonts"),
-                fonts_dir,
-                os.path.dirname(
-                    find_static_file(
-                        "js/vendor/fonts/font-source/TTF/SourceSans3-Regular.ttf"
-                    )
-                ),
-                os.path.dirname(
-                    find_static_file("vendor/font-kurinto/KurintoSans-Rg.ttf")
-                ),
-            )
+    config_file.write_text(
+        FONTCONFIG_CONFIG.format(
+            cache_dir.as_posix(),
+            fonts_dir.as_posix(),
+            os.path.dirname(
+                find_static_file(
+                    "weblate_fonts/source-sans/ttf/SourceSans3-Regular.ttf"
+                )
+            ),
+            os.path.dirname(
+                find_static_file("weblate_fonts/kurinto/ttf/KurintoSans-Rg.ttf")
+            ),
         )
+    )
 
     # Inject into environment
-    os.environ["FONTCONFIG_FILE"] = config_name
+    os.environ["FONTCONFIG_FILE"] = config_file.as_posix()
 
 
-def get_font_weight(weight: str) -> int:
+def get_font_weight(weight: str) -> Pango.Weight | None:
     return FONT_WEIGHTS[weight]
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=32)
 def _render_size(
     text: str,
     *,
     font: str = "Kurinto Sans",
-    weight: int | None = Pango.Weight.NORMAL,
+    weight: int | Pango.Weight | None = Pango.Weight.NORMAL,
     size: int = 11,
     spacing: int = 0,
     width: int = 1000,
     lines: int = 1,
-    cache_key: str | None = None,
+    needs_output: bool = False,
     surface_height: int | None = None,
     surface_width: int | None = None,
 ) -> tuple[Dimensions, int, bytes]:
     """Check whether rendered text fits."""
     configure_fontconfig()
+    normalized_weight = None if weight is None else Pango.Weight(weight)
 
-    # Setup Pango/Cairo
     if surface_height is None:
         surface_height = int(lines * size * 1.5)
     if surface_width is None:
         surface_width = width
-    surface = cairo.ImageSurface(cairo.FORMAT_RGB24, surface_width, surface_height)
-    context = cairo.Context(surface)
 
-    layout = PangoCairo.create_layout(context)
-
-    # Load and configure font
     fontdesc = Pango.FontDescription.from_string(font)
     fontdesc.set_absolute_size(size * Pango.SCALE)
-    if weight:
-        fontdesc.set_weight(weight)
-    layout.set_font_description(fontdesc)
+    if normalized_weight:
+        fontdesc.set_weight(normalized_weight)
 
-    # Configure spacing
+    attr_list = None
     if spacing:
         letter_spacing_attr = Pango.attr_letter_spacing_new(Pango.SCALE * spacing)
         attr_list = Pango.AttrList()
         attr_list.insert(letter_spacing_attr)
-        layout.set_attributes(attr_list)
-
-    # Set the actual text
-    layout.set_text(text)
-
-    # Set width and line wrapping
-    layout.set_width(width * Pango.SCALE)
-    layout.set_wrap(Pango.WrapMode.WORD)
-
-    # Calculate dimensions
-    line_count = layout.get_line_count()
-    pixel_size = layout.get_pixel_size()
 
     buffer = b""
 
-    if cache_key:
-        # Adjust surface dimensions if we're actually rendering
-        if pixel_size.height > surface_height or pixel_size.width > surface_width:
-            return _render_size(
-                text,
-                font=font,
-                weight=weight,
-                size=size,
-                spacing=spacing,
-                width=width,
-                lines=lines,
-                cache_key=cache_key,
-                surface_height=pixel_size.height,
-                surface_width=pixel_size.width,
-            )
+    while True:
+        # Setup Pango/Cairo
+        surface = cairo.ImageSurface(cairo.FORMAT_RGB24, surface_width, surface_height)
+        context = cairo.Context(surface)
 
+        layout = PangoCairo.create_layout(context)
+
+        layout.set_font_description(fontdesc)
+
+        # Reapply attributes to each layout bound to the current context.
+        if attr_list is not None:
+            layout.set_attributes(attr_list)
+
+        # Set the actual text
+        layout.set_text(text)
+
+        # For one-line checks, omit the layout width so Pango measures the
+        # unwrapped text. Keep WORD wrapping instead of Pango.WrapMode.NONE;
+        # NONE requires Pango 1.56, which is newer than supported LTS systems.
+        layout.set_width(-1 if lines == 1 else width * Pango.SCALE)
+        layout.set_wrap(Pango.WrapMode.WORD)
+
+        # Calculate dimensions
+        line_count = layout.get_line_count()
+        pixel_size = Dimensions(*layout.get_pixel_size())
+
+        if not needs_output:
+            break
+
+        required_height = max(surface_height, pixel_size.height)
+        required_width = max(
+            width,
+            surface_width,
+            # Keep the measured width intact, but cap the generated preview.
+            min(pixel_size.width, width + MAX_RENDERED_TEXT_OVERFLOW),
+        )
+        if required_height == surface_height and required_width == surface_width:
+            break
+
+        surface_height = required_height
+        surface_width = required_width
+
+    if needs_output:
         # Render background
         context.save()
         # This matches .img-check CSS style
@@ -205,11 +224,29 @@ def _render_size(
         context.paint()
         context.restore()
 
-        # Show text
+        expected_height = ceil(lines * pixel_size.height / line_count)
+
+        # Render the text clipped to the allowed area.
+        context.save()
+        context.rectangle(0, 0, width, expected_height)
+        context.clip()
+        context.set_source_rgb(0, 0, 0)
         PangoCairo.show_layout(context, layout)
+        context.restore()
+
+        # Highlight overflowing parts in red instead of hiding them.
+        if pixel_size.width > width or line_count > lines:
+            context.save()
+            context.rectangle(0, 0, surface_width, surface_height)
+            context.rectangle(0, 0, width, expected_height)
+            context.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+            context.clip()
+            context.set_source_rgb(246 / 255, 102 / 255, 76 / 255)
+            PangoCairo.update_layout(context, layout)
+            PangoCairo.show_layout(context, layout)
+            context.restore()
 
         # Render box around desired size
-        expected_height = lines * pixel_size.height / line_count
         context.new_path()
         context.set_source_rgb(0.1, 0.1, 0.1)
         context.set_line_width(1)
@@ -243,7 +280,7 @@ def render_size(
     text: str,
     *,
     font: str = "Kurinto Sans",
-    weight: int | None = Pango.Weight.NORMAL,
+    weight: int | Pango.Weight | None = Pango.Weight.NORMAL,
     size: int = 11,
     spacing: int = 0,
     width: int = 1000,
@@ -251,7 +288,13 @@ def render_size(
     cache_key: str | None = None,
     surface_height: int | None = None,
     surface_width: int | None = None,
+    use_cache: bool = True,
 ) -> tuple[Dimensions, int]:
+    render_cache_key = f"render:{calculate_hash(text)}:{calculate_hash(font)}:{int(weight) if weight is not None else ''}:{size}:{spacing}:{width}:{lines}:{cache_key}:{surface_height}:{surface_width}"
+    if use_cache:
+        cached: tuple[Dimensions, int] | None = django_cache.get(render_cache_key)
+        if cached and (cache_key is None or django_cache.get(cache_key)):
+            return cached
     pixel_size, line_count, buffer = _render_size(
         text,
         font=font,
@@ -260,19 +303,22 @@ def render_size(
         spacing=spacing,
         width=width,
         lines=lines,
-        cache_key=cache_key,
+        needs_output=cache_key is not None,
         surface_height=surface_height,
         surface_width=surface_width,
     )
     if cache_key:
-        django_cache.set(cache_key, buffer)
-    return pixel_size, line_count
+        # Longer expiry for rendered results so that it can be recalculated
+        django_cache.set(cache_key, buffer, timeout=4200)
+    result = pixel_size, line_count
+    django_cache.set(render_cache_key, result, timeout=3600)
+    return result
 
 
 def check_render_size(
     *,
     font: str,
-    weight: int | None,
+    weight: int | Pango.Weight | None,
     size: int,
     spacing: int,
     text: str,
@@ -294,14 +340,8 @@ def check_render_size(
     return rendered_size.width <= width and actual_lines <= lines
 
 
-def get_font_name(filelike):
+def get_font_name(filelike: FieldFile | File) -> tuple[str, str]:
     """Return tuple of font family and style, for example ('Ubuntu', 'Regular')."""
-    from PIL import ImageFont
-
-    # Form uploaded file
-    if isinstance(filelike, FieldFile):
-        filelike = filelike.file
-
-    if not hasattr(filelike, "loaded_font"):
-        filelike.loaded_font = ImageFont.truetype(filelike)
-    return filelike.loaded_font.getname()
+    # Parse fonts from in-memory bytes so Pillow does not keep the original
+    # file descriptor alive after validation.
+    return ImageFont.truetype(BytesIO(read_file_bytes(filelike))).getname()

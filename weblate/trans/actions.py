@@ -7,6 +7,11 @@ from django.db.models import IntegerChoices
 from django.utils.translation import gettext_lazy, pgettext_lazy
 
 
+def get_change_action_identifier(action: object) -> str:
+    """Return action identifier used in Fedora Messaging topics."""
+    return str(action).lower().replace(" ", "_")
+
+
 class ActionEvents(IntegerChoices):
     # Translators: Name of event in the history
     UPDATE = 0, gettext_lazy("Resource updated")
@@ -168,6 +173,76 @@ class ActionEvents(IntegerChoices):
     FONT_CHANGE = 81, gettext_lazy("Font changed")
     # Translators: Name of event in the history
     FONT_REMOVE = 82, gettext_lazy("Font removed")
+    # Translators: Name of event in the history
+    FORCE_SYNC = 83, gettext_lazy("Forced synchronization of translations")
+    # Translators: Name of event in the history
+    FORCE_SCAN = 84, gettext_lazy("Forced rescan of translations")
+    # Translators: Name of event in the history
+    SCREENSHOT_REMOVED = 85, gettext_lazy("Screenshot removed")
+    # Translators: Name of event in the history
+    LABEL_ADD = 86, gettext_lazy("Label added")
+    # Translators: Name of event in the history
+    LABEL_REMOVE = 87, gettext_lazy("Label removed")
+    # Translators: Name of event in the history
+    REPO_CLEANUP = 88, gettext_lazy("Repository cleanup")
+    # Translators: Name of event in the history
+    NEW_SOURCE_UPLOAD = 89, gettext_lazy("Source string added in the upload")
+    # Translators: Name of event in the history
+    NEW_SOURCE_REPO = 90, gettext_lazy("Source string added in the repository")
+    # Translators: Name of event in the history
+    PROJECT_BACKUP = 91, gettext_lazy("Project backed up")
+    # Translators: Name of event in the history
+    PROJECT_RESTORE = 92, gettext_lazy("Project restored")
+    # Translators: Name of event in the history
+    COMPONENT_RESTORE = 93, gettext_lazy("Component restored")
+    # Translators: Name of event in the history
+    USER_REVERT = 94, gettext_lazy("User edit reverted")
+    # Translators: Name of event in the history
+    PROJECT_SETTING_CHANGE = 95, gettext_lazy("Project setting changed")
+    # Translators: Name of event in the history
+    COMPONENT_SETTING_CHANGE = 96, gettext_lazy("Component setting changed")
+    # Translators: Name of event in the history
+    USER_ACCESS_CHANGE = 97, gettext_lazy("User access changed")
+    # Translators: Name of event in the history
+    CREATE_WORKSPACE = 98, gettext_lazy("Workspace created")
+    # Translators: Name of event in the history
+    WORKSPACE_SETTING_CHANGE = 99, gettext_lazy("Workspace setting changed")
+    # Translators: Name of event in the history
+    MOVE_PROJECT = 100, gettext_lazy("Project moved")
+    # Translators: Name of event in the history
+    REMOTE_UPDATE = 101, gettext_lazy("Remote repository updated")
+    # Translators: Name of event in the history
+    FAILED_REMOTE_UPDATE = 102, gettext_lazy("Remote repository update failed")
+
+
+# Actions which are logged
+ACTIONS_LOG = {
+    ActionEvents.RESET,
+    ActionEvents.REMOVE_TRANSLATION,
+    ActionEvents.ACCESS_EDIT,
+    ActionEvents.ADD_USER,
+    ActionEvents.REMOVE_USER,
+    ActionEvents.USER_ACCESS_CHANGE,
+    ActionEvents.REMOVE_COMPONENT,
+    ActionEvents.REMOVE_PROJECT,
+    ActionEvents.RENAME_PROJECT,
+    ActionEvents.RENAME_COMPONENT,
+    ActionEvents.MOVE_COMPONENT,
+    ActionEvents.ADDED_LANGUAGE,
+    ActionEvents.CREATE_PROJECT,
+    ActionEvents.CREATE_COMPONENT,
+    ActionEvents.REMOVE_CATEGORY,
+    ActionEvents.RENAME_CATEGORY,
+    ActionEvents.MOVE_CATEGORY,
+    ActionEvents.PROJECT_BACKUP,
+    ActionEvents.PROJECT_RESTORE,
+    ActionEvents.COMPONENT_RESTORE,
+    ActionEvents.PROJECT_SETTING_CHANGE,
+    ActionEvents.COMPONENT_SETTING_CHANGE,
+    ActionEvents.CREATE_WORKSPACE,
+    ActionEvents.WORKSPACE_SETTING_CHANGE,
+    ActionEvents.MOVE_PROJECT,
+}
 
 
 # Actions which can be reverted
@@ -184,6 +259,7 @@ ACTIONS_REVERTABLE = {
     ActionEvents.PROPAGATED_EDIT,
     ActionEvents.STRING_REPO_UPDATE,
     ActionEvents.STRING_UPLOAD_UPDATE,
+    ActionEvents.USER_REVERT,
 }
 
 # Content changes considered when looking for last author
@@ -204,6 +280,7 @@ ACTIONS_CONTENT = {
     ActionEvents.EXTRA_FLAGS,
     ActionEvents.NEW_UNIT,
     ActionEvents.ENFORCED_CHECK,
+    ActionEvents.USER_REVERT,
 }
 
 # Actions shown on the repository management page
@@ -220,6 +297,17 @@ ACTIONS_REPOSITORY = {
     ActionEvents.UNLOCK,
     ActionEvents.HOOK,
     ActionEvents.FILE_UPLOAD,
+    ActionEvents.FORCE_SYNC,
+    ActionEvents.FORCE_SCAN,
+    ActionEvents.REPO_CLEANUP,
+    ActionEvents.REMOTE_UPDATE,
+    ActionEvents.FAILED_REMOTE_UPDATE,
+}
+
+# Actions considered when computing repository status from history
+ACTIONS_REPOSITORY_STATUS = ACTIONS_REPOSITORY - {
+    ActionEvents.REMOTE_UPDATE,
+    ActionEvents.FAILED_REMOTE_UPDATE,
 }
 
 # Actions where target is rendered as translation string

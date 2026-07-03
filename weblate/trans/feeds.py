@@ -14,6 +14,7 @@ from django.utils.translation import gettext
 
 from weblate.lang.models import Language
 from weblate.trans.models import Change, Component, Project, Translation, Unit
+from weblate.utils.site import get_site_url
 from weblate.utils.stats import ProjectLanguage
 from weblate.utils.views import parse_path
 
@@ -21,26 +22,11 @@ if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest, User
 
 
-class ChangesFeed(Feed):
-    """Generic RSS feed for Weblate changes."""
+def get_change_feed_guid(change: Change) -> str:
+    return get_site_url(reverse("show_change", kwargs={"pk": change.pk}))
 
-    def get_object(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> User:
-        return request.user
 
-    def title(self):
-        return gettext("Recent changes in %s") % settings.SITE_TITLE
-
-    def description(self):
-        return gettext("All recent changes made using Weblate in %s.") % (
-            settings.SITE_TITLE
-        )
-
-    def link(self):
-        return reverse("home")
-
-    def items(self, obj):
-        return Change.objects.last_changes(obj).recent()
-
+class BaseFeed(Feed):
     def item_title(self, item):
         return item.get_action_display()
 
@@ -53,10 +39,61 @@ class ChangesFeed(Feed):
     def item_pubdate(self, item):
         return item.timestamp
 
+    def item_guid(self, item):
+        return get_change_feed_guid(item)
 
-class TranslationChangesFeed(ChangesFeed):
+    def item_guid_is_permalink(self, item):
+        return False
+
+
+class ChangesFeed(BaseFeed):
+    """Generic RSS feed for Weblate changes."""
+
+    def get_object(self, request: AuthenticatedHttpRequest, *args, **kwargs) -> User:
+        return request.user
+
+    def title(self):
+        # Translators: %s is site title here
+        return gettext("Recent changes on %s") % settings.SITE_TITLE
+
+    def description(self):
+        # Translators: %s is site title here
+        return gettext("All recent changes made using Weblate on %s.") % (
+            settings.SITE_TITLE
+        )
+
+    def link(self):
+        return reverse("home")
+
+    def items(self, obj):
+        return Change.objects.last_changes(obj).recent()
+
+
+class ObjectChangesFeed(BaseFeed):
+    def title(self, obj):
+        # Translators: %s is translation name
+        return gettext("Recent changes in %s") % obj
+
+    def description(self, obj):
+        # Translators: %s is translation name
+        return gettext("All recent changes made using Weblate in %s.") % obj
+
+    def link(self, obj):
+        return obj.get_absolute_url()
+
+    def items(self, obj):
+        return obj.change_set.prefetch().recent()
+
+
+class TranslationChangesFeed(ObjectChangesFeed):
     """RSS feed for changes in translation."""
 
+    def items(self, obj):
+        if not isinstance(obj, Translation):
+            return super().items(obj)
+        return obj.change_set.prefetch().recent(skip_preload="translation")
+
+    # pylint: disable-next=arguments-differ
     def get_object(self, request: AuthenticatedHttpRequest, path):
         return parse_path(
             request,
@@ -64,21 +101,10 @@ class TranslationChangesFeed(ChangesFeed):
             (Translation, Component, Project, Language, Unit, ProjectLanguage),
         )
 
-    def title(self, obj):
-        return gettext("Recent changes in %s") % obj
 
-    def description(self, obj):
-        return gettext("All recent changes made using Weblate in %s.") % obj
-
-    def link(self, obj):
-        return obj.get_absolute_url()
-
-    def items(self, obj):
-        return obj.change_set.prefetch().recent(skip_preload="translation")
-
-
-class LanguageChangesFeed(TranslationChangesFeed):
+class LanguageChangesFeed(ObjectChangesFeed):
     """RSS feed for changes in language."""
 
+    # pylint: disable-next=arguments-differ
     def get_object(self, request: AuthenticatedHttpRequest, lang):
         return get_object_or_404(Language, code=lang)

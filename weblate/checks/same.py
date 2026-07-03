@@ -13,15 +13,9 @@ from weblate_language_data.check_languages import LANGUAGES
 
 from weblate.checks.base import TargetCheck
 from weblate.checks.data import IGNORE_WORDS
-from weblate.checks.format import FLAG_RULES, PERCENT_MATCH
-from weblate.checks.markup import BBCODE_MATCH
-from weblate.checks.qt import QT_FORMAT_MATCH, QT_PLURAL_MATCH
-from weblate.checks.ruby import RUBY_FORMAT_MATCH
+from weblate.checks.utils import replace_highlighted
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from weblate.checks.flags import Flags
     from weblate.trans.models import Unit
 
 # Email address to ignore
@@ -29,8 +23,7 @@ EMAIL_RE = re.compile(r"[a-z0-9_.-]+@[a-z0-9_.-]+\.[a-z0-9-]{2,}", re.IGNORECASE
 
 URL_RE = re.compile(
     r"(?:http|ftp)s?://"  # http:// or https://
-    r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+"
-    r"(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|"  # domain...
+    r"(?:[a-z0-9_.-]*|"  # domain...
     r"localhost|"  # localhost...
     r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"  # ...or ip
     r"(?::\d+)?"  # optional port
@@ -50,11 +43,9 @@ PATH_RE = re.compile(r"(^|[ ])(/[a-zA-Z0-9=:?._-]+)+")
 
 TEMPLATE_RE = re.compile(r"{[a-z_-]+}|@[A-Z_]@", re.IGNORECASE)
 
-RST_MATCH = re.compile(r"(:[a-z:]+:`[^`]+`|``[^`]+``)")
-
 SPLIT_RE = re.compile(
     r"(?:\&(?:nbsp|rsaquo|lt|gt|amp|ldquo|rdquo|times|quot);|"
-    r'[() ,.^`"\'\\/_<>!?;:|{}*^@%#&~=+\r\n✓—‑…\[\]0-9-])+',
+    r'[() ,.^`"\'\\/_<>!?;:|{}*@%#&~=+\r\n✓—‑…\[\]0-9-])+',
     re.IGNORECASE,
 )
 
@@ -62,39 +53,6 @@ EMOJI_RE = re.compile(r"[\U00002600-\U000027bf]|[\U0001f000-\U0001fffd]")
 
 # Docbook tags to ignore
 DB_TAGS = ("screen", "indexterm", "programlisting")
-
-
-def replace_format_placeholder(match: re.Match) -> str:
-    return f"x-weblate-{match.start(0)}"
-
-
-def strip_format(
-    msg: str, flags: Flags, replacement: str | Callable[[re.Match], str] = ""
-) -> str:
-    """
-    Remove format strings from the strings.
-
-    These are quite often not changed by translators.
-    """
-    for format_flag, (regex, _is_position_based, _extract_string) in FLAG_RULES.items():
-        if format_flag in flags:
-            return regex.sub("", msg)
-
-    if "qt-format" in flags:
-        regex = QT_FORMAT_MATCH
-    elif "qt-plural-format" in flags:
-        regex = QT_PLURAL_MATCH
-    elif "ruby-format" in flags:
-        regex = RUBY_FORMAT_MATCH
-    elif "rst-text" in flags:
-        regex = RST_MATCH
-    elif "percent-placeholders" in flags:
-        regex = PERCENT_MATCH
-    elif "bbcode-text" in flags:
-        regex = BBCODE_MATCH
-    else:
-        return msg
-    return regex.sub(replacement, msg)
 
 
 def strip_string(msg: str) -> str:
@@ -134,17 +92,6 @@ def test_word(word, extra_ignore):
     )
 
 
-def strip_placeholders(msg: str, unit: Unit) -> str:
-    return re.sub(
-        "|".join(
-            re.escape(param) if isinstance(param, str) else param.pattern
-            for param in unit.all_flags.get_value("placeholders")
-        ),
-        "",
-        msg,
-    )
-
-
 class SameCheck(TargetCheck):
     """Check for untranslated entries."""
 
@@ -154,22 +101,26 @@ class SameCheck(TargetCheck):
 
     def should_ignore(self, source: str, unit: Unit) -> bool:
         """Check whether given unit should be ignored."""
-        from weblate.checks.flags import TYPED_FLAGS
+        # ruff: ignore[import-outside-top-level]
         from weblate.glossary.models import get_glossary_terms
 
-        # Ignore some docbook tags
-        if unit.note.startswith("Tag: ") and unit.note[5:] in DB_TAGS:
+        # Ignore some strings based on notes (typically from gettext PO file)
+        # - certain docbook tags
+        # - po4a converted AsciiDoc code examples (--- delimited block)
+        if (
+            unit.note.startswith("Tag: ") and unit.note[5:] in DB_TAGS
+        ) or unit.note == "type: delimited block -":
             return True
 
         stripped = source
         flags = unit.all_flags
 
-        # Strip format strings
-        stripped = strip_format(stripped, flags)
-
-        # Strip placeholder strings
-        if "placeholders" in TYPED_FLAGS and "placeholders" in flags:
-            stripped = strip_placeholders(stripped, unit)
+        # Strip all highlighted placeables and format spans.
+        # Enable syntax highlighting so RST inline literals/strong/emph spans
+        # are also stripped (previously handled by RST_MATCH in strip_format).
+        stripped = replace_highlighted(
+            stripped, unit, highlight_syntax="rst-text" in flags
+        )
 
         if "strict-same" in flags:
             return not stripped
@@ -241,8 +192,8 @@ class SameCheck(TargetCheck):
         if len(source) <= 1 and len(target) <= 1:
             return False
 
-        # Check for ignoring
-        if self.should_ignore(source, unit):
+        if source != target:
             return False
 
-        return source == target
+        # Check for ignoring
+        return not self.should_ignore(source, unit)

@@ -6,75 +6,188 @@
 
 from __future__ import annotations
 
-import datetime
+from datetime import timedelta
+from unittest.mock import patch
 
+from django.contrib.auth.models import AnonymousUser
+from django.template import Context
+from django.template.loader import render_to_string
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 from django.utils.html import format_html
 
 from weblate.auth.models import User
 from weblate.checks.flags import Flags
-from weblate.checks.tests.test_checks import MockLanguage, MockUnit
 from weblate.lang.models import Language
 from weblate.trans.models import Component, Project, Translation, Unit
 from weblate.trans.templatetags.translations import (
+    PRIORITY_ICONS,
     format_translation,
     get_location_links,
+    indicate_alerts,
     naturaltime,
+    same_naturaltime,
+    translation_progress_render,
 )
-from weblate.trans.tests.test_views import FixtureTestCase
-
-TEST_DATA = (
-    (0, "now"),
-    (1, "a second from now"),
-    (-1, "a second ago"),
-    (2, "2 seconds from now"),
-    (-2, "2 seconds ago"),
-    (60, "a minute from now"),
-    (-60, "a minute ago"),
-    (120, "2 minutes from now"),
-    (-120, "2 minutes ago"),
-    (3600, "an hour from now"),
-    (-3600, "an hour ago"),
-    (3600 * 2, "2 hours from now"),
-    (-3600 * 2, "2 hours ago"),
-    (3600 * 24, "tomorrow"),
-    (-3600 * 24, "yesterday"),
-    (3600 * 24 * 2, "2 days from now"),
-    (-3600 * 24 * 2, "2 days ago"),
-    (3600 * 24 * 7, "a week from now"),
-    (-3600 * 24 * 7, "a week ago"),
-    (3600 * 24 * 14, "2 weeks from now"),
-    (-3600 * 24 * 14, "2 weeks ago"),
-    (3600 * 24 * 30, "a month from now"),
-    (-3600 * 24 * 30, "a month ago"),
-    (3600 * 24 * 60, "2 months from now"),
-    (-3600 * 24 * 60, "2 months ago"),
-    (3600 * 24 * 365, "a year from now"),
-    (-3600 * 24 * 365, "a year ago"),
-    (3600 * 24 * 365 * 2, "2 years from now"),
-    (-3600 * 24 * 365 * 2, "2 years ago"),
-)
+from weblate.trans.templatetags.upload_methods import get_upload_method_help
+from weblate.trans.tests.factories import make_language, make_unit
+from weblate.trans.tests.test_views import FixtureComponentTestCase
+from weblate.utils.files import FileUploadMethod
 
 
 class NaturalTimeTest(SimpleTestCase):
     """Testing of natural time conversion."""
 
     def test_natural(self) -> None:
-        now = timezone.now()
-        for diff, expected in TEST_DATA:
-            testdate = now + datetime.timedelta(seconds=diff)
-            result = naturaltime(testdate, now=now)
-            expected = format_html(
-                '<span title="{}">{}</span>',
-                testdate.replace(microsecond=0).isoformat(),
-                expected,
+        result = naturaltime(timezone.now())
+        self.assertIn('title="', result)
+        self.assertIn('data-datetime="', result)
+        self.assertIn('class="naturaltime"', result)
+
+    def test_same_naturaltime_just_now(self) -> None:
+        timestamp = timezone.now().replace(microsecond=0)
+        with patch(
+            "weblate.trans.templatetags.translations.timezone.now",
+            return_value=timestamp,
+        ):
+            self.assertTrue(
+                same_naturaltime(timestamp, timestamp - timedelta(seconds=1))
             )
-            self.assertEqual(
-                expected,
-                result,
-                f"naturaltime({testdate}) {result!r} != {expected!r}",
+            self.assertFalse(
+                same_naturaltime(timestamp, timestamp - timedelta(seconds=2))
             )
+
+    def test_same_naturaltime_minute(self) -> None:
+        timestamp = timezone.now().replace(microsecond=0)
+        with patch(
+            "weblate.trans.templatetags.translations.timezone.now",
+            return_value=timestamp,
+        ):
+            self.assertTrue(
+                same_naturaltime(
+                    timestamp - timedelta(seconds=65),
+                    timestamp - timedelta(seconds=70),
+                )
+            )
+            self.assertFalse(
+                same_naturaltime(
+                    timestamp - timedelta(seconds=65),
+                    timestamp - timedelta(seconds=125),
+                )
+            )
+
+
+class IndicateAlertsPriorityTest(SimpleTestCase):
+    def test_priority_icons(self) -> None:
+        project = Project(slug="p", name="p")
+        context = Context({"user": AnonymousUser()})
+
+        cases = [
+            (priority, svg, css, f'title="{title}"')
+            for priority, (svg, css, title) in PRIORITY_ICONS.items()
+        ]
+
+        def fake_icon(path: str) -> str:
+            return format_html('<svg data-icon="{}"></svg>', path)
+
+        with patch(
+            "weblate.trans.templatetags.translations.icon", side_effect=fake_icon
+        ):
+            for priority, svg, css_class, title in cases:
+                component = Component(
+                    project=project,
+                    slug="c",
+                    name="c",
+                    priority=priority,
+                    source_language=Language(),
+                )
+                component.__dict__["all_problem_alerts"] = []
+                html = str(indicate_alerts(context, component))
+                self.assertIn(f'data-icon="priorities/{svg}.svg"', html)
+                self.assertIn(f'class="state-icon {css_class}"', html)
+                self.assertIn(title, html)
+
+            # Default priority (100) should show no priority icon
+            default_component = Component(
+                project=project,
+                slug="c",
+                name="c",
+                priority=100,
+                source_language=Language(),
+            )
+            default_component.__dict__["all_problem_alerts"] = []
+            html = str(indicate_alerts(context, default_component))
+            self.assertNotIn('data-icon="priorities/', html)
+
+    def test_priority_icon_skipped_for_translation(self) -> None:
+        project = Project(slug="p", name="p")
+        context = Context({"user": AnonymousUser()})
+        component = Component(
+            project=project,
+            slug="c",
+            name="c",
+            priority=60,
+            source_language=Language(),
+        )
+        component.__dict__["all_problem_alerts"] = []
+        translation = Translation(component=component, language=Language())
+
+        def fake_icon(path: str) -> str:
+            return format_html('<svg data-icon="{}"></svg>', path)
+
+        with patch(
+            "weblate.trans.templatetags.translations.icon", side_effect=fake_icon
+        ):
+            html = str(indicate_alerts(context, translation))
+
+        self.assertNotIn('data-icon="priorities/', html)
+
+
+class IndicateAlertsRestrictedTest(SimpleTestCase):
+    def test_restricted_component_icon(self) -> None:
+        context = Context({"user": AnonymousUser()})
+        component = Component(
+            project=Project(slug="p", name="p"),
+            slug="c",
+            name="c",
+            restricted=True,
+            source_language=Language(pk=1),
+        )
+        component.__dict__["all_problem_alerts"] = []
+
+        def fake_icon(path: str) -> str:
+            return format_html('<svg data-icon="{}"></svg>', path)
+
+        with patch(
+            "weblate.trans.templatetags.translations.icon", side_effect=fake_icon
+        ):
+            html = str(indicate_alerts(context, component))
+
+        self.assertIn('data-icon="state/shield.svg"', html)
+        self.assertIn('title="Restricted component"', html)
+
+    def test_restricted_component_icon_skipped_for_translation(self) -> None:
+        context = Context({"user": AnonymousUser()})
+        component = Component(
+            project=Project(slug="p", name="p"),
+            slug="c",
+            name="c",
+            restricted=True,
+            source_language=Language(pk=1),
+        )
+        component.__dict__["all_problem_alerts"] = []
+        translation = Translation(component=component, language=Language(pk=2))
+
+        def fake_icon(path: str) -> str:
+            return format_html('<svg data-icon="{}"></svg>', path)
+
+        with patch(
+            "weblate.trans.templatetags.translations.icon", side_effect=fake_icon
+        ):
+            html = str(indicate_alerts(context, translation))
+
+        self.assertNotIn('data-icon="state/shield.svg"', html)
+        self.assertNotIn('title="Restricted component"', html)
 
 
 class LocationLinksTest(TestCase):
@@ -225,7 +338,44 @@ class LocationLinksTest(TestCase):
         )
 
 
-class TranslationFormatTestCase(FixtureTestCase):
+class FormatTranslationTemplateTest(SimpleTestCase):
+    def test_simple_bidi_isolate(self) -> None:
+        content = render_to_string(
+            "snippets/format-translation.html",
+            {
+                "simple": True,
+                "language": Language(code="fa", direction="rtl"),
+                "wrap": False,
+                "items": [{"content": "سلام test 123"}],
+            },
+        )
+        self.assertHTMLEqual(
+            content,
+            """
+            <span lang="fa" dir="rtl" class="bidi-isolate">
+              سلام test 123
+            </span>
+            """,
+        )
+
+    def test_list_bidi_isolate(self) -> None:
+        content = render_to_string(
+            "snippets/format-translation.html",
+            {
+                "simple": False,
+                "has_content": True,
+                "language": Language(code="fa", direction="rtl"),
+                "wrap": False,
+                "items": [{"content": "سلام test 123"}],
+            },
+        )
+        self.assertIn('class="list-group-item-text bidi-isolate"', content)
+        self.assertIn('lang="fa"', content)
+        self.assertIn('dir="rtl"', content)
+        self.assertIn("سلام test 123", content)
+
+
+class TranslationFormatTestCase(FixtureComponentTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.translation = self.get_translation()
@@ -268,6 +418,48 @@ class TranslationFormatTestCase(FixtureTestCase):
             </del>
             world
             """,
+        )
+
+    def test_html_escape(self) -> None:
+        content = format_translation(
+            ['<script>alert("x")</script>'],
+            self.component.source_language,
+        )["items"][0]["content"]
+        self.assertEqual(content, "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;")
+        self.assertNotIn("<script>", content)
+
+    def test_diff_html_escape(self) -> None:
+        content = format_translation(
+            ['<script>alert("x")</script>'],
+            self.component.source_language,
+            diff="",
+        )["items"][0]["content"]
+        self.assertIn("<ins>", content)
+        self.assertIn("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;", content)
+        self.assertNotIn("<script>", content)
+        self.assertNotIn("</script>", content)
+
+    def test_diff_change_newlinse(self) -> None:
+        self.assertHTMLEqual(
+            """
+            $(^NameDA) is installed both for all users and for
+            <ins>the<span class="hlspace"><span class="space-space"> </span></span></ins>
+            current user.
+            <del>$\\r$\\n</del>
+            <ins>
+ <span class="hlspace">
+            <span class="space-nl">
+            </span></span><br>
+            </ins>
+            Select which installation to remove.
+            """,
+            format_translation(
+                [
+                    "$(^NameDA) is installed both for all users and for the current user.\nSelect which installation to remove."
+                ],
+                self.component.source_language,
+                diff="$(^NameDA) is installed both for all users and for current user.$\\r$\\nSelect which installation to remove.",
+            )["items"][0]["content"],
         )
 
     def test_diff_github_9821(self) -> None:
@@ -359,6 +551,26 @@ class TranslationFormatTestCase(FixtureTestCase):
                 <span class="hlspace">
                     <span class="space-space"> </span>
                 </span>
+            </ins>
+            world
+            """,
+        )
+        self.assertHTMLEqual(
+            format_translation(
+                ["Hello\nworld"],
+                self.component.source_language,
+                diff="Hello world",
+            )["items"][0]["content"],
+            """Hello
+            <del>
+                <span class="hlspace">
+                    <span class="space-space"></span>
+                </span>
+            </del>
+            <ins>
+                <span class="hlspace">
+                    <span class="space-nl"></span>
+                </span><br />
             </ins>
             world
             """,
@@ -463,6 +675,24 @@ ahoj svete [hello world]">
             """,
         )
 
+    def test_glossary_search_nesting(self) -> None:
+        """Test for correct nesting of glossary terms within search matches."""
+        glossary_unit = self.build_glossary("Translation", "Tradução", [(0, 11)])
+        content = format_translation(
+            ["Translation comment"],
+            self.component.source_language,
+            glossary=[glossary_unit],
+            search_match="Translation comment",
+        )["items"][0]["content"]
+        self.assertHTMLEqual(
+            content,
+            """
+            <span class="hlmatch">
+                <span class="glossary-term" title="Glossary term:
+Tradução [Translation]">Translation</span> comment</span>
+            """,
+        )
+
     def test_glossary_brackets(self) -> None:
         self.assertHTMLEqual(
             format_translation(
@@ -514,6 +744,25 @@ ahoj [hello]">Hello</span>
             world
             """,
         )
+
+    def test_glossary_script_escape(self) -> None:
+        content = format_translation(
+            ["Hello world"],
+            self.component.source_language,
+            glossary=[
+                self.build_glossary(
+                    "hello",
+                    '<script>alert(1)</script>"x="y',
+                    [(0, 5)],
+                )
+            ],
+        )["items"][0]["content"]
+        self.assertIn(
+            "&lt;script&gt;alert(1)&lt;/script&gt;&quot;x=&quot;y [hello]",
+            content,
+        )
+        self.assertNotIn("<script>", content)
+        self.assertNotIn('x="y', content)
 
     def test_glossary_multi(self) -> None:
         self.assertHTMLEqual(
@@ -691,7 +940,7 @@ class DiffTestCase(SimpleTestCase):
     """Testing of HTML diff function."""
 
     def html_diff(self, diff, source):
-        unit = MockUnit(source=source)
+        unit = make_unit(source=source)
         return format_translation(
             unit.get_source_plurals(),
             unit.translation.component.source_language,
@@ -753,7 +1002,7 @@ class DiffTestCase(SimpleTestCase):
         )
 
     def test_format_diff(self) -> None:
-        unit = MockUnit(source="Hello word!")
+        unit = make_unit(source="Hello word!")
         self.assertEqual(
             format_translation(
                 unit.get_source_plurals(),
@@ -764,7 +1013,7 @@ class DiffTestCase(SimpleTestCase):
         )
 
     def test_format_diff_whitespace(self) -> None:
-        unit = MockUnit(source="Hello world!")
+        unit = make_unit(source="Hello world!")
         self.assertHTMLEqual(
             format_translation(
                 unit.get_source_plurals(),
@@ -776,7 +1025,7 @@ class DiffTestCase(SimpleTestCase):
         )
 
     def test_format_diff_add_space(self) -> None:
-        unit = MockUnit(source="Hello.  World.")
+        unit = make_unit(source="Hello.  World.")
         self.assertHTMLEqual(
             format_translation(
                 unit.get_source_plurals(),
@@ -798,7 +1047,7 @@ class DiffTestCase(SimpleTestCase):
         )
 
     def test_format_entities(self) -> None:
-        unit = MockUnit(source="'word'")
+        unit = make_unit(source="'word'")
         self.assertEqual(
             format_translation(
                 unit.get_source_plurals(),
@@ -811,7 +1060,263 @@ class DiffTestCase(SimpleTestCase):
     def test_fmtsearchmatch(self) -> None:
         self.assertEqual(
             format_translation(
-                ["Hello world!"], MockLanguage("en"), search_match="hello"
+                ["Hello world!"], make_language("en"), search_match="hello"
             )["items"][0]["content"],
             '<span class="hlmatch">Hello</span> world!',
+        )
+
+    def test_fmtsearchmatch_inserted_diff(self) -> None:
+        self.assertHTMLEqual(
+            format_translation(
+                ["Hello  world"],
+                make_language("en"),
+                diff="Hello world",
+                search_match="world",
+            )["items"][0]["content"],
+            """
+            Hello
+            <span class="hlspace">
+                <span class="space-space"></span>
+            </span>
+            <ins>
+                <span class="hlspace">
+                    <span class="space-space"></span>
+                </span>
+            </ins>
+            <span class="hlmatch">world</span>
+            """,
+        )
+
+    def test_fmtsearchmatch_deleted_diff(self) -> None:
+        self.assertHTMLEqual(
+            format_translation(
+                ["Hello world"],
+                make_language("en"),
+                diff="Hello  world",
+                search_match="o w",
+            )["items"][0]["content"],
+            """
+            Hell
+            <span class="hlmatch">
+                o
+                <del>
+                    <span class="hlspace">
+                        <span class="space-space"></span>
+                    </span>
+                </del>
+                w
+            </span>
+            orld
+            """,
+        )
+
+
+class FormatterNestingTestCase(SimpleTestCase):
+    class GlossaryTerm:
+        def __init__(self, source: str, target: str, positions: list[tuple[int, int]]):
+            self.source = source
+            self.target = target
+            self.glossary_positions = positions
+            self.all_flags: list[str] = []
+
+    def test_search_glossary_nesting(self) -> None:
+        content = format_translation(
+            ["Translation comment"],
+            make_language("en"),
+            glossary=[self.GlossaryTerm("Translation", "Tradução", [(0, 11)])],
+            search_match="Translation comment",
+        )["items"][0]["content"]
+        self.assertHTMLEqual(
+            content,
+            """
+            <span class="hlmatch">
+                <span class="glossary-term" title="Glossary term:
+Tradução [Translation]">Translation</span> comment
+            </span>
+            """,
+        )
+
+    def test_search_inserted_diff_nesting(self) -> None:
+        content = format_translation(
+            ["Hello  world"],
+            make_language("en"),
+            diff="Hello world",
+            search_match="world",
+        )["items"][0]["content"]
+        self.assertHTMLEqual(
+            content,
+            """
+            Hello
+            <span class="hlspace">
+                <span class="space-space"></span>
+            </span>
+            <ins>
+                <span class="hlspace">
+                    <span class="space-space"></span>
+                </span>
+            </ins>
+            <span class="hlmatch">world</span>
+            """,
+        )
+
+    def test_search_deleted_diff_nesting(self) -> None:
+        content = format_translation(
+            ["Hello world"],
+            make_language("en"),
+            diff="Hello  world",
+            search_match="o w",
+        )["items"][0]["content"]
+        self.assertHTMLEqual(
+            content,
+            """
+            Hell
+            <span class="hlmatch">
+                o
+                <del>
+                    <span class="hlspace">
+                        <span class="space-space"></span>
+                    </span>
+                </del>
+                w
+            </span>
+            orld
+            """,
+        )
+
+    def test_search_whitespace_nesting(self) -> None:
+        self.assertHTMLEqual(
+            format_translation(
+                ["Hello  world"],
+                make_language("en"),
+                search_match="o  w",
+            )["items"][0]["content"],
+            """
+            Hell
+            <span class="hlmatch">
+                o
+                <span class="hlspace">
+                    <span class="space-space"></span>
+                    <span class="space-space"></span>
+                </span>
+                w
+            </span>
+            orld
+            """,
+        )
+
+    def test_search_newline_nesting(self) -> None:
+        self.assertHTMLEqual(
+            format_translation(
+                ["Hello\nworld"],
+                make_language("en"),
+                search_match="o\nw",
+            )["items"][0]["content"],
+            """
+            Hell
+            <span class="hlmatch">
+                o
+                <span class="hlspace">
+                    <span class="space-nl"></span>
+                </span><br>
+                w
+            </span>
+            orld
+            """,
+        )
+
+    def test_search_spanning_inserted_diff_nesting(self) -> None:
+        self.assertHTMLEqual(
+            format_translation(
+                ["Hello  world"],
+                make_language("en"),
+                diff="Hello world",
+                search_match="o  w",
+            )["items"][0]["content"],
+            """
+            Hell
+            <span class="hlmatch">
+                o
+                <span class="hlspace">
+                    <span class="space-space"></span>
+                </span>
+                <ins>
+                    <span class="hlspace">
+                        <span class="space-space"></span>
+                    </span>
+                </ins>
+                w
+            </span>
+            orld
+            """,
+        )
+
+    def test_search_spanning_deleted_newline_diff_nesting(self) -> None:
+        self.assertHTMLEqual(
+            format_translation(
+                ["Hello world"],
+                make_language("en"),
+                diff="Hello\nworld",
+                search_match="o w",
+            )["items"][0]["content"],
+            """
+            Hell
+            <span class="hlmatch">
+                o
+                <del>
+                    <span class="hlspace">
+                        <span class="space-nl"></span>
+                    </span><br>
+                </del>
+                <ins>
+                    <span class="hlspace">
+                        <span class="space-space"></span>
+                    </span>
+                </ins>
+                w
+            </span>
+            orld
+            """,
+        )
+
+
+class UploadMethodsHelpTestCase(SimpleTestCase):
+    def test_all_exist(self) -> None:
+        for method in FileUploadMethod:
+            self.assertIsInstance(get_upload_method_help(method), str)
+
+    def test_invalid(self) -> None:
+        with self.assertRaises(ValueError):
+            get_upload_method_help("")
+
+
+class ProgressTestCase(SimpleTestCase):
+    def test_review(self):
+        self.assertHTMLEqual(
+            """
+<div class="progress-stacked" title="Needs attention">
+    <div aria-valuemax="100" aria-valuemin="0" aria-valuenow="100.0" class="progress" role="progressbar" style="width: 100.0%" title="Translated without any problems">
+        <div class="progress-bar progress-bar-success">
+        </div>
+    </div>
+</div>
+            """,
+            str(translation_progress_render(60, 0, 0, 60, True)),
+        )
+
+    def test_review_checks(self):
+        self.assertHTMLEqual(
+            """
+<div class="progress-stacked" title="Needs attention">
+</div>
+            """,
+            str(translation_progress_render(60, 0, 0, 0, True)),
+        )
+
+    def test_empty(self):
+        self.assertHTMLEqual(
+            """
+<div class="progress-stacked" title="Needs attention">
+</div>
+            """,
+            str(translation_progress_render(60, 0, 0, 0, False)),
         )

@@ -3,19 +3,25 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 from __future__ import annotations
 
+import html
 import re
-import threading
 from functools import reduce
 
 import mistletoe
 from django.db.models import Q
+from django.utils.html import linebreaks
 from django.utils.safestring import mark_safe
 from mistletoe import span_token
 
 from weblate.auth.models import User
+from weblate.utils.errors import report_error
+
+from .concurrency import MARKDOWN_LOCK
 
 MENTION_RE = re.compile(r"(?<!\w)(@[\w.@+-]+)\b")
-MARKDOWN_LOCK = threading.Lock()
+PLAIN_AUTOLINK_CHAR = r"A-Za-z0-9.!#$%&'*+/=?^_`{|}~:-"
+PLAIN_AUTOLINK_END = r"A-Za-z0-9/_~=#&+-"
+PLAIN_AUTOLINK_PAREN = rf"\([{PLAIN_AUTOLINK_CHAR}]+\)"
 
 
 def get_mention_users(text):
@@ -31,16 +37,21 @@ def get_mention_users(text):
 class SkipHtmlSpan(span_token.HtmlSpan):
     """A token that strips HTML tags from the content."""
 
-    pattern = re.compile(f"{span_token._open_tag}|{span_token._closing_tag}")  # noqa: SLF001
+    # ruff: ignore[private-member-access]
+    pattern = re.compile(f"{span_token._open_tag}|{span_token._closing_tag}")
     parse_inner = False
     content: str
 
     def __init__(self, match) -> None:
+        super().__init__(match)
         self.content = ""
 
 
 class PlainAutoLink(span_token.AutoLink):
-    pattern = re.compile(r"\b(https?://[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+)\b")
+    pattern = re.compile(
+        rf"\b(https?://(?:[{PLAIN_AUTOLINK_CHAR}]|{PLAIN_AUTOLINK_PAREN})*"
+        rf"(?:[{PLAIN_AUTOLINK_END}]|{PLAIN_AUTOLINK_PAREN}))(?=\W|$)"
+    )
 
 
 class SaferWeblateHtmlRenderer(mistletoe.HtmlRenderer):
@@ -112,17 +123,22 @@ class SaferWeblateHtmlRenderer(mistletoe.HtmlRenderer):
         Otherwise, escape the URL.
         """
         if self.check_url(token.src):
-            return super().render_image(token)
+            template = '<img src="{}" alt="{}"{} />'
+            title = f' title="{html.escape(token.title)}"' if token.title else ""
+            return template.format(
+                self.escape_url(token.src), self.render_to_plain(token), title
+            )
         return self.escape_html_text(f"![{token.title}]({token.src})")
 
     def check_url(self, url: str) -> bool:
-        """Check if an url is valid or not  the scheme."""
+        """Check whether a URL uses an allowed scheme."""
         if url.startswith("/user/"):
             return True
         return bool(self._allowed_url_re.match(url))
 
 
 def render_markdown(text: str) -> str:
+    original_text = text
     users = {u.username.lower(): u for u in get_mention_users(text)}
     parts = MENTION_RE.split(text)
     for pos, part in enumerate(parts):
@@ -135,5 +151,11 @@ def render_markdown(text: str) -> str:
                 f'**[{part}]({user.get_absolute_url()} "{user.get_visible_name()}")**'
             )
     text = "".join(parts)
-    with MARKDOWN_LOCK, SaferWeblateHtmlRenderer() as renderer:
-        return mark_safe(renderer.render(mistletoe.Document(text)))  # noqa: S308
+    try:
+        with MARKDOWN_LOCK, SaferWeblateHtmlRenderer() as renderer:
+            # ruff: ignore[suspicious-mark-safe-usage]
+            return mark_safe(renderer.render(mistletoe.Document(text)))
+    except Exception:
+        report_error("Markdown rendering failed")
+        # ruff: ignore[suspicious-mark-safe-usage]
+        return mark_safe(linebreaks(original_text, autoescape=True))

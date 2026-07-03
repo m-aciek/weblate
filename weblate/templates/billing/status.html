@@ -10,10 +10,16 @@
       <td>
         {% if payment_enabled and billing.can_be_paid %}
           <a href="{% url 'create-billing' %}?billing={{ billing.pk }}&amp;upgrade=1"
-             class="btn btn-primary pull-right flip">{% translate "Change plan" %}</a>
+             class="btn btn-primary float-end">{% translate "Change plan" %}</a>
         {% endif %}
       </td>
     </tr>
+    {% if billing.customer_name %}
+      <tr>
+        <th>{% translate "Customer name" %}</th>
+        <td colspan="2">{{ billing.customer_name }}</td>
+      </tr>
+    {% endif %}
     {% if billing.expiry %}
       <tr>
         <th>{% translate "Trial expiry date" %}</th>
@@ -21,7 +27,7 @@
         <td>
           {% if user_can_manage_billing %}
             <a href=""
-               class="btn btn-primary pull-right flip link-post"
+               class="btn btn-primary float-end link-post"
                data-href="{{ billing.get_absolute_url }}"
                data-params='{"extend": 1}'>{% translate "Extend trial" %}</a>
           {% endif %}
@@ -35,7 +41,7 @@
         <td>
           {% if user_can_manage_billing %}
             <a href=""
-               class="btn btn-primary pull-right flip link-post"
+               class="btn btn-primary float-end link-post"
                data-href="{{ billing.get_absolute_url }}"
                data-params='{"extend": 1}'>{% translate "Extend trial" %}</a>
           {% endif %}
@@ -54,7 +60,7 @@
             <input type="hidden" name="period" value="m" />
             <input type="submit"
                    value="{% translate "New payment" %}"
-                   class="btn btn-primary pull-right flip" />
+                   class="btn btn-primary float-end" />
           </form>
         {% endif %}
       </td>
@@ -71,7 +77,7 @@
             <input type="hidden" name="period" value="y" />
             <input type="submit"
                    value="{% translate "New payment" %}"
-                   class="btn btn-primary pull-right flip" />
+                   class="btn btn-primary float-end" />
           </form>
         {% endif %}
       </td>
@@ -116,33 +122,9 @@
         </td>
         <td>
           {% if billing.is_active %}
-            <a class="btn btn-primary billing-add-project pull-right flip"
-               href="{% url 'create-project' %}?billing={{ billing.pk }}">{% translate "Add new translation project" %}</a>
+            <a class="btn btn-primary billing-add-project float-end"
+               href="{% url 'create-project' %}?workspace={{ billing.workspace_id }}">{% translate "Add new translation project" %}</a>
           {% endif %}
-        </td>
-      </tr>
-    {% endif %}
-    {% if user_can_manage_billing %}
-      <tr>
-        <th>{% translate "Owners" %}</th>
-        <td colspan="2">
-          {% for owner in billing.owners.all %}
-            <p>
-              <span class="profile-icon">{% icon "account.svg" %}</span>
-              <span class="middle-dot-divider">{{ owner }}</span>
-              <span class="middle-dot-divider">
-                <a href="{{ owner.get_absolute_url }}">@{{ owner.username }}</a>
-              </span>
-              <span class="middle-dot-divider">
-                <a href="mailto:{{ owner.email }}">{{ owner.email }}</a>
-              </span>
-              {% if user_can_manage_billing %}
-                <span class="middle-dot-divider">
-                  <a href="{% url "manage-users-check" %}?email={{ owner.email|urlencode }}">{% translate "Check user access" %}</a>
-                </span>
-              {% endif %}
-            </p>
-          {% endfor %}
         </td>
       </tr>
     {% endif %}

@@ -2,14 +2,15 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# ruff: ignore[suspicious-subprocess-import]
 import subprocess
 
 from celery.schedules import crontab
 
 from weblate.fonts.models import FONT_STORAGE, Font
 from weblate.fonts.utils import configure_fontconfig
-from weblate.trans.util import get_clean_env
 from weblate.utils.celery import app
+from weblate.utils.commands import get_clean_env
 
 
 @app.task(trail=False)
@@ -30,6 +31,7 @@ def cleanup_font_files() -> None:
 def update_fonts_cache() -> None:
     configure_fontconfig()
     subprocess.run(
+        # ruff: ignore[start-process-with-partial-path]
         ["fc-cache"],
         env=get_clean_env(),
         check=True,

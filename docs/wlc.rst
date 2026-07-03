@@ -12,12 +12,19 @@ Weblate Client
 Installation
 ++++++++++++
 
-The Weblate Client is shipped separately and includes the Python module.
+The :pypi:`Weblate Client <wlc>` is shipped separately and includes the Python
+module.
 To use the commands below, you need to install :program:`wlc` using pip:
 
 .. code-block:: sh
 
     pip install wlc
+
+You can also execute it directly using :program:`uvx`:
+
+.. code-block:: sh
+
+   uvx wlc --help
 
 .. hint::
 
@@ -38,9 +45,12 @@ Installing:
 
     docker pull weblate/wlc
 
-The Docker container uses Weblate's default settings and connects to the API
-deployed in localhost. The API URL and API_KEY can be configured through the
-arguments accepted by Weblate.
+The Docker container uses Weblate Client defaults and connects to the API
+deployed on localhost. Configure the API URL and API key using the normal
+:program:`wlc` arguments or environment variables, for example :option:`--url`,
+:option:`--key`, :envvar:`WLC_URL`, and :envvar:`WLC_KEY`.
+API keys are rejected over non-local ``http://`` URLs by default; use HTTPS,
+loopback HTTP for local development, or explicitly opt in to insecure HTTP.
 
 The command to launch the container uses the following syntax:
 
@@ -54,20 +64,32 @@ Example:
 
     docker run --rm weblate/wlc --url https://hosted.weblate.org/api/ list-projects
 
-You might want to pass your :ref:`wlc-config` to the Docker container, the
-easiest approach is to add your current directory as :file:`/home/weblate`
-volume:
+You might want to pass your :ref:`wlc-config` to the Docker container. When
+your repository contains a project configuration such as :file:`.weblate`, the
+easiest approach is to add your current directory as the
+:file:`/home/weblate` volume:
 
 .. code-block:: sh
 
    docker run --volume $PWD:/home/weblate --rm weblate/wlc show
 
+When the mounted repository provides the API URL in project configuration and
+you pass an unscoped API key to the container, also pin the URL explicitly:
+:envvar:`WLC_KEY` requires :envvar:`WLC_URL`, and :option:`--key` requires
+:option:`--url`.
+
+If the configured API URL uses non-local ``http://`` and an API key is
+provided, the container refuses to send the key unless insecure HTTP is
+explicitly enabled. Prefer HTTPS; for legacy deployments, pass
+:option:`--allow-insecure-http` or set :envvar:`WLC_ALLOW_INSECURE_HTTP`.
+
 
 Getting started
 +++++++++++++++
 
-The :program:`wlc` configuration is stored in :file:`~/.config/weblate` (see :ref:`wlc-config`
-for other locations), please create it to match your environment:
+The easiest way to get started is to create a personal
+:program:`wlc` configuration in :file:`~/.config/weblate` (see
+:ref:`wlc-config` for the full discovery rules and other locations):
 
 .. code-block:: ini
 
@@ -88,6 +110,33 @@ You can then invoke commands on the default server:
 .. seealso::
 
     :ref:`wlc-config`
+
+.. _wlc_legacy:
+
+Legacy configuration
+++++++++++++++++++++
+
+.. versionchanged:: 1.17
+
+   The legacy configuration using unscoped ``key`` is no longer supported.
+
+Migrate legacy configuration:
+
+.. code-block:: ini
+
+   [weblate]
+   url = https://hosted.weblate.org/api/
+   key = YOUR_KEY_HERE
+
+To a configuration with key scoped to an API URL:
+
+.. code-block:: ini
+
+   [weblate]
+   url = https://hosted.weblate.org/api/
+
+   [keys]
+   https://hosted.weblate.org/api/ = YOUR_KEY_HERE
 
 Synopsis
 ++++++++
@@ -124,10 +173,22 @@ Weblate instance to use. These must be entered before any command.
 
     Specify the API user key to use. Overrides any value found in the configuration file, see :ref:`wlc-config`.
     You can find your key in your profile on Weblate.
+    When the API URL is loaded from automatically discovered project
+    configuration, :option:`--key` must be used together with :option:`--url`.
+    API keys are rejected over non-local ``http://`` URLs by default.
+
+.. option:: --allow-insecure-http
+
+    Allow sending API keys over non-local ``http://`` URLs. Prefer HTTPS or
+    loopback HTTP instead; this option is intended only for legacy deployments
+    where HTTPS is not available. This option only enables insecure HTTP for
+    the current run; omitting it does not disable ``allow_insecure_http`` from
+    configuration.
 
 .. option:: --config PATH
 
-    Overrides the configuration file path, see :ref:`wlc-config`.
+    Load configuration only from ``PATH`` instead of the discovered global and
+    project configuration files, see :ref:`wlc-config`.
 
 .. option:: --config-section SECTION
 
@@ -180,17 +241,9 @@ The following commands are available:
 
 .. option:: reset
 
-    .. versionadded:: 0.7
-
-        Supported since wlc 0.7.
-
     Resets changes in Weblate object to match remote repository (translation, component or project).
 
 .. option:: cleanup
-
-    .. versionadded:: 0.9
-
-        Supported since wlc 0.9.
 
     Removes any untracked changes in a Weblate object to match the remote repository (translation, component or project).
 
@@ -204,41 +257,21 @@ The following commands are available:
 
 .. option:: lock-status
 
-    .. versionadded:: 0.5
-
-        Supported since wlc 0.5.
-
     Displays lock status.
 
 .. option:: lock
-
-    .. versionadded:: 0.5
-
-        Supported since wlc 0.5.
 
     Locks component from further translation in Weblate.
 
 .. option:: unlock
 
-    .. versionadded:: 0.5
-
-        Supported since wlc 0.5.
-
     Unlocks translation of Weblate component.
 
 .. option:: changes
 
-    .. versionadded:: 0.7
-
-        Supported since wlc 0.7 and Weblate 2.10.
-
     Displays changes for a given object.
 
 .. option:: download
-
-    .. versionadded:: 0.7
-
-        Supported since wlc 0.7.
 
     Downloads a translation file.
 
@@ -252,10 +285,6 @@ The following commands are available:
         Specifies file to save output in, if left unspecified it is printed to stdout.
 
 .. option:: upload
-
-    .. versionadded:: 0.9
-
-        Supported since wlc 0.9.
 
     Uploads a translation file.
 
@@ -294,16 +323,19 @@ The following commands are available:
 Configuration files
 +++++++++++++++++++
 
-:file:`.weblate`, :file:`.weblate.ini`, :file:`weblate.ini`
-    Configuration file placed in the project directory.
+When :option:`--config` is provided, :program:`wlc` loads only that file.
+
+Without :option:`--config`, :program:`wlc` first loads the discovered global
+configuration file from the standard platform-specific locations:
+
 :file:`C:\\Users\\NAME\\AppData\\Roaming\\weblate.ini`
-    User configuration file on Windows in the roamed profile.
+    Global configuration file on Windows in the roamed profile.
 :file:`C:\\Users\\NAME\\AppData\\Local\\weblate.ini`
-    User configuration file on Windows in the local profile.
+    Global configuration file on Windows in the local profile.
 :file:`~/.config/weblate`
-    User configuration file.
+    Global configuration file on Unix-like systems.
 :file:`/etc/xdg/weblate`
-    System wide configuration file.
+    System-wide fallback configuration file.
 
 The program follows the XDG specification, so you can adjust the placement of
 config files by environment variables ``XDG_CONFIG_HOME`` or
@@ -312,12 +344,23 @@ config files by environment variables ``XDG_CONFIG_HOME`` or
 On Windows ``APPDATA`` and ``LOCALAPPDATA`` directories are the preferred
 locations for the configuration file.
 
+After loading the global configuration, :program:`wlc` loads the nearest
+project configuration file from the current directory or its parents:
+
+:file:`.weblate`, :file:`.weblate.ini`, :file:`weblate.ini`
+    Project configuration file placed in the repository.
+
+Only the closest project configuration file is loaded. Configuration files in
+farther parent directories are ignored.
+
 Following settings can be configured in the ``[weblate]`` section (you can
 customize this by :option:`--config-section`):
 
 .. describe:: key
 
-    API KEY to access Weblate.
+   .. versionremoved:: 1.17
+
+      Use the ``[keys]`` section to specify keys scoped for individual API URLs, see :ref:`wlc_legacy`.
 
 .. describe:: url
 
@@ -327,16 +370,40 @@ customize this by :option:`--config-section`):
 
     Path to the default translation - component or project.
 
+.. describe:: allow_insecure_http
+
+    Allow API keys over non-local ``http://`` URLs, defaults to ``false``.
+    Loopback HTTP URLs, such as ``http://127.0.0.1:8000/api/``, remain allowed
+    for local development without this option. Prefer HTTPS instead of enabling
+    this setting. Automatically discovered project configuration files cannot
+    enable this option; set it in user configuration, an explicit
+    :option:`--config` file, :envvar:`WLC_ALLOW_INSECURE_HTTP`, or
+    :option:`--allow-insecure-http`. The setting is cumulative: any trusted
+    source that enables insecure HTTP is enough, and false or unset values from
+    command-line or environment sources do not disable it.
+
+.. describe:: retries, timeout, allowed_methods, backoff_factor, status_forcelist
+
+    Optional HTTP retry and timeout settings passed to ``urllib3``.
+    Use ``allowed_methods`` to list the request methods that may be retried.
+    Current :program:`wlc` releases use this setting name in place of the
+    older ``method_whitelist`` option.
+
 The configuration file is an INI file, for example:
 
 .. code-block:: ini
 
     [weblate]
     url = https://hosted.weblate.org/api/
-    key = APIKEY
     translation = weblate/application
+    retries = 3
+    allowed_methods = PUT,POST,GET
+    backoff_factor = 0.2
+    status_forcelist = 429,500,502,503,504
+    timeout = 30
+    allow_insecure_http = false
 
-Additionally API keys can be stored in the ``[keys]`` section:
+The API keys are stored in the ``[keys]`` section:
 
 .. code-block:: ini
 
@@ -344,8 +411,66 @@ Additionally API keys can be stored in the ``[keys]`` section:
     https://hosted.weblate.org/api/ = APIKEY
 
 This allows you to store keys in your personal settings, while using the
-:file:`.weblate` configuration in the VCS repository so that :program:`wlc` knows which
-server it should talk to.
+:file:`.weblate` configuration in the VCS repository so that :program:`wlc`
+knows which server it should talk to. The ``[keys]`` lookup is scoped to the
+exact API URL.
+
+In CI, unscoped keys must pin the API URL explicitly: set both
+:envvar:`WLC_URL` and :envvar:`WLC_KEY`, or use :option:`--url` together with
+:option:`--key`.
+
+
+Environment variables
++++++++++++++++++++++
+
+.. versionadded:: 1.18.0
+
+.. versionchanged:: 2.0.1
+
+   Unscoped API keys require an explicit API URL when project configuration is
+   discovered automatically. API keys are rejected over non-local ``http://``
+   URLs unless insecure HTTP is explicitly enabled.
+
+The API URL and key can also be configured using environment variables. This is
+especially useful for CI workflows where :envvar:`WLC_URL` pins the destination
+and :envvar:`WLC_KEY` is injected as a secret:
+
+.. envvar:: WLC_URL
+
+   API URL
+
+.. envvar:: WLC_KEY
+
+   API key. When the API URL would otherwise come from automatically discovered
+   project configuration, :envvar:`WLC_KEY` is accepted only together with
+   :envvar:`WLC_URL`. API keys are rejected over non-local ``http://`` URLs by
+   default.
+
+.. envvar:: WLC_ALLOW_INSECURE_HTTP
+
+   Set to ``1``, ``true``, ``yes``, or ``on`` to allow API keys over non-local
+   ``http://`` URLs. Prefer HTTPS or loopback HTTP instead. Other values, such
+   as ``0`` or ``false``, are treated as unset and do not disable
+   ``allow_insecure_http`` from configuration.
+
+The same protection applies to command-line arguments: :option:`--key` is
+accepted with automatically discovered project configuration only when
+:option:`--url` is provided.
+
+The API URL and key configuration precedence (highest to lowest) is:
+
+1. Command-line arguments (:option:`--url`, :option:`--key`).
+2. Environment variables (:envvar:`WLC_URL`, :envvar:`WLC_KEY`).
+3. Configuration loaded from :option:`--config`, or from the discovered global
+   configuration plus the nearest project configuration when
+   :option:`--config` is not used.
+
+The insecure HTTP opt-in is enable-only rather than a normal precedence
+setting. It is enabled when :option:`--allow-insecure-http` is passed, when
+:envvar:`WLC_ALLOW_INSECURE_HTTP` has a true value, or when
+``allow_insecure_http`` is enabled in trusted configuration. Automatically
+discovered project configuration cannot enable it; set it in user
+configuration or pass an explicit :option:`--config` file instead.
 
 Examples
 ++++++++

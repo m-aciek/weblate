@@ -8,23 +8,34 @@ from __future__ import annotations
 
 import csv
 import json
+from copy import deepcopy
 from io import StringIO
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 from django.db import transaction
 from django.urls import reverse
+from lxml import etree
 
 from weblate.glossary.models import get_glossary_terms, get_glossary_tsv
 from weblate.glossary.tasks import (
     cleanup_stale_glossaries,
+    get_stale_glossary_translations,
     sync_terminology,
 )
 from weblate.lang.models import Language
-from weblate.trans.models import Translation, Unit
+from weblate.trans.alerts.registry import update_alerts
+from weblate.trans.models import PendingUnitChange, Unit
 from weblate.trans.tests.test_views import ViewTestCase
 from weblate.trans.tests.utils import get_test_file
-from weblate.utils.db import TransactionsTestMixin
 from weblate.utils.hash import calculate_hash
+from weblate.utils.lock import WeblateLockTimeoutError
 from weblate.utils.state import STATE_READONLY, STATE_TRANSLATED
+from weblate.utils.xml import PARSER
+
+if TYPE_CHECKING:
+    from weblate.trans.models import Translation
 
 TEST_TBX = get_test_file("terms.tbx")
 TEST_CSV = get_test_file("terms.csv")
@@ -88,7 +99,55 @@ def unit_sources_and_positions(units):
     return {(unit.source, unit.glossary_positions) for unit in units}
 
 
-class GlossaryTest(TransactionsTestMixin, ViewTestCase):
+def tbx_source_contexts(filename: str) -> list[tuple[str, str | None]]:
+    """Return stored TBX source terms grouped by termEntry id."""
+    root = etree.parse(filename, PARSER).getroot()
+    xml_lang = "{http://www.w3.org/XML/1998/namespace}lang"
+    result = []
+    for term_entry in root.findall(".//termEntry"):
+        context = term_entry.get("id") or ""
+        source = None
+        for lang_set in term_entry.findall("langSet"):
+            if lang_set.get(xml_lang) != "en":
+                continue
+            term = lang_set.find(".//term")
+            if term is not None:
+                source = term.text
+                break
+        result.append((context, source))
+    return result
+
+
+def duplicate_tbx_source_term(filename: str, source: str) -> None:
+    tree = etree.parse(filename, PARSER)
+    root = tree.getroot()
+    body = root.find("./text/body")
+    if body is None:
+        msg = "TBX body is missing"
+        raise AssertionError(msg)
+    xml_lang = "{http://www.w3.org/XML/1998/namespace}lang"
+    snippet = None
+    for term_entry in body.findall("termEntry"):
+        for lang_set in term_entry.findall("langSet"):
+            term = lang_set.find(".//term")
+            if (
+                lang_set.get(xml_lang) == "en"
+                and term is not None
+                and term.text == source
+            ):
+                snippet = term_entry
+                break
+        if snippet is not None:
+            break
+    if snippet is None:
+        msg = f"{source} term is missing"
+        raise AssertionError(msg)
+    for _unused in range(2):
+        body.insert(0, deepcopy(snippet))
+    tree.write(filename, encoding="utf-8", xml_declaration=True)
+
+
+class GlossaryTest(ViewTestCase):
     """Testing of glossary manipulations."""
 
     CREATE_GLOSSARIES: bool = True
@@ -130,6 +189,35 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         )
         self.glossary.invalidate_cache()
 
+    def make_glossary_language_stale(
+        self, language_code: str, source: str | None = None
+    ) -> Translation:
+        language = Language.objects.get(code=language_code)
+        self.component.translation_set.filter(language=language).delete()
+        glossary = self.glossary_component.translation_set.get(language=language)
+        if source is not None:
+            with self.captureOnCommitCallbacks(execute=True):
+                glossary.add_unit(None, "", source, source, author=self.user)
+        return glossary
+
+    def assert_unused_glossary_language_alert(self, *language_codes: str) -> None:
+        if not language_codes:
+            self.assertFalse(
+                self.glossary_component.alert_set.filter(
+                    name="UnusedGlossaryLanguage"
+                ).exists()
+            )
+            return
+
+        alert = self.glossary_component.alert_set.get(name="UnusedGlossaryLanguage")
+        self.assertEqual(
+            {
+                occurrence["language_code"]
+                for occurrence in alert.details["occurrences"]
+            },
+            set(language_codes),
+        )
+
     def test_import(self) -> None:
         """Test for importing of TBX into glossary."""
 
@@ -153,9 +241,7 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         change_term()
 
         # Import file again with orverwriting
-        response = self.import_file(
-            TEST_TBX, method="translate", conflicts="replace-translated"
-        )
+        self.import_file(TEST_TBX, method="translate", conflicts="replace-translated")
 
         # Check number of imported objects
         self.assertEqual(self.glossary.unit_set.count(), 164)
@@ -167,7 +253,7 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         change_term()
 
         # Import file again with adding
-        response = self.import_file(TEST_TBX)
+        self.import_file(TEST_TBX)
 
         # Check number of imported objects
         self.assertEqual(self.glossary.unit_set.count(), 164)
@@ -183,7 +269,7 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         # Check correct response
         self.assertRedirects(response, self.glossary.get_absolute_url())
 
-        response = self.client.get(self.glossary.get_absolute_url())
+        self.client.get(self.glossary.get_absolute_url())
 
         # Check number of imported objects
         self.assertEqual(self.glossary.unit_set.count(), 163)
@@ -209,19 +295,22 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         self.assertEqual(self.glossary.unit_set.count(), 164)
 
     def test_get_terms(self) -> None:
-        self.add_term("hello", "ahoj")
-        self.add_term("thank", "děkujeme")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.add_term("hello", "ahoj")
+            self.add_term("thank", "děkujeme")
 
         unit = self.get_unit("Thank you for using Weblate.")
         self.assertEqual(
             unit_sources_and_positions(get_glossary_terms(unit)), {("thank", ((0, 5),))}
         )
-        self.add_term("thank", "díky", "other")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.add_term("thank", "díky", "other")
         unit.glossary_terms = None
         self.assertEqual(
             unit_sources_and_positions(get_glossary_terms(unit)), {("thank", ((0, 5),))}
         )
-        self.add_term("thank you", "děkujeme vám")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.add_term("thank you", "děkujeme vám")
         unit.glossary_terms = None
         self.assertEqual(
             unit_sources_and_positions(get_glossary_terms(unit)),
@@ -230,7 +319,10 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
                 ("thank you", ((0, 9),)),
             },
         )
-        self.add_term("thank you for using Weblate", "děkujeme vám za použití Weblate")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.add_term(
+                "thank you for using Weblate", "děkujeme vám za použití Weblate"
+            )
         unit.glossary_terms = None
         self.assertEqual(
             unit_sources_and_positions(get_glossary_terms(unit)),
@@ -240,7 +332,8 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
                 ("thank you for using Weblate", ((0, 27),)),
             },
         )
-        self.add_term("web", "web")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.add_term("web", "web")
         unit.glossary_terms = None
         self.assertEqual(
             unit_sources_and_positions(get_glossary_terms(unit)),
@@ -261,20 +354,22 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         )
 
     def test_phrases(self) -> None:
-        self.add_term("Destructive Breach", "x")
-        self.add_term("Flame Breach", "x")
-        self.add_term("Frost Breach", "x")
-        self.add_term("Icereach", "x")
-        self.add_term("Reach", "x")
-        self.add_term("Reachable", "x")
-        self.add_term("Skyreach", "x")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.add_term("Destructive Breach", "x")
+            self.add_term("Flame Breach", "x")
+            self.add_term("Frost Breach", "x")
+            self.add_term("Icereach", "x")
+            self.add_term("Reach", "x")
+            self.add_term("Reachable", "x")
+            self.add_term("Skyreach", "x")
         unit = self.get_unit()
         unit.source = "During invasion from the Reach. Town burn, prior records lost.\n"
         self.assertEqual(
             unit_sources_and_positions(get_glossary_terms(unit)),
             {("Reach", ((25, 30),))},
         )
-        self.add_term("Town", "x")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.add_term("Town", "x")
         unit.glossary_terms = None
         self.assertEqual(
             unit_sources_and_positions(get_glossary_terms(unit)),
@@ -283,7 +378,8 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
                 ("Reach", ((25, 30),)),
             },
         )
-        self.add_term("The Reach", "x")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.add_term("The Reach", "x")
         unit.glossary_terms = None
         self.assertEqual(
             unit_sources_and_positions(get_glossary_terms(unit)),
@@ -367,6 +463,17 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         # Should be added to the source and translation only
         self.assertEqual(Unit.objects.count(), start + 2)
 
+    def test_add_existing(self) -> None:
+        """Test for adding term from translate page while there is existing one."""
+        glossary = self.glossary_component.translation_set.get(
+            language=self.translation.language
+        )
+        glossary.add_unit(None, "", "Thank", "Díky", author=self.user)
+        start = Unit.objects.count()
+        self.do_add_unit()
+        # Should be added to the source and translation only
+        self.assertEqual(Unit.objects.count(), start + 2)
+
     def test_add_terminology(self) -> None:
         start = Unit.objects.count()
         self.do_add_unit(expected_status=403, terminology=1)
@@ -398,11 +505,271 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         self.do_add_unit()
         self.do_add_unit()
 
+    def test_managed_tbx_remove_duplicate_terms_operation(self) -> None:
+        self.make_manager()
+        self.do_add_unit(
+            language="it",
+            context="",
+            source_0="Snippet",
+            target_0="Snippet",
+            terminology=1,
+        )
+        self.glossary_component.commit_pending("test", None)
+
+        filename = self.glossary.get_filename()
+        if filename is None:
+            self.fail("Glossary translation file is missing")
+        other_glossary = self.glossary_component.translation_set.get(
+            language__code="it"
+        )
+        other_filename = other_glossary.get_filename()
+        if other_filename is None:
+            self.fail("Italian glossary translation file is missing")
+
+        duplicate_tbx_source_term(filename, "Snippet")
+        duplicate_tbx_source_term(other_filename, "Snippet")
+
+        self.glossary_component.create_translations_immediate(
+            force=True, request=self.get_request()
+        )
+        alert = self.glossary_component.alert_set.get(name="DuplicateString")
+        rendered = alert.render(self.user)
+        cleanup_url = reverse(
+            "remove_duplicate_units", kwargs={"path": self.glossary.get_url_path()}
+        )
+        repository_response = self.client.get(
+            reverse("git_status", kwargs={"path": self.glossary.get_url_path()})
+        )
+        self.assertContains(repository_response, "File management")
+        self.assertContains(repository_response, cleanup_url)
+        self.assertIn(cleanup_url, rendered)
+
+        unit = self.glossary.unit_set.get(source="Snippet")
+        self.assertTrue(unit.translate(self.user, "Úryvek", STATE_TRANSLATED))
+        self.assertEqual(
+            PendingUnitChange.objects.for_translation(
+                self.glossary, apply_filters=False
+            ).count(),
+            1,
+        )
+        pending = PendingUnitChange.objects.for_translation(
+            self.glossary, apply_filters=False
+        ).get()
+        self.assertEqual(pending.target, "Úryvek")
+        self.assertEqual(
+            PendingUnitChange.objects.for_translation(
+                self.glossary, apply_filters=True
+            ).count(),
+            1,
+        )
+        self.do_add_unit(
+            context="",
+            source_0="Pending snippet",
+            target_0="Čekající",
+            terminology=1,
+        )
+        pending_add_unit = self.glossary.unit_set.get(source="Pending snippet")
+        self.assertTrue(
+            PendingUnitChange.objects.filter(
+                unit=pending_add_unit, add_unit=True
+            ).exists()
+        )
+        duplicate_language_occurrence = {
+            "language_code": self.glossary.language.code,
+            "codes": f"{self.glossary.language_code}, duplicate",
+            "filenames": f"{self.glossary.filename}, duplicate.tbx",
+        }
+        self.glossary_component.add_alert(
+            "DuplicateLanguage", occurrences=[duplicate_language_occurrence]
+        )
+
+        response = self.client.post(cleanup_url)
+        self.assertRedirects(response, f"{self.glossary.get_absolute_url()}#repository")
+        alert = self.glossary_component.alert_set.get(name="DuplicateString")
+        self.assertEqual(
+            {
+                occurrence["language_code"]
+                for occurrence in alert.details["occurrences"]
+            },
+            {other_glossary.language.code},
+        )
+        duplicate_language_alert = self.glossary_component.alert_set.get(
+            name="DuplicateLanguage"
+        )
+        self.assertEqual(
+            duplicate_language_alert.details["occurrences"],
+            [duplicate_language_occurrence],
+        )
+        self.assertEqual(
+            PendingUnitChange.objects.for_translation(
+                self.glossary, apply_filters=False
+            ).count(),
+            2,
+        )
+        self.assertTrue(Unit.objects.filter(pk=pending_add_unit.pk).exists())
+        self.assertTrue(
+            PendingUnitChange.objects.filter(
+                unit=pending_add_unit, add_unit=True
+            ).exists()
+        )
+        self.assertEqual(
+            [
+                context
+                for context, source in tbx_source_contexts(filename)
+                if source == "Snippet"
+            ],
+            [""],
+        )
+
+        self.glossary_component.commit_pending("test", self.user)
+        self.assertEqual(
+            PendingUnitChange.objects.for_translation(
+                self.glossary, apply_filters=False
+            ).count(),
+            0,
+        )
+
+        self.assertEqual(
+            [
+                context
+                for context, source in tbx_source_contexts(filename)
+                if source == "Snippet"
+            ],
+            [""],
+        )
+
+        file_content = Path(filename).read_text(encoding="utf-8")
+        self.assertEqual(file_content.count("<term>Snippet</term>"), 1)
+        self.assertEqual(file_content.count("<term>Úryvek</term>"), 1, file_content)
+        self.assertEqual(file_content.count("<term>Pending snippet</term>"), 1)
+        self.assertEqual(file_content.count("<term>Čekající</term>"), 1, file_content)
+
+    def test_file_cleanup_skips_alert_refresh_without_reparse(self) -> None:
+        store = self.glossary.store
+        with (
+            patch.object(store, "remove_duplicate_units", return_value=[]),
+            patch.object(store, "save"),
+            patch.object(self.glossary, "git_commit", return_value=True),
+            patch.object(self.glossary, "handle_store_change", return_value=False),
+            patch.object(self.glossary, "update_single_file_import_alerts") as update,
+        ):
+            self.assertTrue(self.glossary.do_remove_duplicate_units(self.get_request()))
+        update.assert_not_called()
+
+    def test_file_cleanup_keeps_parse_alert_after_failed_reparse(self) -> None:
+        store = self.glossary.store
+        occurrence = {
+            "language_code": self.glossary.language.code,
+            "error": "Broken file",
+            "filename": self.glossary.filename,
+        }
+        self.glossary_component.alerts_trigger = {"ParseError": [occurrence]}
+        with (
+            patch.object(store, "remove_duplicate_units", return_value=[]),
+            patch.object(store, "save"),
+            patch.object(self.glossary, "git_commit", return_value=True),
+            patch.object(self.glossary, "handle_store_change", return_value=False),
+        ):
+            self.assertTrue(self.glossary.do_remove_duplicate_units(self.get_request()))
+
+        alert = self.glossary_component.alert_set.get(name="ParseError")
+        self.assertEqual(alert.details["occurrences"], [occurrence])
+
+    def test_duplicate_pending_add_entries_commit_once(self) -> None:
+        self.do_add_unit(context="")
+        pending = PendingUnitChange.objects.get(
+            unit__translation=self.glossary, unit__source="source"
+        )
+        self.assertEqual(pending.unit.context, "")
+
+        PendingUnitChange.objects.create(
+            unit=pending.unit,
+            author=pending.author,
+            target=pending.target,
+            explanation=pending.explanation,
+            source_unit_explanation=pending.source_unit_explanation,
+            state=pending.state,
+            add_unit=True,
+        )
+
+        self.glossary_component.commit_pending("test", None)
+
+        filename = self.glossary.get_filename()
+        if filename is None:
+            self.fail("Glossary translation file is missing")
+        file_content = Path(filename).read_text(encoding="utf-8")
+        self.assertEqual(file_content.count("<term>source</term>"), 1)
+        self.assertEqual(file_content.count("<term>překlad</term>"), 1)
+
+    def test_pending_add_replay_commits_once(self) -> None:
+        self.do_add_unit(context="")
+        pending = PendingUnitChange.objects.get(
+            unit__translation=self.glossary, unit__source="source"
+        )
+        self.assertEqual(pending.unit.context, "")
+
+        # Simulate a retry after the pending add was already written to the file,
+        # but the pending row was not deleted yet.
+        self.glossary.update_units(
+            [pending], self.glossary.store, self.user.get_author_name()
+        )
+        self.glossary.drop_store_cache()
+
+        self.glossary_component.commit_pending("test", None)
+
+        filename = self.glossary.get_filename()
+        if filename is None:
+            self.fail("Glossary translation file is missing")
+        file_content = Path(filename).read_text(encoding="utf-8")
+        self.assertEqual(file_content.count("<term>source</term>"), 1)
+        self.assertEqual(file_content.count("<term>překlad</term>"), 1)
+
+    def test_add_locked(self) -> None:
+        unit = self.get_unit("Thank you for using Weblate.")
+        with patch(
+            "weblate.trans.models.translation.Translation.add_unit",
+            side_effect=WeblateLockTimeoutError("locked", lock=self.component.lock),
+        ):
+            response = self.client.post(
+                reverse("js-add-glossary", kwargs={"unit_id": unit.pk}),
+                {
+                    "context": "context",
+                    "source_0": "source",
+                    "target_0": "překlad",
+                    "translation": self.glossary.pk,
+                    "auto_context": 1,
+                },
+            )
+
+        content = response.json()
+        self.assertEqual(content["responseCode"], 423)
+        self.assertIn("another background operation", content["responseDetails"])
+
+    def test_add_result_escapes_html(self) -> None:
+        unit = self.get_unit("Thank you for using Weblate.")
+        response = self.client.post(
+            reverse("js-add-glossary", kwargs={"unit_id": unit.pk}),
+            {
+                "context": "context",
+                "source_0": "<script>alert(1)</script>",
+                "target_0": '<img/src=x/onerror=1>"x="y',
+                "translation": self.glossary.pk,
+                "auto_context": 1,
+            },
+        )
+        content = response.json()
+        self.assertEqual(content["responseCode"], 200)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", content["results"])
+        self.assertIn("&lt;img/src=x/onerror=1&gt;&quot;x=&quot;y", content["results"])
+        self.assertNotIn("<script>", content["results"])
+        self.assertNotIn('<img/src=x/onerror=1>"x="y', content["results"])
+
     def test_terminology(self) -> None:
         start = Unit.objects.count()
 
         # Add single term
-        self.do_add_unit()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.do_add_unit()
 
         # Verify it has been added to single language (+ source)
         unit = self.glossary_component.source_translation.unit_set.get(source="source")
@@ -414,7 +781,7 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         self.assertEqual(Unit.objects.count(), start + 2)
 
         # Make it terminology
-        with transaction.atomic():
+        with self.captureOnCommitCallbacks(execute=True), transaction.atomic():
             unit.translation.component.unload_sources()
             unit.extra_flags = "terminology"
             unit.save()
@@ -422,6 +789,15 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         # Verify it has been added to all languages
         self.assertEqual(Unit.objects.count(), start + 4)
         self.assertEqual(unit.unit_set.count(), 4)
+
+        # Verify stats have been updated
+        glossary_component = type(self.glossary_component).objects.get(
+            pk=self.glossary_component.pk
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            glossary_component.invalidate_cache()
+        translation = glossary_component.translation_set.get(language_code="de")
+        self.assertEqual(translation.stats.all, translation.unit_set.count())
 
         # Terminology sync should be no-op now
         sync_terminology(unit.translation.component.id, unit.translation.component)
@@ -527,6 +903,83 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
             self.glossary_component.translation_set.count(), initial_count - 1
         )
 
+    def test_stale_glossary_translations(self) -> None:
+        self.assertFalse(get_stale_glossary_translations(self.project).exists())
+
+        self.make_glossary_language_stale("de")
+
+        self.assertEqual(
+            list(
+                get_stale_glossary_translations(self.project).values_list(
+                    "language_code", flat=True
+                )
+            ),
+            ["de"],
+        )
+
+        self.component.delete()
+
+        self.assertFalse(get_stale_glossary_translations(self.project).exists())
+
+    def test_unused_glossary_language_alert(self) -> None:
+        glossary = self.make_glossary_language_stale("de", "unused de")
+
+        cleanup_stale_glossaries(self.project.id)
+
+        self.assertTrue(
+            self.glossary_component.translation_set.filter(pk=glossary.pk).exists()
+        )
+        self.assert_unused_glossary_language_alert()
+
+        update_alerts(self.glossary_component, {"UnusedGlossaryLanguage"})
+
+        self.assert_unused_glossary_language_alert("de")
+        alert = self.glossary_component.alert_set.get(name="UnusedGlossaryLanguage")
+        removal_url = f"{glossary.get_absolute_url()}#organize"
+
+        self.assertFalse(self.user.has_perm("translation.delete", glossary))
+        self.assertNotIn(removal_url, alert.render(self.user))
+
+        self.make_manager()
+        self.user.clear_permissions_cache()
+        self.assertTrue(self.user.has_perm("translation.delete", glossary))
+        self.assertIn(removal_url, alert.render(self.user))
+
+    def test_unused_glossary_language_alert_ignores_blank_local_glossary(self) -> None:
+        self.make_glossary_language_stale("de")
+
+        update_alerts(self.glossary_component, {"UnusedGlossaryLanguage"})
+
+        self.assert_unused_glossary_language_alert()
+
+    def test_unused_glossary_language_alert_ignores_matching_language(self) -> None:
+        update_alerts(self.glossary_component, {"UnusedGlossaryLanguage"})
+
+        self.assert_unused_glossary_language_alert()
+
+    def test_unused_glossary_language_alert_ignores_glossary_only_project(self) -> None:
+        self.component.delete()
+
+        update_alerts(self.glossary_component, {"UnusedGlossaryLanguage"})
+
+        self.assert_unused_glossary_language_alert()
+
+    def test_unused_glossary_language_alert_updates_on_removal(self) -> None:
+        czech_glossary = self.make_glossary_language_stale("cs", "unused cs")
+        german_glossary = self.make_glossary_language_stale("de", "unused de")
+        update_alerts(self.glossary_component, {"UnusedGlossaryLanguage"})
+        self.assert_unused_glossary_language_alert("cs", "de")
+
+        with self.captureOnCommitCallbacks(execute=True):
+            german_glossary.remove(self.user)
+
+        self.assert_unused_glossary_language_alert("cs")
+
+        with self.captureOnCommitCallbacks(execute=True):
+            czech_glossary.remove(self.user)
+
+        self.assert_unused_glossary_language_alert()
+
     def test_prohibited_initial_character(self) -> None:
         """Test that a prohibited initial character in views."""
         self.make_manager()
@@ -556,16 +1009,34 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
         )
         self.assertNotContains(response, "Prohibited initial character")
 
-    def removal_test(self, translation: Translation, *, commit: bool = False) -> None:
+    def removal_test(
+        self,
+        translation: Translation,
+        *,
+        commit: bool = False,
+        expected_source: int = 0,
+        **kwargs,
+    ) -> None:
+        self.make_manager()
         self.assertEqual(translation.unit_set.count(), 0)
-        self.add_term("hello", "ahoj")
+        self.do_add_unit(**kwargs)
         if commit:
             self.glossary_component.commit_pending("test", None)
         self.assertEqual(translation.unit_set.count(), 1)
-        unit = translation.unit_set.get(source="hello")
+        unit = translation.unit_set.get(source="source")
         translation.delete_unit(None, unit)
         self.assertEqual(translation.unit_set.count(), 0)
-        self.assertEqual(self.glossary_component.source_translation.unit_set.count(), 0)
+        self.assertEqual(
+            self.glossary_component.source_translation.unit_set.count(), expected_source
+        )
+
+        # Verify that reparsing will not bring the unit back
+        self.glossary_component.create_translations_immediate(force=True)
+        # For terminology strings, the string will reappear here
+        self.assertEqual(translation.unit_set.count(), expected_source)
+        self.assertEqual(
+            self.glossary_component.source_translation.unit_set.count(), expected_source
+        )
 
     def test_string_removal(self) -> None:
         self.removal_test(self.glossary)
@@ -573,7 +1044,13 @@ class GlossaryTest(TransactionsTestMixin, ViewTestCase):
     def test_source_string_removal(self) -> None:
         self.removal_test(self.glossary_component.source_translation)
 
-    def test_string_removal_commmit(self) -> None:
+    def test_string_removal_terminology(self) -> None:
+        self.removal_test(self.glossary, terminology=1, expected_source=1)
+
+    def test_source_string_removal_terminology(self) -> None:
+        self.removal_test(self.glossary_component.source_translation, terminology=1)
+
+    def test_string_removal_commit(self) -> None:
         self.removal_test(self.glossary, commit=True)
 
     def test_source_string_removal_commit(self) -> None:

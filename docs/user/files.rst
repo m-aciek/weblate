@@ -49,8 +49,8 @@ are available via the :guilabel:`Files` ↓ :guilabel:`Customize download` menu:
 
 .. seealso::
 
-   :http:get:`/api/translations/(string:project)/(string:component)/(string:language)/file/`,
-   :setting:`WEBLATE_EXPORTERS`
+   * :http:get:`/api/translations/(string:project)/(string:component)/(string:language)/file/`
+   * :setting:`WEBLATE_EXPORTERS`
 
 .. _download-multi:
 
@@ -87,8 +87,8 @@ features might not be translated properly.
 
 .. seealso::
 
-   :ref:`formats`,
-   :doc:`/user/files`
+   * :ref:`formats`
+   * :doc:`/user/files`
 
 .. _upload-method:
 
@@ -96,6 +96,8 @@ Import methods
 ++++++++++++++
 
 These are the choices presented when uploading translation files:
+
+.. image:: /screenshots/file-import-methods.webp
 
 Add as translation (``translate``)
     Imported strings are added as translations to existing strings. This is the most common usecase, and
@@ -138,7 +140,7 @@ Update source strings (``source``)
     This option is available only for some file formats and only if the user has the
     :ref:`"Upload translations" permission <privileges>`.
 Add new strings (``add``)
-    Adds new strings to the translation. It skips the one which already exist.
+    Adds new strings to the translation. It skips the ones which already exist.
 
     In case you want to both add new strings and update existing translations,
     upload the file second time with :guilabel:`Add as translation`.

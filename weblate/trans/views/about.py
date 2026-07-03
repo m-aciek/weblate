@@ -10,7 +10,7 @@ from django.views.generic import TemplateView
 
 from weblate.accounts.models import Profile
 from weblate.metrics.models import Metric
-from weblate.utils.requests import request
+from weblate.utils.requests import fetch_url
 from weblate.utils.requirements import get_versions_list
 from weblate.utils.stats import GlobalStats
 from weblate.vcs.gpg import get_gpg_public_key, get_gpg_sign_key
@@ -26,9 +26,9 @@ MENU = (
 REPO_URL = "https://api.github.com/repos/WeblateOrg/weblate"
 ACTIVITY_URL = "https://api.github.com/repos/WeblateOrg/weblate/stats/commit_activity"
 FALLBACK_STATS = {
-    "stars": 4082,
-    "issues": 447,
-    "commits": 663,
+    "stars": 5966,
+    "issues": 495,
+    "commits": 1434,
 }
 
 
@@ -78,7 +78,7 @@ class StatsView(AboutView):
             .filter(user__is_bot=False, user__is_active=True)[:10]
             .select_related("user")
         )
-        translated_max = max(user.translated for user in top_users)
+        translated_max = max((user.translated for user in top_users), default=0)
         for user in top_users:
             if translated_max:
                 user.translated_width = 100 * user.translated // translated_max
@@ -106,7 +106,7 @@ class DonateView(AboutView):
     cache_key = "weblate-repo-stats"
 
     def fetch_url(self, url: str):
-        response = request("get", url)
+        response = fetch_url("get", url)
         return response.json()
 
     def get_stats(self) -> dict[str, int]:

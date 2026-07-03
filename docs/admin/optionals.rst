@@ -27,7 +27,7 @@ Installation
 
 .. hint::
 
-   Git exporter is turned on in our official Docker image. To turn it of, use:
+   Git exporter is turned on in our official Docker image. To turn it off, use:
 
    .. code-block:: sh
 
@@ -56,9 +56,11 @@ requires an API token which can be obtained in your
 
     git clone 'https://user:KEY@example.org/git/weblate/main/'
 
+.. include:: /snippets/git-export-lfs-note.rst
+
 .. hint::
 
-   By default members or :guilabel:`Users` group and anonymous user have access
+   By default members of :guilabel:`Users` group and anonymous user have access
    to the repositories for public projects via :guilabel:`Access repository`
    and :guilabel:`Power user` roles.
 
@@ -105,18 +107,20 @@ After installation you can control billing in the admin interface. Users with
 billing enabled will get new :guilabel:`Billing` tab in their
 :ref:`user-profile`.
 
-The billing module additionally allows project admins to create new projects
-and components without being superusers (see :ref:`adding-projects`). This is
+The billing module additionally allows users to create new projects and
+components without being superusers (see :ref:`adding-projects`). This is
 possible when following conditions are met:
 
 * The billing is in its configured limits (any overusage results in blocking
   of project/component creation) and paid (if its price is non zero)
-* The user is admin of existing project with billing or user is owner of
-  billing (the latter is necessary when creating new billing for users to be
-  able to import new projects).
+* The user has :guilabel:`Add projects to workspace` permission for the
+  workspace covered by the billing plan.
 
-Upon project creation user is able to choose which billing should be charged
-for the project in case he has access to more of them.
+Upon project creation user is able to choose which workspace should contain the
+project. Projects created in a workspace with billing count against the billing
+plan assigned to that workspace. Users with the :guilabel:`Edit workspace
+settings` permission can view and pay the billing plan; billing notification
+e-mails are sent to these users. See :ref:`workspace-billing` for details.
 
 
 .. _legal:
@@ -134,6 +138,15 @@ following templates in the documents:
    Privacy policy document
 :file:`legal/documents/summary.html`
    Short overview of the terms of service and privacy policy
+:file:`legal/documents/contracts.html`
+   Subcontractor information
+
+The legal module embeds these templates inside Weblate and uses
+:file:`legal/documents/tos.html` for terms of service confirmation. This is
+separate from :setting:`LEGAL_URL` and :setting:`PRIVACY_URL`, which are meant
+for linking to externally hosted legal documents from the footer when the
+legal module is not enabled. When the legal module is enabled, Weblate links to
+the internal legal pages by default.
 
 On changing the terms of service documents, please adjust
 :setting:`LEGAL_TOS_DATE` so that users are forced to agree with the updated
@@ -141,11 +154,13 @@ documents.
 
 .. note::
 
-    Legal documents for the Hosted Weblate service are available in this Git repository
+    Legal documents for the Hosted Weblate service operated by Weblate s.r.o.
+    are available in this Git repository:
     <https://github.com/WeblateOrg/wllegal/tree/main/wllegal/templates/legal/documents>.
 
-    Most likely these will not be directly usable to you, but might come in handy
-    as a starting point if adjusted to meet your needs.
+    The bundled terms of service and related legal documents are specific to
+    that service and are not intended for general use. They might still come
+    in handy as a starting point if adjusted to meet your needs.
 
 Installation
 ++++++++++++
@@ -175,10 +190,52 @@ Installation
 
 3. Edit the legal documents in the :file:`weblate/legal/templates/legal/` folder to match your service.
 
+.. hint::
+
+   In Docker deployments, enable the legal module using
+   :envvar:`WEBLATE_LEGAL_INTEGRATION` instead of editing
+   :file:`settings.py`. Use ``tos-confirm`` to enable the legal module and
+   terms of service confirmation enforcement, or ``wllegal`` to additionally
+   load the hosted legal document templates used by services operated by
+   Weblate s.r.o. These templates are not intended for general use. To provide
+   your own templates in Docker, place them in
+   :file:`/app/data/python/customize/templates/legal/documents`, see
+   :ref:`docker-static-override`.
+
+   Recreate the Docker container after changing environment variables, for
+   example using :program:`docker compose up -d`. Restarting an existing
+   container does not apply changed environment values.
+
 Usage
 +++++
 
 After installation and editing, the legal documents are shown in the Weblate UI.
+
+The legal document templates are regular Django templates. Text is translated
+only when you use Django translation tags such as ``{% translate %}`` or
+``{% blocktranslate %}``; plain HTML text is shown as written.
+
+Legal pages and the sign-in and registration overview provide ``terms_url`` and
+``privacy_url`` variables for linking to the terms of service and privacy
+policy documents.
+
+By default, legal document wrappers use the ``tos`` CSS class. This class
+automatically numbers ``h2`` headings, paragraphs with ``item``, ``subitem``,
+or ``subsubitem`` classes, and top-level ordered list items. If your legal
+text already contains numbering, set :setting:`LEGAL_DOCUMENT_CSS_CLASS` to an
+empty string to disable this styling.
+
+Use :setting:`LEGAL_HIDDEN_DOCUMENTS` to hide optional legal pages such as
+subcontractors from the legal menu. Hidden pages return a 404 response when
+requested directly. If ``terms`` or ``privacy`` is hidden, links using
+``terms_url`` or ``privacy_url`` fall back to :setting:`LEGAL_URL` or
+:setting:`PRIVACY_URL` when configured, otherwise the link is omitted.
+
+To use externally hosted legal documents with terms confirmation, configure
+:setting:`LEGAL_HIDDEN_DOCUMENTS` to hide ``terms`` and ``privacy`` and set
+:setting:`LEGAL_URL` and :setting:`PRIVACY_URL`. The confirmation page then
+links to those external documents without requiring a
+:file:`legal/documents/tos.html` template override.
 
 .. _avatars:
 
@@ -196,38 +253,64 @@ Weblate currently supports:
 
 .. seealso::
 
-   :ref:`production-cache-avatar`,
-   :setting:`AVATAR_URL_PREFIX`,
-   :setting:`ENABLE_AVATARS`
+   * :ref:`production-cache-avatar`
+   * :setting:`AVATAR_URL_PREFIX`
+   * :setting:`ENABLE_AVATARS`
 
-.. _spam-protection:
+.. _cdn-server-security:
 
-Spam protection
----------------
+Localization CDN
+----------------
 
-You can protect against spamming by users by using the `Akismet
-<https://akismet.com/>`_ service.
+The :ref:`addon-weblate.cdn.cdnjs` and :ref:`addon-weblate.cdn.files` add-ons
+write files to :setting:`LOCALIZE_CDN_PATH`; Weblate does not serve them.
+Configure the web server or CDN serving :setting:`LOCALIZE_CDN_URL` as a
+public, read-only static file host.
 
-1. Install the `akismet` Python module (this is already included in the official Docker image).
-2. Obtain the Akismet API key.
-3. Store it as :setting:`AKISMET_API_KEY` or :envvar:`WEBLATE_AKISMET_API_KEY` in Docker.
+Treat every published CDN file as public. The add-on specific UUID in the URL
+is not an access-control mechanism. Do not enable CDN add-ons for components
+that contain private strings, unreleased product text, customer data, internal
+URLs, API examples, repository paths, translator comments, or file-format
+metadata that should not be exposed.
 
-Following content is sent to Akismet for checking:
+The :ref:`addon-weblate.cdn.files` add-on publishes raw translation files in
+formats supported by Weblate. Some formats can be interpreted by browsers or
+other clients as HTML, SVG, XML, JavaScript, YAML, or application-specific
+configuration. Serve the CDN from a dedicated domain that is separate from
+Weblate and from the application consuming the translations. Do not share
+authentication cookies with the CDN domain.
 
-* Suggestions from unauthenticated users
-* Project and component descriptions and links
+Recommended server configuration:
 
-.. note::
+* Serve only the directory configured by :setting:`LOCALIZE_CDN_PATH`; do not
+  expose Weblate repositories, backups, media, configuration, or the whole data
+  directory.
+* Disable directory listing.
+* Use HTTPS and make the CDN host read-only from the web server.
+* Send :http:header:`X-Content-Type-Options` with ``nosniff``.
+* Configure conservative MIME types. Serve unknown translation formats as
+  :mimetype:`text/plain` or :mimetype:`application/octet-stream`; only serve
+  :file:`weblate.js` as JavaScript.
+* For raw translation formats that are not intended to be rendered in a
+  browser, consider adding :http:header:`Content-Disposition` with
+  ``attachment``.
+* Configure ``Access-Control-Allow-Origin`` only for sites that need browser
+  access to the files.
+* Set cache lifetimes that match your update expectations, and purge CDN caches
+  when stale translations must disappear quickly.
 
-   This (among other things) relies on IP address of the client, please see
-   :ref:`reverse-proxy` for properly configuring that.
+The following nginx snippet serves only the configured CDN directory and
+applies conservative defaults for raw translation files:
+
+.. literalinclude:: ../../weblate/examples/weblate.nginx.cdn.conf
+   :language: nginx
+   :caption: weblate/examples/weblate.nginx.cdn.conf
 
 .. seealso::
 
-    :ref:`reverse-proxy`,
-    :setting:`AKISMET_API_KEY`,
-    :envvar:`WEBLATE_AKISMET_API_KEY`
-
+   * :ref:`weblate-cdn`
+   * :setting:`LOCALIZE_CDN_URL`
+   * :setting:`LOCALIZE_CDN_PATH`
 
 .. _gpg-sign:
 
@@ -275,9 +358,15 @@ Rate limiting
 
       The rate limiting no longer applies to signed in superusers.
 
-Several operations in Weblate are rate limited. At most
-:setting:`RATELIMIT_ATTEMPTS` attempts are allowed within :setting:`RATELIMIT_WINDOW` seconds.
-The user is then blocked for :setting:`RATELIMIT_LOCKOUT`. There are also settings specific to scopes, for example ``RATELIMIT_CONTACT_ATTEMPTS`` or ``RATELIMIT_TRANSLATE_ATTEMPTS``. The table below is a full list of available scopes.
+Several operations in Weblate are rate limited. Rate limits are evaluated
+independently for each scope. At most :setting:`RATELIMIT_ATTEMPTS` attempts are
+allowed within :setting:`RATELIMIT_WINDOW` seconds in one scope. That scope is
+then blocked for :setting:`RATELIMIT_LOCKOUT`; Weblate does not turn this into a
+sitewide temporary IP ban. Exceeding one scope, such as ``TRANSLATE`` or
+``SEARCH``, does not by itself block unrelated scopes such as ``LOGIN`` or
+``SECOND_FACTOR``. There are also settings specific to scopes, for example
+``RATELIMIT_CONTACT_ATTEMPTS`` or ``RATELIMIT_TRANSLATE_ATTEMPTS``. The table
+below is a full list of available scopes.
 
 The following operations are subject to rate limiting:
 
@@ -303,8 +392,11 @@ The following operations are subject to rate limiting:
 +-----------------------------------+--------------------+------------------+------------------+----------------+
 | Creating new project              | ``PROJECT``        | 5                | 600              | 600            |
 +-----------------------------------+--------------------+------------------+------------------+----------------+
+| Connecting a GitHub account       | ``GITHUB_SETUP``   | 100              | 3600             | 600            |
++-----------------------------------+--------------------+------------------+------------------+----------------+
 
-The rate limiting is based on sessions when user is signed in and on IP address if not.
+Within each scope, the rate limiting is based on sessions when user is signed in
+and on IP address if not.
 
 If a user fails to sign in :setting:`AUTH_LOCK_ATTEMPTS` times, password authentication will be turned off on the account until having gone through the process of having its password reset.
 
@@ -314,22 +406,6 @@ The API has separate rate limiting settings, see :ref:`api-rate`.
 
 .. seealso::
 
-   :ref:`user-rate`,
-   :ref:`reverse-proxy`,
-   :ref:`api-rate`
-
-.. _fedora-messaging:
-
-Fedora Messaging integration
-----------------------------
-
-Fedora Messaging is AMQP-based publisher for all changes happening in Weblate.
-You can hook additional services on changes happening in Weblate using this.
-
-The Fedora Messaging integration is available as a separate Python module
-``weblate-fedora-messaging``. Please see
-<https://github.com/WeblateOrg/fedora_messaging/> for setup instructions.
-
-.. seealso::
-
-   :ref:`schema-messaging`
+   * :ref:`user-rate`
+   * :ref:`reverse-proxy`
+   * :ref:`api-rate`

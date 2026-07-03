@@ -64,12 +64,17 @@ Untranslated
     Translation is empty, it might or not be stored in the file, depending
     on the file format.
 Needs editing
-    Translation needs editing, this is usually the result of a source string change, fuzzy matching or translator action.
-    The translation is stored in the file, depending on the file format it might
-    be marked as needing edit (for example as it gets a ``fuzzy`` flag in the gettext file).
-Waiting for review
-    Translation is made, but not reviewed. It is stored in the file as a valid
-    translation.
+    Translation needs editing, this is usually the result of fuzzy matching or translator action.
+    Depending on the file format it might be marked as needing edit (for example as it gets a ``fuzzy`` flag in the gettext file).
+Needs rewriting
+   Translation needs to be rewritten because of a source string change.
+Needs checking
+   State used for source/template strings that need developer review. It is
+   typically set for new source strings imported from the VCS when the
+   Source edit addon is enabled, or when a source string is reported for
+   checking.
+Translated / Waiting for review
+    Translation is made. The translated state is shown as "Waiting for review" if reviews are enabled.
 Approved
     Translation has been approved in the review. It can no longer be changed by
     translators, but only by reviewers. Translators can only add suggestions to
@@ -89,12 +94,16 @@ The states are represented in the translation files when possible.
 
    If the file format you use does not support storing states, you might want
    to use the :ref:`addon-weblate.flags.same_edit` add-on to flag unchanged strings
-   as needing editing.
+   as needing rewriting.
+
+.. note::
+
+   The :ref:`project-commit_policy` determines which translation states are stored in the file.
 
 .. seealso::
 
-   :ref:`fmt_capabs`,
-   :ref:`workflows`
+   * :ref:`fmt_capabs`
+   * :ref:`workflows`
 
 
 Direct translation
@@ -197,25 +206,47 @@ Turning on reviews
 
 Reviews can be turned on in the project configuration, from the
 :guilabel:`Workflow` subpage of project settings (to be found in the
-:guilabel:`Manage` → :guilabel:`Settings` menu):
+:guilabel:`Operations` → :guilabel:`Settings` menu):
 
 .. image:: /screenshots/project-workflow.webp
+
+Per-language reviews
+++++++++++++++++++++
+
+To require review only for selected languages, first turn on
+:ref:`project-translation_review` for the whole project. Then open each
+project language page that should use different behavior, enable
+:guilabel:`Customize translation workflow for this language in this project`,
+and turn :guilabel:`Enable reviews` off for languages that should not require
+review.
+
+Reviewers also need review access for the same language. Add them to a team
+whose roles include :guilabel:`Review strings`, and limit that team or the
+user membership to the language they should review. See :ref:`manage-acl` and
+:ref:`custom-acl` for language-scoped access setup.
+
+If approval buttons are not visible, check both parts of the setup: reviews
+have to be enabled for that translation, and the signed-in user has to have
+review permission for that language.
 
 .. _source-quality-gateway:
 
 Quality gateway for the source strings
 --------------------------------------
 
-In many cases the original source language strings are coming from developers,
-because they write the code and provide initial strings. However developers are
-often not native speakers in the source language and do not provide desired
-quality of the source strings. The intermediate translation can help you address this - there is an additional quality gateway for the strings between
+The original source language strings usually come from developers, since they
+write the code and provide the initial strings. However, developers are often
+not native speakers of the source language and do not provide the desired
+quality of the source strings. The intermediate translation can help you
+address this - there is an additional quality gateway for the strings between
 developers and translators.
 
-By setting :ref:`component-intermediate`, this file is used for translating strings
-to the source language by translators/editors. Once this stage is done,
-strings are available for translations to target languages,
-based on what is now a polished source language.
+By setting the :ref:`component-intermediate`, this file is used for translating
+strings to the source language by translators/editors while it is owned by the
+developers (often using arbitrary languages such as ``en_devel``). Once this
+stage is done, strings are available for translations to target languages,
+based on what is now a polished source language stored in the
+:ref:`component-template`.
 
 .. graphviz::
 
@@ -256,9 +287,9 @@ based on what is now a polished source language.
 
 .. seealso::
 
-   :ref:`component-intermediate`,
-   :ref:`component-template`,
-   :ref:`bimono`
+   * :ref:`component-intermediate`
+   * :ref:`component-template`
+   * :ref:`bimono`
 
 .. _secondary-language-workflow:
 
@@ -297,7 +328,7 @@ code, or remove the label.
 
 .. seealso::
 
-   :ref:`bimono`,
-   :ref:`reviews`,
-   :ref:`labels`,
-   :ref:`user-comments`
+   * :ref:`bimono`
+   * :ref:`reviews`
+   * :ref:`labels`
+   * :ref:`user-comments`

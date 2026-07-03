@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 from django.db import models
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy
@@ -9,7 +11,10 @@ from django.utils.translation import gettext_lazy
 from weblate.checks.flags import Flags
 from weblate.utils.colors import ColorChoices
 
-TRANSLATION_LABELS = {"Automatically translated"}
+
+class LabelQuerySet(models.QuerySet["Label", "Label"]):
+    def order(self):
+        return self.order_by("name")
 
 
 class Label(models.Model):
@@ -31,15 +36,20 @@ class Label(models.Model):
         blank=True,
     )
 
+    objects = LabelQuerySet.as_manager()
+
     class Meta:
         app_label = "trans"
+        # ruff: ignore[mutable-class-default]
         unique_together = [("project", "name")]
         verbose_name = "label"
         verbose_name_plural = "label"
 
     def __str__(self) -> str:
         return format_html(
-            '<span class="label label-{}">{}</span>', self.color, self.name
+            '<span class="align-middle badge label label-{}">{}</span>',
+            self.color,
+            self.name,
         )
 
     @property

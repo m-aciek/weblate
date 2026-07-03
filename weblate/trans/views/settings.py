@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.contrib.staticfiles.storage import staticfiles_storage
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
+from django.db import transaction
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
@@ -19,15 +21,18 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_POST
 from django.views.generic import TemplateView, View
 
-from weblate.auth.models import AuthenticatedHttpRequest
-from weblate.trans.backups import PROJECTBACKUP_PREFIX
+from weblate.trans.backups import PROJECTBACKUP_PREFIX, list_backups
 from weblate.trans.forms import (
     AddCategoryForm,
     AnnouncementForm,
     BaseDeleteForm,
     CategoryRenameForm,
+    CategorySettingsForm,
+    ComponentLinkAddForm,
+    ComponentLinkCategoryForm,
     ComponentRenameForm,
     ComponentSettingsForm,
+    ProjectMoveForm,
     ProjectRenameForm,
     ProjectSettingsForm,
     WorkflowSettingForm,
@@ -36,6 +41,7 @@ from weblate.trans.models import (
     Announcement,
     Category,
     Component,
+    ComponentLink,
     Project,
     Translation,
     WorkflowSetting,
@@ -52,6 +58,8 @@ from weblate.utils import messages
 from weblate.utils.random import get_random_identifier
 from weblate.utils.stats import CategoryLanguage, ProjectLanguage
 from weblate.utils.views import parse_path, show_form_errors
+from weblate.workspaces.forms import WorkspaceSettingsForm
+from weblate.workspaces.models import Workspace
 
 if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest
@@ -60,19 +68,50 @@ if TYPE_CHECKING:
 @never_cache
 @login_required
 def change(request: AuthenticatedHttpRequest, path):
-    obj = parse_path(request, path, (Component, Project, ProjectLanguage))
+    obj = parse_path(
+        request, path, (Component, Project, ProjectLanguage, Category, Workspace)
+    )
+    if isinstance(obj, Workspace):
+        if not request.user.has_perm("workspace.edit", obj):
+            raise Http404
+        return change_workspace(request, obj)
+
     if not request.user.has_perm(obj.settings_permission, obj):
         raise Http404
 
     if isinstance(obj, Component):
         return change_component(request, obj)
+    if isinstance(obj, Category):
+        return change_category(request, obj)
     if isinstance(obj, ProjectLanguage):
         return change_project_language(request, obj)
     return change_project(request, obj)
 
 
+def change_workspace(request: AuthenticatedHttpRequest, obj: Workspace):
+    if request.method == "POST":
+        obj.acting_user = request.user
+        settings_form = WorkspaceSettingsForm(request.POST, instance=obj)
+        if settings_form.is_valid():
+            settings_form.save()
+            messages.success(request, gettext("Settings saved"))
+            return redirect("settings", path=obj.get_url_path())
+        messages.error(
+            request, gettext("Invalid settings. Please check the form for errors.")
+        )
+    else:
+        settings_form = WorkspaceSettingsForm(instance=obj)
+
+    return render(
+        request,
+        "project-settings.html",
+        {"object": obj, "workspace": obj, "form": settings_form},
+    )
+
+
 def change_project(request: AuthenticatedHttpRequest, obj):
     if request.method == "POST":
+        obj.acting_user = request.user
         settings_form = ProjectSettingsForm(request, request.POST, instance=obj)
         if settings_form.is_valid():
             settings_form.save()
@@ -120,22 +159,46 @@ def change_project_language(request: AuthenticatedHttpRequest, obj):
     )
 
 
-def change_component(request: AuthenticatedHttpRequest, obj):
-    if not request.user.has_perm("component.edit", obj):
-        raise Http404
-
+def change_category(request: AuthenticatedHttpRequest, obj):
     if request.method == "POST":
-        form = ComponentSettingsForm(request, request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
+        obj.acting_user = request.user
+        settings_form = CategorySettingsForm(request, request.POST, instance=obj)
+        if settings_form.is_valid():
+            settings_form.save()
             messages.success(request, gettext("Settings saved"))
             return redirect("settings", path=obj.get_url_path())
         messages.error(
             request, gettext("Invalid settings. Please check the form for errors.")
         )
-        # Get a fresh copy of object, otherwise it will use unsaved changes
-        # from the failed form
-        obj = Component.objects.get(pk=obj.pk)
+    else:
+        settings_form = CategorySettingsForm(request, instance=obj)
+
+    return render(
+        request,
+        "project-settings.html",
+        {"project": obj.project, "object": obj, "form": settings_form},
+    )
+
+
+def change_component(request: AuthenticatedHttpRequest, obj):
+    if not request.user.has_perm("component.edit", obj):
+        raise Http404
+
+    if request.method == "POST":
+        obj.acting_user = request.user
+        with obj.locked_for_update() as locked_obj:
+            form = ComponentSettingsForm(request, request.POST, instance=locked_obj)
+            if form.is_valid():
+                form.save()
+                messages.success(request, gettext("Settings saved"))
+                return redirect("settings", path=locked_obj.get_url_path())
+            messages.error(
+                request, gettext("Invalid settings. Please check the form for errors.")
+            )
+            # Get a fresh copy of object, otherwise it will use unsaved changes
+            # from the failed form
+            locked_obj.refresh_from_db()
+            obj = locked_obj
     else:
         form = ComponentSettingsForm(request, instance=obj)
 
@@ -166,17 +229,19 @@ def dismiss_alert(request: AuthenticatedHttpRequest, path):
 
     try:
         alert = obj.alert_set.get(name=request.POST["dismiss"])
-        if alert.obj.dismissable:
-            alert.dismissed = True
-            alert.save(update_fields=["dismissed"])
     except ObjectDoesNotExist:
         pass
+    else:
+        if alert.obj.dismissible:
+            alert.dismissed = True
+            alert.save(update_fields=["dismissed"])
 
     return redirect_param(obj, "#alerts")
 
 
 @login_required
 @require_POST
+@transaction.atomic
 def remove(request: AuthenticatedHttpRequest, path):
     obj = parse_path(
         request,
@@ -213,13 +278,13 @@ def remove(request: AuthenticatedHttpRequest, path):
         messages.success(request, gettext("The project was scheduled for removal."))
     elif isinstance(obj, ProjectLanguage):
         parent = obj.project
-        for translation in obj.translation_set:
+        for translation in obj.action_translation_set.prefetch():
             translation.remove(request.user)
 
         messages.success(request, gettext("A language in the project was removed."))
     elif isinstance(obj, CategoryLanguage):
         parent = obj.category
-        for translation in obj.translation_set:
+        for translation in obj.action_translation_set.prefetch():
             translation.remove(request.user)
 
         messages.success(request, gettext("A language in the category was removed."))
@@ -227,39 +292,51 @@ def remove(request: AuthenticatedHttpRequest, path):
     return redirect(parent)
 
 
-def perform_rename(form_cls, request: AuthenticatedHttpRequest, obj, perm: str):
+@transaction.atomic
+def perform_rename(
+    form_cls,
+    request: AuthenticatedHttpRequest,
+    obj,
+    perm: str,
+):
     if not request.user.has_perm(perm, obj):
         raise PermissionDenied
 
-    # Make sure any non-rename related issues are resolved first
-    try:
-        obj.full_clean()
-    except ValidationError as err:
-        messages.error(
-            request,
-            gettext(
-                "Could not change %(obj)s due to an outstanding issue in its settings: %(error)s"
+    if isinstance(obj, Component):
+        obj.acting_user = request.user
+    lock_context = (
+        obj.locked_for_update() if isinstance(obj, Component) else nullcontext(obj)
+    )
+    with lock_context as locked_obj:
+        # Make sure any non-rename related issues are resolved first
+        try:
+            locked_obj.full_clean()
+        except ValidationError as err:
+            messages.error(
+                request,
+                gettext(
+                    "Could not change %(obj)s due to an outstanding issue in its settings: %(error)s"
+                )
+                % {"obj": locked_obj, "error": err},
             )
-            % {"obj": obj, "error": err},
-        )
-        return redirect_param(obj, "#organize")
+            return redirect_param(locked_obj, "#organize")
 
-    form = form_cls(request, request.POST, instance=obj)
-    if not form.is_valid():
-        show_form_errors(request, form)
-        # Reload the object from DB to revert possible rejected change
-        obj.refresh_from_db()
-        return redirect_param(obj, "#organize")
+        form = form_cls(request, request.POST, instance=locked_obj)
+        if not form.is_valid():
+            show_form_errors(request, form)
+            # Reload the object from DB to revert possible rejected change
+            locked_obj.refresh_from_db()
+            return redirect_param(locked_obj, "#organize")
 
-    # Invalidate old stats
-    old_stats = list(obj.stats.get_update_objects())
+        # Invalidate old stats
+        old_stats = list(locked_obj.stats.get_update_objects())
 
-    obj = form.save()
+        obj = form.save()
 
-    # Invalidate new stats
-    obj.stats.update_parents(extra_objects=old_stats)
+        # Invalidate new stats
+        obj.stats.update_parents(extra_objects=old_stats)
 
-    return redirect(obj)
+        return redirect(obj)
 
 
 @login_required
@@ -271,6 +348,41 @@ def rename(request: AuthenticatedHttpRequest, path):
     if isinstance(obj, Category):
         return perform_rename(CategoryRenameForm, request, obj, "project.edit")
     return perform_rename(ProjectRenameForm, request, obj, "project.edit")
+
+
+@login_required
+@require_POST
+@transaction.atomic
+def move(request: AuthenticatedHttpRequest, path):
+    obj = parse_path(request, path, (Project,))
+    if not request.user.has_perm("project.edit", obj):
+        raise PermissionDenied
+
+    obj.acting_user = request.user
+    try:
+        obj.full_clean()
+    except ValidationError as err:
+        messages.error(
+            request,
+            gettext(
+                "Could not change %(obj)s due to an outstanding issue in its "
+                "settings: %(error)s"
+            )
+            % {"obj": obj, "error": err},
+        )
+        return redirect_param(obj, "#organize")
+
+    form = ProjectMoveForm(request, request.POST, instance=obj)
+    if not form.is_valid():
+        show_form_errors(request, form)
+        obj.refresh_from_db()
+        return redirect_param(obj, "#organize")
+
+    old_stats = list(obj.stats.get_update_objects())
+    moved = form.save()
+    moved.stats.update_parents(extra_objects=old_stats)
+    messages.success(request, gettext("Project moved."))
+    return redirect(moved)
 
 
 @login_required
@@ -289,14 +401,80 @@ def add_category(request: AuthenticatedHttpRequest, path):
 
 @login_required
 @require_POST
+def component_link_add(request: AuthenticatedHttpRequest, path):
+    obj = parse_path(request, path, (Component,))
+    if not request.user.has_perm("component.edit", obj):
+        raise PermissionDenied
+
+    form = ComponentLinkAddForm(
+        request.POST, request=request, component=obj, prefix="link_add"
+    )
+    if form.is_valid():
+        project = form.cleaned_data["project"]
+        category = form.cleaned_data["category"]
+        _link, created = ComponentLink.objects.get_or_create(
+            component=obj, project=project, defaults={"category": category}
+        )
+        if not created:
+            messages.error(
+                request,
+                gettext("This component is already shared in %s.") % project,
+            )
+    else:
+        show_form_errors(request, form)
+
+    return redirect_param(obj, "#sharing")
+
+
+@login_required
+@require_POST
+def component_link_delete(request: AuthenticatedHttpRequest, path):
+    obj = parse_path(request, path, (Component,))
+    if not request.user.has_perm("component.edit", obj):
+        raise PermissionDenied
+
+    link_id = request.POST.get("link_id")
+    try:
+        link = ComponentLink.objects.get(pk=link_id, component=obj)
+    except (ComponentLink.DoesNotExist, ValueError, TypeError) as e:
+        raise Http404 from e
+
+    link.delete()
+    return redirect_param(obj, "#sharing")
+
+
+@login_required
+@require_POST
+def component_link_categories(request: AuthenticatedHttpRequest, path):
+    obj = parse_path(request, path, (Component,))
+    if not request.user.has_perm("component.edit", obj):
+        raise PermissionDenied
+
+    # Look up the link first so we can pass the correct project to the form
+    link_id = request.POST.get("link_id")
+    try:
+        link = ComponentLink.objects.get(pk=link_id, component=obj)
+    except (ComponentLink.DoesNotExist, ValueError, TypeError) as e:
+        raise Http404 from e
+
+    form = ComponentLinkCategoryForm(request.POST, project=link.project)
+    if form.is_valid():
+        link.category = form.cleaned_data["category"]
+        link.save(update_fields=["category"])
+    else:
+        show_form_errors(request, form)
+
+    return redirect_param(obj, "#sharing")
+
+
+@login_required
+@require_POST
 def announcement(request: AuthenticatedHttpRequest, path):
     obj = parse_path(
         request, path, (ProjectLanguage, Translation, Component, Project, Category)
     )
 
-    if not request.user.has_perm("component.edit", obj) and not request.user.has_perm(
-        "announcement.add", obj
-    ):
+    if not request.user.has_perm("announcement.add", obj):
         raise PermissionDenied
 
     form = AnnouncementForm(request.POST)
@@ -310,7 +488,6 @@ def announcement(request: AuthenticatedHttpRequest, path):
         scope["project"] = obj.project
         scope["language"] = obj.language
     elif isinstance(obj, Category):
-        scope["project"] = obj.project
         scope["category"] = obj
     elif isinstance(obj, Translation):
         scope["project"] = obj.component.project
@@ -334,11 +511,14 @@ def announcement(request: AuthenticatedHttpRequest, path):
 @login_required
 @require_POST
 def announcement_delete(request: AuthenticatedHttpRequest, pk):
-    announcement = get_object_or_404(Announcement, pk=pk)
+    announcement = get_object_or_404(
+        Announcement.objects.filter_access(request.user), pk=pk
+    )
 
-    if request.user.has_perm("announcement.delete", announcement):
-        announcement.delete()
+    if not request.user.has_perm("announcement.delete", announcement):
+        raise PermissionDenied
 
+    announcement.delete()
     return JsonResponse({"responseStatus": 200})
 
 
@@ -351,7 +531,7 @@ def show_progress(request: AuthenticatedHttpRequest, path):
     or one of its languages.
     """
     obj = parse_path(request, path, (Project, Category, Component, Translation))
-    if isinstance(obj, Project | Category):
+    if isinstance(obj, (Project, Category)):
         return multi_progress(request, obj)
 
     return component_progress(request, obj)
@@ -360,10 +540,9 @@ def show_progress(request: AuthenticatedHttpRequest, path):
 def multi_progress(request: AuthenticatedHttpRequest, obj: Category | Project):
     components = list(obj.all_repo_components)
     return_target = obj
-    # There is no guide as in component view here
-    return_url = "show"
+    return_url = obj.get_absolute_url()
     if not any(component.in_progress() for component in components):
-        return redirect(return_url, path=return_target.get_url_path())
+        return redirect(return_url)
     return render(
         request,
         "multi-progress.html",
@@ -378,11 +557,15 @@ def multi_progress(request: AuthenticatedHttpRequest, obj: Category | Project):
 
 def component_progress(request: AuthenticatedHttpRequest, obj: Component | Translation):
     component = obj if isinstance(obj, Component) else obj.component
-    return_target = obj
-    return_url = "show" if "info" in request.GET else "guide"
+    if "info" in request.GET:
+        return_target = obj
+        return_url = obj.get_absolute_url()
+    else:
+        return_target = component
+        return_url = f"{component.get_absolute_url()}#alerts"
 
     if not component.in_progress():
-        return redirect(return_url, path=return_target.get_url_path())
+        return redirect(return_url)
 
     progress, log = component.get_progress()
 
@@ -412,7 +595,7 @@ class BackupsView(BackupsMixin, TemplateView):
     template_name = "trans/backups.html"
 
     def post(self, request: AuthenticatedHttpRequest, *args, **kwargs):
-        create_project_backup.delay(self.obj.pk)
+        create_project_backup.delay(self.obj.pk, request.user.pk)
         messages.success(
             request, gettext("Backup scheduled. It will be available soon.")
         )
@@ -423,14 +606,14 @@ class BackupsView(BackupsMixin, TemplateView):
         context["keep_count"] = settings.PROJECT_BACKUP_KEEP_COUNT
         context["keep_days"] = settings.PROJECT_BACKUP_KEEP_DAYS
         context["object"] = context["project"] = self.obj
-        context["backups"] = self.obj.list_backups()
+        context["backups"] = list_backups(self.obj)
         return context
 
 
 @method_decorator(login_required, name="dispatch")
 class BackupsDownloadView(BackupsMixin):
     def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):
-        for backup in self.obj.list_backups():
+        for backup in list_backups(self.obj):
             if backup["name"] != kwargs["backup"]:
                 continue
             # Generate random name for download

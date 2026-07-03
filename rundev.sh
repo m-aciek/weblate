@@ -50,7 +50,6 @@ test)
     shift
     docker compose exec -T \
         --env CI_BASE_DIR=/tmp \
-        --env CI_DATABASE=postgresql \
         --env CI_DB_HOST=database \
         --env CI_DB_NAME=weblate \
         --env CI_DB_USER=weblate \
@@ -85,7 +84,7 @@ start | restart | "")
     # Start it up
     docker compose up -d --force-recreate
     echo -e "\n${GREEN}Running development version of Weblate on http://${WEBLATE_HOST}/${NC}\n"
-    echo "maildev is runinng on http://localhost:1080/"
+    echo "maildev is running on http://localhost:1080/"
     ;;
 *)
     docker compose "$@"

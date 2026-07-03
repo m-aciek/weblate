@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import itertools
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from django.test import SimpleTestCase
 
@@ -21,64 +21,47 @@ from weblate.checks.fluent.syntax import (
     FluentSourceSyntaxCheck,
     FluentTargetSyntaxCheck,
 )
+from weblate.trans.tests.factories import make_check, make_unit
 
 if TYPE_CHECKING:
-    from weblate.checks.base import Check
-
-from weblate.checks.tests.test_checks import MockUnit
-
-
-class MockFluentTransUnit(MockUnit):
-    def __init__(
-        self,
-        source: str,
-        target: str = "",
-        fluent_type: str | None = None,
-        unit_id: str = "",
-        is_source: bool = False,
-    ) -> None:
-        self._fluent_type = fluent_type
-        flags = Flags()
-        if fluent_type:
-            flags.set_value("fluent-type", fluent_type)
-        flags.merge(
-            [
-                # Add flags so that should_skip returns False.
-                "fluent-source-syntax",
-                "fluent-target-syntax",
-                "fluent-parts",
-                "fluent-references",
-                "fluent-source-inner-html",
-                "fluent-target-inner-html",
-            ]
-        )
-        super().__init__(
-            flags=flags,
-            source=source,
-            target=target,
-            context=unit_id,
-            is_source=is_source,
-        )
-
-    def __str__(self) -> str:
-        fluent_type = self._fluent_type or ""
-        source = self.get_source_plurals()[0]
-        if self.is_source:
-            return f"{fluent_type} ({source!r})"
-        target = self.get_target_plurals()[0]
-        return f"{fluent_type} ({source!r} -> {target!r})"
+    from weblate.checks.base import BaseCheck, SourceCheck, TargetCheck
+    from weblate.trans.models import Unit
 
 
-class MockCheckModel:  # noqa: B903
-    # Mock Check object from weblate.checks.models
-    def __init__(self, unit: MockFluentTransUnit) -> None:
-        self.unit = unit
+def make_fluent_unit(
+    source: str,
+    target: str = "",
+    fluent_type: str | None = None,
+    unit_id: str = "",
+    is_source: bool = False,
+) -> Unit:
+    flags = Flags()
+    if fluent_type:
+        flags.set_value("fluent-type", fluent_type)
+    flags.merge(
+        [
+            # Add flags so that should_skip returns False.
+            "fluent-source-syntax",
+            "fluent-target-syntax",
+            "fluent-parts",
+            "fluent-references",
+            "fluent-source-inner-html",
+            "fluent-target-inner-html",
+        ]
+    )
+    return make_unit(
+        flags=flags,
+        source=source,
+        target=target,
+        context=unit_id,
+        is_source=is_source,
+    )
 
 
 class FluentCheckTestBase(SimpleTestCase):
     @staticmethod
-    def _create_source_unit(source: str, fluent_type: str) -> MockFluentTransUnit:
-        return MockFluentTransUnit(
+    def _create_source_unit(source: str, fluent_type: str) -> Unit:
+        return make_fluent_unit(
             source,
             target="",
             fluent_type=fluent_type,
@@ -87,10 +70,8 @@ class FluentCheckTestBase(SimpleTestCase):
         )
 
     @staticmethod
-    def _create_target_unit(
-        source: str, target: str, fluent_type: str
-    ) -> MockFluentTransUnit:
-        return MockFluentTransUnit(
+    def _create_target_unit(source: str, target: str, fluent_type: str) -> Unit:
+        return make_fluent_unit(
             source,
             target=target,
             fluent_type=fluent_type,
@@ -100,11 +81,11 @@ class FluentCheckTestBase(SimpleTestCase):
 
     def assert_check_description(
         self,
-        check: Check,
-        unit: MockFluentTransUnit,
-        description: str | re.Pattern,
+        check: BaseCheck,
+        unit: Unit,
+        description: str | re.Pattern[str],
     ) -> None:
-        check_desc = check.get_description(MockCheckModel(unit))
+        check_desc = str(check.get_description(make_check(unit, check)))
         if isinstance(description, str):
             self.assertHTMLEqual(
                 check_desc,
@@ -118,8 +99,11 @@ class FluentCheckTestBase(SimpleTestCase):
                 f"Description for {check.check_id} should match regex for {unit}",
             )
 
-    SOURCE_CHECKS = [FluentSourceSyntaxCheck(), FluentSourceInnerHTMLCheck()]
-    TARGET_CHECKS = [
+    SOURCE_CHECKS: ClassVar[list[SourceCheck]] = [
+        FluentSourceSyntaxCheck(),
+        FluentSourceInnerHTMLCheck(),
+    ]
+    TARGET_CHECKS: ClassVar[list[TargetCheck]] = [
         FluentTargetSyntaxCheck(),
         FluentPartsCheck(),
         FluentReferencesCheck(),
@@ -131,12 +115,12 @@ class FluentCheckTestBase(SimpleTestCase):
         source: str,
         target: str,
         fluent_type: str,
-        check_state: dict[type[Check], bool] | None = None,
+        check_state: dict[type[BaseCheck], bool] | None = None,
     ) -> None:
         if check_state is None:
             check_state = {}
         source_unit = self._create_source_unit(source, fluent_type)
-        check: Check
+        check: BaseCheck
         for check in self.SOURCE_CHECKS:
             if check_state.get(check.__class__, True):
                 self.assertFalse(
@@ -163,7 +147,7 @@ class FluentCheckTestBase(SimpleTestCase):
 
     def assert_source_check_passes(
         self,
-        check: Check,
+        check: BaseCheck,
         source: str,
         fluent_type: str,
     ) -> None:
@@ -175,7 +159,7 @@ class FluentCheckTestBase(SimpleTestCase):
 
     def assert_source_check_fails(
         self,
-        check: Check,
+        check: BaseCheck,
         source: str,
         fluent_type: str,
         description: str | re.Pattern,
@@ -189,7 +173,7 @@ class FluentCheckTestBase(SimpleTestCase):
 
     def assert_target_check_passes(
         self,
-        check: Check,
+        check: BaseCheck,
         source: str,
         target: str,
         fluent_type: str,
@@ -202,7 +186,7 @@ class FluentCheckTestBase(SimpleTestCase):
 
     def assert_target_check_fails(
         self,
-        check: Check,
+        check: BaseCheck,
         source: str,
         target: str,
         fluent_type: str,
@@ -217,14 +201,18 @@ class FluentCheckTestBase(SimpleTestCase):
 
     def assert_source_highlights(
         self,
-        check: Check,
+        check: BaseCheck,
         source: str,
         fluent_type: str,
         highlights: list[tuple[int, str]],
     ) -> None:
         unit = self._create_target_unit(source, "", fluent_type)
+        actual_highlights = check.check_highlight(source, unit)
         self.assertEqual(
-            check.check_highlight(source, unit),
+            [
+                (highlight.start, highlight.end, highlight.text)
+                for highlight in actual_highlights
+            ],
             [(start, start + len(string), string) for start, string in highlights],
             f"Highlights for {check.check_id} should match for {unit}",
         )
@@ -368,7 +356,7 @@ class FluentSourceSyntaxCheckTest(FluentCheckTestBase, FluentSyntaxCheckTestBase
         # Units with no fluent-type: flag are assumed to be messages or terms
         # based on the id.
         source = ".attr = ok"
-        unit = MockFluentTransUnit(
+        unit = make_fluent_unit(
             source,
             target="",
             fluent_type=None,
@@ -379,7 +367,7 @@ class FluentSourceSyntaxCheckTest(FluentCheckTestBase, FluentSyntaxCheckTestBase
             self.check.check_source_unit([source], unit),
             f"Syntax check should pass for {unit} with Message id",
         )
-        unit = MockFluentTransUnit(
+        unit = make_fluent_unit(
             source,
             target="",
             fluent_type=None,
@@ -414,7 +402,7 @@ class FluentTargetSyntaxCheckTest(FluentCheckTestBase, FluentSyntaxCheckTestBase
         # based on the id.
         source = "ok"
         target = ".attr = ok"
-        unit = MockFluentTransUnit(
+        unit = make_fluent_unit(
             source,
             target=target,
             fluent_type=None,
@@ -425,7 +413,7 @@ class FluentTargetSyntaxCheckTest(FluentCheckTestBase, FluentSyntaxCheckTestBase
             self.check.check_single(source, target, unit),
             f"Syntax check should pass for {unit} with Message id",
         )
-        unit = MockFluentTransUnit(
+        unit = make_fluent_unit(
             source,
             target=target,
             fluent_type=None,
@@ -570,7 +558,7 @@ class FluentPartsCheckTest(FluentCheckTestBase):
         # based on the id.
         source = "source\n.title = ok"
         target = "target"
-        unit = MockFluentTransUnit(
+        unit = make_fluent_unit(
             source,
             target=target,
             fluent_type=None,
@@ -581,7 +569,7 @@ class FluentPartsCheckTest(FluentCheckTestBase):
             self.check.check_single(source, target, unit),
             f"Parts check should fail for {unit} with Message id",
         )
-        unit = MockFluentTransUnit(
+        unit = make_fluent_unit(
             source,
             target=target,
             fluent_type=None,
@@ -639,6 +627,18 @@ class FluentPartsCheckTest(FluentCheckTestBase):
 class TestFluentReferencesCheck(FluentCheckTestBase):
     check = FluentReferencesCheck()
 
+    def test_highlight_kind(self) -> None:
+        unit = self._create_target_unit(
+            "source { $num } and { message }",
+            "",
+            "Message",
+        )
+        highlights = self.check.check_highlight(unit.source, unit)
+        self.assertEqual(
+            [(highlight.text, highlight.kind) for highlight in highlights],
+            [("{ $num }", "grammar"), ("{ message }", "grammar")],
+        )
+
     def test_same_refs(self) -> None:
         for matching_sources in (
             ("source", "target"),
@@ -671,233 +671,297 @@ class TestFluentReferencesCheck(FluentCheckTestBase):
             # With selectors.
             (
                 "with { -term }",
-                "with { -term.starts-with-vowel ->\n"
-                "  [yes] an { -term }\n"
-                " *[no] a { -term }\n"
-                "}",
+                (
+                    "with { -term.starts-with-vowel ->\n"
+                    "  [yes] an { -term }\n"
+                    " *[no] a { -term }\n"
+                    "}"
+                ),
                 "with { -term.starts-with-vowel ->\n  [yes] an\n *[no] a\n} { -term }",
                 "with { PLATFORM() ->\n  [linux] { -term }!\n *[other] { -term }\n}",
-                "with { -term.starts-with-vowel ->\n"
-                "  [yes] an { -term }\n"
-                " *[no] a { PLATFORM() ->\n"
-                "    [linux] { -term }!\n"
-                "   *[other] { -term }\n"
-                "  }\n"
-                "} more",
+                (
+                    "with { -term.starts-with-vowel ->\n"
+                    "  [yes] an { -term }\n"
+                    " *[no] a { PLATFORM() ->\n"
+                    "    [linux] { -term }!\n"
+                    "   *[other] { -term }\n"
+                    "  }\n"
+                    "} more"
+                ),
             ),
             (
                 "with { $var }",
-                "with { $var ->\n"
-                "  [one] { $var } variable\n"
-                " *[other] { $var } variables\n"
-                "}",
+                (
+                    "with { $var ->\n"
+                    "  [one] { $var } variable\n"
+                    " *[other] { $var } variables\n"
+                    "}"
+                ),
                 # $var is optional in the branch where we split over $var if the
                 # other branch contains it.
-                "with { $var ->\n"
-                "  [one] a variable\n"
-                " *[some] some variables\n"
-                "  [other] { $var } variables\n"
-                "}",
-                "with { $var ->\n"
-                "  [one] a variable\n"
-                "  [some] { NUMBER($var, param: 0) } variables\n"
-                " *[other] { $var } variables\n"
-                "}",
-                "with { $var ->\n"
-                "  [one] a variable\n"
-                " *[other] { FUNC($var) } variables\n"
-                "}",
+                (
+                    "with { $var ->\n"
+                    "  [one] a variable\n"
+                    " *[some] some variables\n"
+                    "  [other] { $var } variables\n"
+                    "}"
+                ),
+                (
+                    "with { $var ->\n"
+                    "  [one] a variable\n"
+                    "  [some] { NUMBER($var, param: 0) } variables\n"
+                    " *[other] { $var } variables\n"
+                    "}"
+                ),
+                (
+                    "with { $var ->\n"
+                    "  [one] a variable\n"
+                    " *[other] { FUNC($var) } variables\n"
+                    "}"
+                ),
                 # Extra variable in the selector is ok.
-                "with { FUNC2($var, $var2) ->\n"
-                "  [one] a variable\n"
-                " *[other] { $var } variables\n"
-                "}",
+                (
+                    "with { FUNC2($var, $var2) ->\n"
+                    "  [one] a variable\n"
+                    " *[other] { $var } variables\n"
+                    "}"
+                ),
                 # Appearing twice in the selector is ok.
-                "with { FUNC2($var, $var) ->\n"
-                "  [one] a variable\n"
-                " *[other] { $var } variables\n"
-                "}",
+                (
+                    "with { FUNC2($var, $var) ->\n"
+                    "  [one] a variable\n"
+                    " *[other] { $var } variables\n"
+                    "}"
+                ),
                 "with { $var }{ $var ->\n  [one] variable\n *[other] variables\n}",
                 # $var that is two selection expressions up still gets shared as
                 # long as each variant below has the same number of refs.
-                "with { $var ->\n"
-                "  [one] a variable\n"
-                " *[other] { PLATFORM() ->\n"
-                "    [linux] { $var } variables!\n"
-                "   *[other] { $var } variables\n"
-                "  }\n"
-                "}",
+                (
+                    "with { $var ->\n"
+                    "  [one] a variable\n"
+                    " *[other] { PLATFORM() ->\n"
+                    "    [linux] { $var } variables!\n"
+                    "   *[other] { $var } variables\n"
+                    "  }\n"
+                    "}"
+                ),
             ),
             (
                 # Two refs.
                 "{ $num } and { message }",
-                "{ $num ->\n"
-                "  [one] { $num } is { message }\n"
-                " *[other] { $num } are { message }\n"
-                "}",
+                (
+                    "{ $num ->\n"
+                    "  [one] { $num } is { message }\n"
+                    " *[other] { $num } are { message }\n"
+                    "}"
+                ),
                 "{ $num ->\n  [one] { $num } is\n *[other] { $num } are\n} { message }",
-                "{ $num ->\n"
-                "  [one] a person is { message }\n"
-                " *[other] { $num } people are { message }\n"
-                "}",
-                "{ $num ->\n"
-                "  [one] a person\n"
-                " *[other] { $num } people\n"
-                "} really { $num ->\n"
-                "  [one] is { message }\n"
-                " *[other] are { message }\n"
-                "}",
-                "{ message } for { $num ->\n"
-                "  [one] a person\n"
-                " *[other] { $num } people\n"
-                "}",
-                "{ $num ->\n"
-                "  [one] a person is { message }\n"
-                " *[other] { $num ->\n"
-                "    [2] a pair of people are { message }\n"
-                "   *[other] { $num } people are { message }\n"
-                "  }\n"
-                "}",
+                (
+                    "{ $num ->\n"
+                    "  [one] a person is { message }\n"
+                    " *[other] { $num } people are { message }\n"
+                    "}"
+                ),
+                (
+                    "{ $num ->\n"
+                    "  [one] a person\n"
+                    " *[other] { $num } people\n"
+                    "} really { $num ->\n"
+                    "  [one] is { message }\n"
+                    " *[other] are { message }\n"
+                    "}"
+                ),
+                (
+                    "{ message } for { $num ->\n"
+                    "  [one] a person\n"
+                    " *[other] { $num } people\n"
+                    "}"
+                ),
+                (
+                    "{ $num ->\n"
+                    "  [one] a person is { message }\n"
+                    " *[other] { $num ->\n"
+                    "    [2] a pair of people are { message }\n"
+                    "   *[other] { $num } people are { message }\n"
+                    "  }\n"
+                    "}"
+                ),
             ),
             (
                 # Two variable refs.
                 "{ $num } and { $var }",
-                "{ $num ->\n"
-                "  [zero] none\n"
-                " *[other] { $num }\n"
-                "} and { $var ->\n"
-                " *[yes] { $var }\n"
-                "  [no] none\n"
-                "}",
-                "{ $num ->\n"
-                "  [zero] none and { $var ->\n"
-                "   *[no] none\n"
-                "    [yes] { $var }"
-                "    [third] nope\n"
-                "  }\n"
-                " *[other] { $num } and { $var ->\n"
-                "   *[yes] { $var }\n"
-                "    [no] nothing\n"
-                "  }\n"
-                "}",
+                (
+                    "{ $num ->\n"
+                    "  [zero] none\n"
+                    " *[other] { $num }\n"
+                    "} and { $var ->\n"
+                    " *[yes] { $var }\n"
+                    "  [no] none\n"
+                    "}"
+                ),
+                (
+                    "{ $num ->\n"
+                    "  [zero] none and { $var ->\n"
+                    "   *[no] none\n"
+                    "    [yes] { $var }"
+                    "    [third] nope\n"
+                    "  }\n"
+                    " *[other] { $num } and { $var ->\n"
+                    "   *[yes] { $var }\n"
+                    "    [no] nothing\n"
+                    "  }\n"
+                    "}"
+                ),
                 # If both refs appear in the same selector, they can both be
                 # shared amongst the branches.
-                "{ FUNC($num, $var) ->\n"
-                "  [0] nothing\n"
-                " *[other] { $num } are { $var }\n"
-                "}",
-                "{ FUNC($var, $num) ->\n"
-                "  [0] nothing { $var }\n"
-                "  [1] a { $var }\n"
-                " *[other] just { $num }\n"
-                "}",
-                "{ FUNC($var, $num) ->\n"
-                "  [0] nothing { $var }\n"
-                "  [1] a { $num }\n"
-                " *[other] just { $num } and { $var }\n"
-                "}",
-                "{ FUNC($num, $var) ->\n"
-                "  [zero] none\n"
-                " *[other] { $num } and { $var ->\n"
-                "   *[yes] { $var }\n"
-                "    [no] nothing\n"
-                "  }\n"
-                "}",
-                "{ FUNC($num, $var) ->\n"
-                "  [zero] { $var ->\n"
-                "    [a] nothing\n"
-                "   *[b] { $var }\n"
-                "  }\n"
-                " *[other] { $num ->\n"
-                "   *[other] { $num }\n"
-                "    [zero] nothing\n"
-                "  }\n"
-                "}",
+                (
+                    "{ FUNC($num, $var) ->\n"
+                    "  [0] nothing\n"
+                    " *[other] { $num } are { $var }\n"
+                    "}"
+                ),
+                (
+                    "{ FUNC($var, $num) ->\n"
+                    "  [0] nothing { $var }\n"
+                    "  [1] a { $var }\n"
+                    " *[other] just { $num }\n"
+                    "}"
+                ),
+                (
+                    "{ FUNC($var, $num) ->\n"
+                    "  [0] nothing { $var }\n"
+                    "  [1] a { $num }\n"
+                    " *[other] just { $num } and { $var }\n"
+                    "}"
+                ),
+                (
+                    "{ FUNC($num, $var) ->\n"
+                    "  [zero] none\n"
+                    " *[other] { $num } and { $var ->\n"
+                    "   *[yes] { $var }\n"
+                    "    [no] nothing\n"
+                    "  }\n"
+                    "}"
+                ),
+                (
+                    "{ FUNC($num, $var) ->\n"
+                    "  [zero] { $var ->\n"
+                    "    [a] nothing\n"
+                    "   *[b] { $var }\n"
+                    "  }\n"
+                    " *[other] { $num ->\n"
+                    "   *[other] { $num }\n"
+                    "    [zero] nothing\n"
+                    "  }\n"
+                    "}"
+                ),
             ),
             (
                 # Same ref appears twice, it will also be shared across
                 # variants.
                 "{ $num } and { $num }",
                 "{ $num ->\n  [zero] none\n *[other] { $num } and { $num }\n}",
-                "{ $num ->\n"
-                "  [zero] none\n"
-                "  [one] just { $num }\n"
-                " *[other] { $num } and { $num }\n"
-                "}",
-                "{ $num ->\n"
-                "  [zero] none\n"
-                " *[other] { $num } and { $num ->\n"
-                "    [2] a pair\n"
-                "   *[other] { $num }\n"
-                "  }\n"
-                "}",
-                "{ $num ->\n"
-                "  [zero] none\n"
-                " *[other] have { $num ->\n"
-                "    [2] a pair\n"
-                "   *[other] { $num } and { $num }\n"
-                "  }\n"
-                "}",
+                (
+                    "{ $num ->\n"
+                    "  [zero] none\n"
+                    "  [one] just { $num }\n"
+                    " *[other] { $num } and { $num }\n"
+                    "}"
+                ),
+                (
+                    "{ $num ->\n"
+                    "  [zero] none\n"
+                    " *[other] { $num } and { $num ->\n"
+                    "    [2] a pair\n"
+                    "   *[other] { $num }\n"
+                    "  }\n"
+                    "}"
+                ),
+                (
+                    "{ $num ->\n"
+                    "  [zero] none\n"
+                    " *[other] have { $num ->\n"
+                    "    [2] a pair\n"
+                    "   *[other] { $num } and { $num }\n"
+                    "  }\n"
+                    "}"
+                ),
             ),
             (
                 # Have two variants with different refs, just need at least one
                 # match for each set of refs.
                 "value { PLATFORM() ->\n  [linux] none\n *[other] with { -term }\n}",
-                "value { PLATFORM() ->\n"
-                "  [linux] none\n"
-                "  [macos] and { -term }\n"
-                " *[other] with { -term }\n"
-                "}",
-                "value { -term.attr ->\n"
-                "  [a] none\n"
-                "  [b] another\n"
-                " *[c] with { -term }\n"
-                "}",
-                "value { -term.attr ->\n"
-                "  [a] none\n"
-                "  [b] another\n"
-                " *[c] with { -term }\n"
-                "} and { $var ->\n"
-                "  [one] some more\n"
-                " *[other] a lot\n"
-                "}",
+                (
+                    "value { PLATFORM() ->\n"
+                    "  [linux] none\n"
+                    "  [macos] and { -term }\n"
+                    " *[other] with { -term }\n"
+                    "}"
+                ),
+                (
+                    "value { -term.attr ->\n"
+                    "  [a] none\n"
+                    "  [b] another\n"
+                    " *[c] with { -term }\n"
+                    "}"
+                ),
+                (
+                    "value { -term.attr ->\n"
+                    "  [a] none\n"
+                    "  [b] another\n"
+                    " *[c] with { -term }\n"
+                    "} and { $var ->\n"
+                    "  [one] some more\n"
+                    " *[other] a lot\n"
+                    "}"
+                ),
             ),
             (
                 # Have three variants.
-                "{ $var ->\n"
-                " *[a] a { $num } and { -term }\n"
-                "  [b] { message.title } and b { $num }\n"
-                "  [c] c { $num }\n"
-                "}",
-                "{ $var ->\n"
-                " *[a] a { $num } and { -term }\n"
-                "  [b] { message.title } and b { $num }\n"
-                "  [c] c { $num }\n"
-                "  [d] d { -term } and { $num }\n"
-                "}",
-                "{ $var ->\n"
-                " *[a] a\n"
-                "  [b] { message.title }\n"
-                "  [c] c { -term }\n"
-                "} and { $num ->\n"
-                "  [one] single\n"
-                " *[other] { $num }\n"
-                "}",
+                (
+                    "{ $var ->\n"
+                    " *[a] a { $num } and { -term }\n"
+                    "  [b] { message.title } and b { $num }\n"
+                    "  [c] c { $num }\n"
+                    "}"
+                ),
+                (
+                    "{ $var ->\n"
+                    " *[a] a { $num } and { -term }\n"
+                    "  [b] { message.title } and b { $num }\n"
+                    "  [c] c { $num }\n"
+                    "  [d] d { -term } and { $num }\n"
+                    "}"
+                ),
+                (
+                    "{ $var ->\n"
+                    " *[a] a\n"
+                    "  [b] { message.title }\n"
+                    "  [c] c { -term }\n"
+                    "} and { $num ->\n"
+                    "  [one] single\n"
+                    " *[other] { $num }\n"
+                    "}"
+                ),
                 # Selector references are still shared amongst branches with
                 # different references.
-                "{ $num ->\n"
-                " *[other] a { $num } and { -term }\n"
-                "  [zero] none\n"
-                "  [one] { message.title }\n"
-                "}",
-                "{ $var ->\n"
-                " *[a] a { $num ->\n"
-                "    [one] { -term }\n"
-                "   *[other] { $num } { -term }\n"
-                "  } more\n"
-                "  [b] { message.title } and b { $num }\n"
-                "  [c] c { $num }\n"
-                "}",
+                (
+                    "{ $num ->\n"
+                    " *[other] a { $num } and { -term }\n"
+                    "  [zero] none\n"
+                    "  [one] { message.title }\n"
+                    "}"
+                ),
+                (
+                    "{ $var ->\n"
+                    " *[a] a { $num ->\n"
+                    "    [one] { -term }\n"
+                    "   *[other] { $num } { -term }\n"
+                    "  } more\n"
+                    "  [b] { message.title } and b { $num }\n"
+                    "  [c] c { $num }\n"
+                    "}"
+                ),
             ),
         ):
             # The check should be transitive and symmetric, so the check should
@@ -1043,11 +1107,13 @@ class TestFluentReferencesCheck(FluentCheckTestBase):
                 # All have the same refs.
                 "source { $num }",
                 "source { NUMBER($num) }",
-                "source { PLATFORM() ->\n"
-                "  [linux] { $num }!\n"
-                "  [macos] { $num }?\n"
-                " *[rest] { $num }\n"
-                "}",
+                (
+                    "source { PLATFORM() ->\n"
+                    "  [linux] { $num }!\n"
+                    "  [macos] { $num }?\n"
+                    " *[rest] { $num }\n"
+                    "}"
+                ),
                 "source { $num ->\n  [zero] nothing\n *[other] { $num }\n}",
             ):
                 self.assert_target_check_fails(
@@ -1205,18 +1271,22 @@ class TestFluentReferencesCheck(FluentCheckTestBase):
             for source in (
                 "{ $num } and { $var }",
                 "{ $var ->\n  *[yes] { $num } and { $var }\n   [no] { $num }\n}",
-                "{ $num ->\n"
-                "  *[other] { $num }\n"
-                "   [0] none\n"
-                "} and { $var ->\n"
-                '  [no] { "" }\n'
-                " *[yes] { $var }\n"
-                "}",
-                "{ FUNC($num, $var) ->\n"
-                "  *[yes] { $num } and { $var }\n"
-                "   [maybe] { $num }\n"
-                "   [no] nothing\n"
-                "}",
+                (
+                    "{ $num ->\n"
+                    "  *[other] { $num }\n"
+                    "   [0] none\n"
+                    "} and { $var ->\n"
+                    '  [no] { "" }\n'
+                    " *[yes] { $var }\n"
+                    "}"
+                ),
+                (
+                    "{ FUNC($num, $var) ->\n"
+                    "  *[yes] { $num } and { $var }\n"
+                    "   [maybe] { $num }\n"
+                    "   [no] nothing\n"
+                    "}"
+                ),
             ):
                 # If a sub-selector does not share the same references, it will
                 # not be shared across super-selectors either.
@@ -1526,7 +1596,7 @@ class TestFluentReferencesCheck(FluentCheckTestBase):
         # based on the id.
         source = "source\n.title = { -term }"
         target = "target\n.title = { $var }"
-        unit = MockFluentTransUnit(
+        unit = make_fluent_unit(
             source,
             target=target,
             fluent_type=None,
@@ -1537,7 +1607,7 @@ class TestFluentReferencesCheck(FluentCheckTestBase):
             self.check.check_single(source, target, unit),
             f"References check should fail for {unit} with Message id",
         )
-        unit = MockFluentTransUnit(
+        unit = make_fluent_unit(
             source,
             target=target,
             fluent_type=None,
@@ -1696,7 +1766,7 @@ class FluentInnerHTMLCheckTestBase:
             "with <SPAN>capitals</SPAN> or <sPaN>mix</sPaN>",
             "with <span DATA-val='something'></span>",
             # Can include a "'" in double quotes.
-            "before <img data-val1=\"val'ue\" other='ok'/> after",
+            "before <img data-val1=\"val'ue\" other='ok'/> after",  # codespell:ignore
             # And '"' in single quotes.
             'before <my-img data-val=\'val"ue\' other="ok"></my-img> after',  # codespell:ignore
             # Empty values.
@@ -1760,22 +1830,28 @@ class FluentInnerHTMLCheckTestBase:
             # With variants, each variant is parsed individually.
             "<p>add ${ $n ->\n  [one] { $n } tab\n *[other] { $n } tabs\n}</p>",
             # Need not match.
-            "<p>add ${ $n ->\n"
-            "  [one] { $n } tab <br> more\n"
-            " *[other] { $n } tabs\n"
-            "}</p>",
-            "<p>add ${ $n ->\n"
-            "  [one] { $n } tab <br> more\n"
-            " *[other] { $n } tabs\n"
-            "} and ${ $var ->\n"
-            "  [yes] <img>\n"
-            " *[no] none\n"
-            "}</p>",
-            "<p>add ${ PLATFORM() ->\n"
-            "  [linux] tab </p>\n"
-            "  [macos] <em data-var='ok'>{ -term }</em> tabs </p>\n"
-            " *[other] { $n } <br> tabs </p>\n"
-            "}",
+            (
+                "<p>add ${ $n ->\n"
+                "  [one] { $n } tab <br> more\n"
+                " *[other] { $n } tabs\n"
+                "}</p>"
+            ),
+            (
+                "<p>add ${ $n ->\n"
+                "  [one] { $n } tab <br> more\n"
+                " *[other] { $n } tabs\n"
+                "} and ${ $var ->\n"
+                "  [yes] <img>\n"
+                " *[no] none\n"
+                "}</p>"
+            ),
+            (
+                "<p>add ${ PLATFORM() ->\n"
+                "  [linux] tab </p>\n"
+                "  [macos] <em data-var='ok'>{ -term }</em> tabs </p>\n"
+                " *[other] { $n } <br> tabs </p>\n"
+                "}"
+            ),
         ):
             for fluent_type in ("Message", "Term"):
                 self.assert_html_ok(value, fluent_type)
@@ -1790,14 +1866,14 @@ class FluentInnerHTMLCheckTestBase:
                 "a<{ $var }",
                 fluent_type,
                 "The Fluent reference in <code>&lt;{ $var }</code> may expand "
-                "into a HTML tag. Maybe use <code>&amp;lt;{ $var }</code>.",
+                "into an HTML tag. Maybe use <code>&amp;lt;{ $var }</code>.",
             )
             self.assert_html_error(
                 'before <span>a<{ -term(param: 5, p2: "yes") }b</span> after',
                 fluent_type,
                 "The Fluent reference in "
                 '<code>&lt;{ -term(param: 5, p2: "yes") }</code> '
-                "may expand into a HTML tag. Maybe use "
+                "may expand into an HTML tag. Maybe use "
                 '<code>&amp;lt;{ -term(param: 5, p2: "yes") }</code>.',
             )
             # Putting the "<" in a literal will not help.
@@ -1805,33 +1881,33 @@ class FluentInnerHTMLCheckTestBase:
                 'a { "<" }{ $var }',
                 fluent_type,
                 "The Fluent reference in <code>&lt;{ $var }</code> may expand "
-                "into a HTML tag. Maybe use <code>&amp;lt;{ $var }</code>.",
+                "into an HTML tag. Maybe use <code>&amp;lt;{ $var }</code>.",
             )
             # Even unicode escape for "<".
             self.assert_html_error(
                 '{ "a \\u003c" }{ $var }',
                 fluent_type,
                 "The Fluent reference in <code>&lt;{ $var }</code> may expand "
-                "into a HTML tag. Maybe use <code>&amp;lt;{ $var }</code>.",
+                "into an HTML tag. Maybe use <code>&amp;lt;{ $var }</code>.",
             )
             self.assert_html_error(
                 'a { "\\U00003C" }{ $var }',
                 fluent_type,
                 "The Fluent reference in <code>&lt;{ $var }</code> may expand "
-                "into a HTML tag. Maybe use <code>&amp;lt;{ $var }</code>.",
+                "into an HTML tag. Maybe use <code>&amp;lt;{ $var }</code>.",
             )
             self.assert_html_error(
                 "a&{ FUNC($var) }",
                 fluent_type,
                 "The Fluent reference in <code>&amp;{ FUNC($var) }</code> may "
-                "expand into a HTML character reference. Maybe use "
+                "expand into an HTML character reference. Maybe use "
                 "<code>&amp;amp;{ FUNC($var) }</code>.",
             )
             self.assert_html_error(
                 "before <p data-val='&{ -term }'>x</p>",
                 fluent_type,
                 "The Fluent reference in <code>&amp;{ -term }</code> may "
-                "expand into a HTML character reference. Maybe use "
+                "expand into an HTML character reference. Maybe use "
                 "<code>&amp;amp;{ -term }</code>.",
             )
 
@@ -1877,49 +1953,49 @@ class FluentInnerHTMLCheckTestBase:
             self.assert_html_error(
                 "<span>hello</ span>",
                 fluent_type,
-                "The sequence <code>&lt;/</code> begins with a HTML closing tag, "
+                "The sequence <code>&lt;/</code> begins with an HTML closing tag, "
                 "but the name or syntax is not valid. If you do not want a "
                 "closing tag, use <code>&amp;lt;/</code>.",
             )
             self.assert_html_error(
                 "hello</>",
                 fluent_type,
-                "The sequence <code>&lt;/</code> begins with a HTML closing tag, "
+                "The sequence <code>&lt;/</code> begins with an HTML closing tag, "
                 "but the name or syntax is not valid. If you do not want a "
                 "closing tag, use <code>&amp;lt;/</code>.",
             )
             self.assert_html_error(
                 "hello</",
                 fluent_type,
-                "The sequence <code>&lt;/</code> begins with a HTML closing tag, "
+                "The sequence <code>&lt;/</code> begins with an HTML closing tag, "
                 "but the name or syntax is not valid. If you do not want a "
                 "closing tag, use <code>&amp;lt;/</code>.",
             )
             self.assert_html_error(
                 "<span>hello</span",
                 fluent_type,
-                "The sequence <code>&lt;/span</code> begins with a HTML closing tag, "
+                "The sequence <code>&lt;/span</code> begins with an HTML closing tag, "
                 "but the name or syntax is not valid. If you do not want a "
                 "closing tag, use <code>&amp;lt;/span</code>.",
             )
             self.assert_html_error(
                 "<span>hello</span hidden=''>",
                 fluent_type,
-                "The sequence <code>&lt;/span</code> begins with a HTML closing tag, "
+                "The sequence <code>&lt;/span</code> begins with an HTML closing tag, "
                 "but the name or syntax is not valid. If you do not want a "
                 "closing tag, use <code>&amp;lt;/span</code>.",
             )
             self.assert_html_error(
                 "<span>hello</5>",
                 fluent_type,
-                "The sequence <code>&lt;/5</code> begins with a HTML closing tag, "
+                "The sequence <code>&lt;/5</code> begins with an HTML closing tag, "
                 "but the name or syntax is not valid. If you do not want a "
                 "closing tag, use <code>&amp;lt;/5</code>.",
             )
             self.assert_html_error(
                 "<span>hello</sp~n>",
                 fluent_type,
-                "The sequence <code>&lt;/sp~n</code> begins with a HTML closing tag, "
+                "The sequence <code>&lt;/sp~n</code> begins with an HTML closing tag, "
                 "but the name or syntax is not valid. If you do not want a "
                 "closing tag, use <code>&amp;lt;/sp~n</code>.",
             )
@@ -1928,23 +2004,23 @@ class FluentInnerHTMLCheckTestBase:
             self.assert_html_error(
                 "a <sp~n and",
                 fluent_type,
-                "The sequence <code>&lt;sp~n</code> begins with a HTML tag, "
-                "but the name is not valid. If you do not want to begin a HTML "
+                "The sequence <code>&lt;sp~n</code> begins with an HTML tag, "
+                "but the name is not valid. If you do not want to begin an HTML "
                 "tag, use <code>&amp;lt;sp~n</code>.",
             )
             # Fluent literal does not help.
             self.assert_html_error(
                 'a { "<" }sp~n and',
                 fluent_type,
-                "The sequence <code>&lt;sp~n</code> begins with a HTML tag, "
-                "but the name is not valid. If you do not want to begin a HTML "
+                "The sequence <code>&lt;sp~n</code> begins with an HTML tag, "
+                "but the name is not valid. If you do not want to begin an HTML "
                 "tag, use <code>&amp;lt;sp~n</code>.",
             )
             self.assert_html_error(
                 "a <sp~n> and </sp~n>",
                 fluent_type,
-                "The sequence <code>&lt;sp~n</code> begins with a HTML tag, "
-                "but the name is not valid. If you do not want to begin a HTML "
+                "The sequence <code>&lt;sp~n</code> begins with an HTML tag, "
+                "but the name is not valid. If you do not want to begin an HTML "
                 "tag, use <code>&amp;lt;sp~n</code>.",
             )
             # Technically an allowed custom name, but not allowed by our parser
@@ -1952,8 +2028,8 @@ class FluentInnerHTMLCheckTestBase:
             self.assert_html_error(
                 "a <my-😄> and </my-😄>",
                 fluent_type,
-                "The sequence <code>&lt;my-😄</code> begins with a HTML tag, "
-                "but the name is not valid. If you do not want to begin a HTML "
+                "The sequence <code>&lt;my-😄</code> begins with an HTML tag, "
+                "but the name is not valid. If you do not want to begin an HTML "
                 "tag, use <code>&amp;lt;my-😄</code>.",
             )
 
@@ -1961,57 +2037,57 @@ class FluentInnerHTMLCheckTestBase:
             self.assert_html_error(
                 "a <div",
                 fluent_type,
-                "The sequence <code>&lt;div</code> begins with a HTML tag, "
+                "The sequence <code>&lt;div</code> begins with an HTML tag, "
                 "but the tag is never closed by <code>></code>. If you do not "
-                "want to begin a HTML tag, use <code>&amp;lt;div</code>.",
+                "want to begin an HTML tag, use <code>&amp;lt;div</code>.",
             )
             self.assert_html_error(
                 "a <div data-val=''",
                 fluent_type,
-                "The sequence <code>&lt;div</code> begins with a HTML tag, "
+                "The sequence <code>&lt;div</code> begins with an HTML tag, "
                 "but the tag is never closed by <code>></code>. If you do not "
-                "want to begin a HTML tag, use <code>&amp;lt;div</code>.",
+                "want to begin an HTML tag, use <code>&amp;lt;div</code>.",
             )
             self.assert_html_error(
                 "a <img data-val='a' \n\t",
                 fluent_type,
-                "The sequence <code>&lt;img</code> begins with a HTML tag, "
+                "The sequence <code>&lt;img</code> begins with an HTML tag, "
                 "but the tag is never closed by <code>></code>. If you do not "
-                "want to begin a HTML tag, use <code>&amp;lt;img</code>.",
+                "want to begin an HTML tag, use <code>&amp;lt;img</code>.",
             )
 
             # Invalid attribute, with no equal sign.
             self.assert_html_error(
                 "a <span attr",
                 fluent_type,
-                "The sequence <code>&lt;span</code> begins with a HTML tag, "
+                "The sequence <code>&lt;span</code> begins with an HTML tag, "
                 "but the sequence <code>attr</code> is not a valid attribute "
-                "with a value. If you do not want to begin a HTML tag, use "
+                "with a value. If you do not want to begin an HTML tag, use "
                 "<code>&amp;lt;span</code>.",
             )
             self.assert_html_error(
                 "a <span class='val' attr and more",
                 fluent_type,
-                "The sequence <code>&lt;span</code> begins with a HTML tag, "
+                "The sequence <code>&lt;span</code> begins with an HTML tag, "
                 "but the sequence <code>attr</code> is not a valid attribute "
-                "with a value. If you do not want to begin a HTML tag, use "
+                "with a value. If you do not want to begin an HTML tag, use "
                 "<code>&amp;lt;span</code>.",
             )
             self.assert_html_error(
                 "a <p><em att*va>content</em></p>",
                 fluent_type,
-                "The sequence <code>&lt;em</code> begins with a HTML tag, "
+                "The sequence <code>&lt;em</code> begins with an HTML tag, "
                 "but the sequence <code>att*va</code> is not a valid attribute "
-                "with a value. If you do not want to begin a HTML tag, use "
+                "with a value. If you do not want to begin an HTML tag, use "
                 "<code>&amp;lt;em</code>.",
             )
             # Attribute with no value.
             self.assert_html_error(
                 "a <p><img attr></p>",
                 fluent_type,
-                "The sequence <code>&lt;img</code> begins with a HTML tag, "
+                "The sequence <code>&lt;img</code> begins with an HTML tag, "
                 "but the sequence <code>attr</code> is not a valid attribute "
-                "with a value. If you do not want to begin a HTML tag, use "
+                "with a value. If you do not want to begin an HTML tag, use "
                 "<code>&amp;lt;img</code>.",
             )
 
@@ -2143,7 +2219,7 @@ class FluentInnerHTMLCheckTestBase:
             self.assert_html_error(
                 "nice&ethical",
                 fluent_type,
-                "The sequence <code>&amp;ethical</code> will begin a HTML "
+                "The sequence <code>&amp;ethical</code> will begin an HTML "
                 "character reference, but does not end with "
                 "<code>;</code>. If you do not want a character reference, "
                 "use <code>&amp;amp;ethical</code>.",
@@ -2151,7 +2227,7 @@ class FluentInnerHTMLCheckTestBase:
             self.assert_html_error(
                 "<p>character &#90</p>",
                 fluent_type,
-                "The sequence <code>&amp;#90</code> will begin a HTML "
+                "The sequence <code>&amp;#90</code> will begin an HTML "
                 "character reference, but does not end with "
                 "<code>;</code>. If you do not want a character reference, "
                 "use <code>&amp;amp;#90</code>.",
@@ -2159,7 +2235,7 @@ class FluentInnerHTMLCheckTestBase:
             self.assert_html_error(
                 "<p class='a&gt~hello'>content</p>",
                 fluent_type,
-                "The sequence <code>&amp;gt</code> will begin a HTML "
+                "The sequence <code>&amp;gt</code> will begin an HTML "
                 "character reference, but does not end with "
                 "<code>;</code>. If you do not want a character reference, "
                 "use <code>&amp;amp;gt</code>.",
@@ -2206,14 +2282,14 @@ class FluentInnerHTMLCheckTestBase:
                 "}",
                 fluent_type,
                 "The Fluent reference in <code>&lt;{ $num }</code> may expand "
-                "into a HTML tag. Maybe use <code>&amp;lt;{ $num }</code>.",
+                "into an HTML tag. Maybe use <code>&amp;lt;{ $num }</code>.",
             )
             self.assert_html_error(
                 "a <{ $var ->\n  [zero] none\n *[other] { $var }\n}",
                 fluent_type,
-                "The sequence <code>&lt;none</code> begins with a HTML tag, "
+                "The sequence <code>&lt;none</code> begins with an HTML tag, "
                 "but the tag is never closed by <code>></code>. If you do not "
-                "want to begin a HTML tag, use <code>&amp;lt;none</code>.",
+                "want to begin an HTML tag, use <code>&amp;lt;none</code>.",
             )
 
 
@@ -2291,54 +2367,70 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
             # With selectors.
             (
                 "<p>a<i>{ $num }</i>c and <img data-val='ok'></p>",
-                "<p>{ $num ->\n"
-                "  [zero] <i>none</i>\n"
-                " *[other] <i>{ $num }</i>\n"
-                "} and <img data-val='ok' ></p>",
-                "<p>{ $num ->\n"
-                '  [zero] <img data-val="ok"/> <i>none</i></p>\n'
-                " *[other] <i>{ $num }</i> and <img data-val='ok'></p>\n"
-                "}",
-                "<p> <i>{ $num ->\n"
-                "  [zero] none\n"
-                "  [one] one\n"
-                " *[other] { $num }\n"
-                "}</i> and { FUNC() ->\n"
-                "  [a] a <img data-val='ok'></p>\n"
-                " *[b] b <img data-val='ok'></p>\n"
-                "}",
+                (
+                    "<p>{ $num ->\n"
+                    "  [zero] <i>none</i>\n"
+                    " *[other] <i>{ $num }</i>\n"
+                    "} and <img data-val='ok' ></p>"
+                ),
+                (
+                    "<p>{ $num ->\n"
+                    '  [zero] <img data-val="ok"/> <i>none</i></p>\n'
+                    " *[other] <i>{ $num }</i> and <img data-val='ok'></p>\n"
+                    "}"
+                ),
+                (
+                    "<p> <i>{ $num ->\n"
+                    "  [zero] none\n"
+                    "  [one] one\n"
+                    " *[other] { $num }\n"
+                    "}</i> and { FUNC() ->\n"
+                    "  [a] a <img data-val='ok'></p>\n"
+                    " *[b] b <img data-val='ok'></p>\n"
+                    "}"
+                ),
             ),
             # With selectors with different elements in each variant.
             (
-                "{ FUNC() ->\n"
-                "  [yes] <img data-val1='yes' data-val2='y'> and <br>\n"
-                " *[no] <img data-val1='no'> and <br> and <i>more</i>\n"
-                "}",
-                "<img { FUNC() ->\n"
-                "  [yes] data-val1='yes' data-val2='y'>\n"
-                " *[no] data-val1='no'> and <i>more</i>\n"
-                "} and <br>",
+                (
+                    "{ FUNC() ->\n"
+                    "  [yes] <img data-val1='yes' data-val2='y'> and <br>\n"
+                    " *[no] <img data-val1='no'> and <br> and <i>more</i>\n"
+                    "}"
+                ),
+                (
+                    "<img { FUNC() ->\n"
+                    "  [yes] data-val1='yes' data-val2='y'>\n"
+                    " *[no] data-val1='no'> and <i>more</i>\n"
+                    "} and <br>"
+                ),
             ),
             (
-                "<p>{ $var ->\n"
-                "  [b] add <b>tag</b>\n"
-                " *[i] add <i data-val='some val'>tag</i>\n"
-                "  [strong] add <strong>t<br>ag</strong>\n"
-                "}</p>",
-                "<p>{ FUNC($var) ->\n"
-                "  [x] add <b>tag</b>\n"
-                "  [i] add <i data-val='some val'>tag</i>\n"
-                "  [strong] <strong><br></strong>\n"
-                " *[y] add <b>tags</b>\n"
-                "}</p>",
-                "{ FUNC($var) ->\n"
-                "  [x] <p> add <b>tag</b>\n"
-                "  [i] <p>add <i data-val='some val'>tag</i> more\n"
-                " *[strong] <p>{ $var ->\n"
-                "    [a] <strong><br></strong>\n"
-                "   *[b] <strong>before<br>after</strong>\n"
-                "  }\n"
-                "}</p>",
+                (
+                    "<p>{ $var ->\n"
+                    "  [b] add <b>tag</b>\n"
+                    " *[i] add <i data-val='some val'>tag</i>\n"
+                    "  [strong] add <strong>t<br>ag</strong>\n"
+                    "}</p>"
+                ),
+                (
+                    "<p>{ FUNC($var) ->\n"
+                    "  [x] add <b>tag</b>\n"
+                    "  [i] add <i data-val='some val'>tag</i>\n"
+                    "  [strong] <strong><br></strong>\n"
+                    " *[y] add <b>tags</b>\n"
+                    "}</p>"
+                ),
+                (
+                    "{ FUNC($var) ->\n"
+                    "  [x] <p> add <b>tag</b>\n"
+                    "  [i] <p>add <i data-val='some val'>tag</i> more\n"
+                    " *[strong] <p>{ $var ->\n"
+                    "    [a] <strong><br></strong>\n"
+                    "   *[b] <strong>before<br>after</strong>\n"
+                    "  }\n"
+                    "}</p>"
+                ),
             ),
         ):
             # The check should be transitive and symmetric, so the check should
@@ -2354,7 +2446,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<strong>source</strong>",
                 "target",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 "<code>&lt;strong&gt;…&lt;/strong&gt;</code> tag.",
             )
             self.assert_target_check_fails(
@@ -2362,7 +2454,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<em>source</em>\n.title = text",
                 "target\n.title = <em>text</em>",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 "<code>&lt;em&gt;…&lt;/em&gt;</code> tag.",
             )
             # For void elements, the tag is serialized as self-closing.
@@ -2371,14 +2463,14 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "with <img/>",
                 "target",
                 fluent_type,
-                "Fluent value is missing a HTML <code>&lt;img/&gt;</code> tag.",
+                "Fluent value is missing an HTML <code>&lt;img/&gt;</code> tag.",
             )
             self.assert_target_check_fails(
                 self.check,
                 "with <br>",
                 "target",
                 fluent_type,
-                "Fluent value is missing a HTML <code>&lt;br/&gt;</code> tag.",
+                "Fluent value is missing an HTML <code>&lt;br/&gt;</code> tag.",
             )
             # With attribute.
             self.assert_target_check_fails(
@@ -2386,7 +2478,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "with <a data-val='ok'>text</a>",
                 "target",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 '<code>&lt;a data-val="ok"&gt;…&lt;/a&gt;</code> tag.',
             )
             # When attribute value contains a double-quote, the serialized tag
@@ -2396,7 +2488,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "with <a data-val='ok\"' class='other'>text</a>",
                 "target",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 '<code>&lt;a data-val=\'ok"\' class="other"&gt;'
                 "…&lt;/a&gt;</code> tag.",
             )
@@ -2417,7 +2509,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "source<br>has<br>two",
                 "target<br>one",
                 fluent_type,
-                "Fluent value is missing a HTML <code>&lt;br/&gt;</code> tag.",
+                "Fluent value is missing an HTML <code>&lt;br/&gt;</code> tag.",
             )
             self.assert_target_check_fails(
                 self.check,
@@ -2434,7 +2526,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<i>source</i> <img>",
                 "<img> <em data-val='ok'>target</em> val",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 "<code>&lt;i&gt;…&lt;/i&gt;</code> tag.<br>"
                 "Fluent value has an unexpected extra HTML "
                 '<code>&lt;em data-val="ok"&gt;…&lt;/em&gt;</code> tag.',
@@ -2446,7 +2538,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<p>first<br>expected</p>",
                 "<p>missing br</p>",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 "<code>&lt;p&gt;&lt;br/&gt;&lt;/p&gt;</code> tag.",
             )
             self.assert_target_check_fails(
@@ -2454,7 +2546,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<p>first<br>expected</p>",
                 "<p>missing <i>a<br>b</i></p>",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 "<code>&lt;p&gt;&lt;br/&gt;&lt;/p&gt;</code> tag.<br>"
                 "Fluent value has an unexpected extra HTML "
                 "<code>&lt;p&gt;&lt;i&gt;…&lt;/i&gt;&lt;/p&gt;</code> tag.<br>"
@@ -2468,7 +2560,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "add <p>with<img></p>",
                 "<p>with</p> <img>",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 "<code>&lt;p&gt;&lt;img/&gt;&lt;/p&gt;</code> tag.<br>"
                 "Fluent value has an unexpected extra HTML "
                 "<code>&lt;img/&gt;</code> tag.",
@@ -2478,7 +2570,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<em>first</em> and <strong>second</strong>",
                 "<em>first and <strong>second</strong></em>",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 "<code>&lt;strong&gt;…&lt;/strong&gt;</code> tag.<br>"
                 "Fluent value has an unexpected extra HTML "
                 "<code>&lt;em&gt;&lt;strong&gt;"
@@ -2491,7 +2583,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<span data-val='ok'>text</span> more",
                 "<span>text</span> more",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 '<code>&lt;span data-val="ok"&gt;…&lt;/span&gt;</code> tag.<br>'
                 "Fluent value has an unexpected extra HTML "
                 "<code>&lt;span&gt;…&lt;/span&gt;</code> tag.",
@@ -2501,7 +2593,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<span data-val='ok'>text</span> more",
                 "<span data-val='not'>text</span> more",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 '<code>&lt;span data-val="ok"&gt;…&lt;/span&gt;</code> tag.<br>'
                 "Fluent value has an unexpected extra HTML "
                 '<code>&lt;span data-val="not"&gt;…&lt;/span&gt;</code> tag.',
@@ -2513,7 +2605,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                 "<SPAN>text</SPAN> more",
                 "<span>text</span> more",
                 fluent_type,
-                "Fluent value is missing a HTML "
+                "Fluent value is missing an HTML "
                 "<code>&lt;SPAN&gt;…&lt;/SPAN&gt;</code> tag.<br>"
                 "Fluent value has an unexpected extra HTML "
                 "<code>&lt;span&gt;…&lt;/span&gt;</code> tag.",
@@ -2522,19 +2614,25 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
             # With selectors in the source that all have the same tags.
             for source in (
                 # Equivalent sources.
-                "<p class='ok'><span data-val='a'>first</span><br>"
-                "<span data-val='b'>second</span></p>",
-                "<p class='ok'>{ FUNC() ->\n"
-                "  [a] <span data-val='a'>a</span><br>"
-                "<span data-val='b'>b</span>\n"
-                " *[b] <span data-val='b'>B</span><br>"
-                "<span data-val='a'>A</span>\n"
-                "}</p>",
-                '<p class="ok"><span data-val="a"></span><br>{ $var ->\n'
-                "  [1] <span data-val='b'>one</span></p>\n"
-                "  [2] <span data-val='b'>two</span></p>\n"
-                " *[3] <span data-val='b'>three</span></p>\n"
-                "}",
+                (
+                    "<p class='ok'><span data-val='a'>first</span><br>"
+                    "<span data-val='b'>second</span></p>"
+                ),
+                (
+                    "<p class='ok'>{ FUNC() ->\n"
+                    "  [a] <span data-val='a'>a</span><br>"
+                    "<span data-val='b'>b</span>\n"
+                    " *[b] <span data-val='b'>B</span><br>"
+                    "<span data-val='a'>A</span>\n"
+                    "}</p>"
+                ),
+                (
+                    '<p class="ok"><span data-val="a"></span><br>{ $var ->\n'
+                    "  [1] <span data-val='b'>one</span></p>\n"
+                    "  [2] <span data-val='b'>two</span></p>\n"
+                    " *[3] <span data-val='b'>three</span></p>\n"
+                    "}"
+                ),
             ):
                 self.assert_target_check_fails(
                     self.check,
@@ -2543,7 +2641,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                     "<span data-val='a'>first</span><br>"
                     '<span data-val="a">second</span></p>',
                     fluent_type,
-                    "Fluent value is missing a HTML "
+                    "Fluent value is missing an HTML "
                     '<code>&lt;p class="ok"&gt;&lt;span data-val="b"&gt;'
                     "…&lt;/span&gt;&lt;/p&gt;</code> tag.<br>"
                     "Fluent value has an unexpected extra HTML "
@@ -2562,7 +2660,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                     " *[b] <span data-val='b'>B</span>\n"
                     "}</p> and <img>",
                     fluent_type,
-                    "Fluent value is missing a HTML "
+                    "Fluent value is missing an HTML "
                     '<code>&lt;p class="ok"&gt;&lt;br/&gt;&lt;/p&gt;</code> '
                     "tag.<br>Fluent value has an unexpected extra HTML "
                     "<code>&lt;img/&gt;</code> tag.",
@@ -2580,7 +2678,7 @@ class FluentTargetInnerHTMLCheckTest(FluentCheckTestBase, FluentInnerHTMLCheckTe
                     " *[c] <span data-val='b'>C</span>\n"
                     "}</p>",
                     fluent_type,
-                    "Fluent value is missing a HTML "
+                    "Fluent value is missing an HTML "
                     '<code>&lt;p class="ok"&gt;&lt;br/&gt;&lt;/p&gt;</code> '
                     "tag for the following variants: "
                     "<code>[no][b], [no][c]</code>.<br>"

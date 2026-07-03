@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from django import forms
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
@@ -14,8 +16,11 @@ from django.utils.translation import gettext, gettext_lazy
 from weblate.accounts.forms import FullNameField, UniqueEmailMixin, UniqueUsernameField
 from weblate.accounts.utils import remove_user
 from weblate.auth.data import ROLES
-from weblate.auth.models import AuthenticatedHttpRequest, AutoGroup, Group, Role, User
+from weblate.auth.models import AutoGroup, Group, Role, TeamMembership, User
 from weblate.wladmin.models import WeblateModelAdmin
+
+if TYPE_CHECKING:
+    from weblate.auth.models import AuthenticatedHttpRequest
 
 BUILT_IN_ROLES = {role[0] for role in ROLES}
 
@@ -32,7 +37,8 @@ def block_role_edit(obj: Role):
 class AutoGroupChangeForm(forms.ModelForm):
     class Meta:
         model = AutoGroup
-        fields = "__all__"  # noqa: DJ007
+        # ruff: ignore[django-all-with-model-form]
+        fields = "__all__"
 
     def has_changed(self) -> bool:
         """
@@ -64,6 +70,14 @@ class InlineAutoGroupAdmin(admin.TabularInline):
         return super().has_delete_permission(request, obj)
 
 
+class UserTeamMembershipInline(admin.TabularInline):
+    model = TeamMembership
+    fk_name = "user"
+    extra = 0
+    autocomplete_fields = ("group",)
+    filter_horizontal = ("limit_languages",)
+
+
 @admin.register(Role)
 class RoleAdmin(WeblateModelAdmin):
     list_display = ("name",)
@@ -84,12 +98,18 @@ class WeblateUserChangeForm(UserChangeForm):
     class Meta:
         model = User
         fields = "__all__"
-        field_classes = {"username": UniqueUsernameField, "full_name": FullNameField}
+        # ruff: ignore[mutable-class-default]
+        field_classes = {
+            "username": UniqueUsernameField,
+            "full_name": FullNameField,
+        }
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.fields["email"].required = True
-        self.fields["username"].valid = self.instance.username
+        cast(
+            "UniqueUsernameField", self.fields["username"]
+        ).valid = self.instance.username
 
 
 class WeblateUserCreationForm(UserCreationForm, UniqueEmailMixin):
@@ -98,7 +118,11 @@ class WeblateUserCreationForm(UserCreationForm, UniqueEmailMixin):
     class Meta:
         model = User
         fields = ("username", "email", "full_name")
-        field_classes = {"username": UniqueUsernameField, "full_name": FullNameField}
+        # ruff: ignore[mutable-class-default]
+        field_classes = {
+            "username": UniqueUsernameField,
+            "full_name": FullNameField,
+        }
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -148,6 +172,7 @@ class WeblateUserAdmin(WeblateAuthAdmin, UserAdmin):
     search_fields = ("username", "full_name", "email")
     form = WeblateUserChangeForm
     add_form = WeblateUserCreationForm
+    inlines = (UserTeamMembershipInline,)
     add_fieldsets = (
         (None, {"fields": ("username",)}),
         (gettext_lazy("Personal info"), {"fields": ("full_name", "email")}),
@@ -158,12 +183,15 @@ class WeblateUserAdmin(WeblateAuthAdmin, UserAdmin):
         (gettext_lazy("Personal info"), {"fields": ("full_name", "email")}),
         (
             gettext_lazy("Permissions"),
-            {"fields": ("is_active", "is_bot", "is_superuser", "groups")},
+            {"fields": ("is_active", "is_bot", "is_superuser")},
         ),
-        (gettext_lazy("Important dates"), {"fields": ("last_login", "date_joined")}),
+        (
+            gettext_lazy("Important dates"),
+            {"fields": ("last_login", "date_joined", "date_expires")},
+        ),
     )
     list_filter = ("is_superuser", "is_active", "is_bot", "groups")
-    filter_horizontal = ("groups",)
+    filter_horizontal = ()
 
     def user_groups(self, obj):
         """Display comma separated list of user groups."""
@@ -188,11 +216,28 @@ class WeblateUserAdmin(WeblateAuthAdmin, UserAdmin):
         for obj in queryset.iterator():
             self.delete_model(request, obj)
 
+    def save_model(self, request: AuthenticatedHttpRequest, obj, form, change) -> None:
+        if change:
+            original = User.objects.get(pk=obj.pk)
+            form.instance.store_audit_state(
+                group_ids=set(original.groups.values_list("id", flat=True)),
+                is_superuser=original.is_superuser,
+            )
+
+        super().save_model(request, obj, form, change)
+
+    def save_related(
+        self, request: AuthenticatedHttpRequest, form, formsets, change
+    ) -> None:
+        super().save_related(request, form, formsets, change)
+        form.instance.log_audit_state(request)
+
 
 class GroupChangeForm(forms.ModelForm):
     class Meta:
         model = Group
-        fields = "__all__"  # noqa: DJ007
+        # ruff: ignore[django-all-with-model-form]
+        fields = "__all__"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -231,9 +276,9 @@ class WeblateGroupAdmin(WeblateAuthAdmin):
     save_as = True
     model = Group
     form = GroupChangeForm
-    inlines = [InlineAutoGroupAdmin]
-    search_fields = ("name", "defining_project__name")
-    ordering = ("defining_project__name", "name")
+    inlines = (InlineAutoGroupAdmin,)
+    search_fields = ("name", "defining_project__name", "defining_workspace__name")
+    ordering = ("defining_project__name", "defining_workspace__name", "name")
     list_filter = ("internal", "project_selection", "language_selection")
     filter_horizontal = (
         "roles",
@@ -242,7 +287,7 @@ class WeblateGroupAdmin(WeblateAuthAdmin):
         "components",
         "componentlists",
     )
-    list_display = ("name", "defining_project")
+    list_display = ("name", "defining_project", "defining_workspace")
 
     new_obj: Group
 

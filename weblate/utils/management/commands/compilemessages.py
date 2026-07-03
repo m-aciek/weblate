@@ -1,6 +1,7 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
 from django.core.management.commands.compilemessages import Command as BaseCommand
 
@@ -10,6 +11,7 @@ from weblate.utils.files import should_skip
 class Command(BaseCommand):
     # We just remove --format-check as it just complicates things
     # for some translations
+    # ruff: ignore[mutable-class-default]
     program_options = []
 
     def compile_messages(self, locations) -> None:

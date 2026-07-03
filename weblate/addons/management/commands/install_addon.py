@@ -1,20 +1,24 @@
 # Copyright © Michal Čihař <michal@weblate.org>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from django.core.management.base import CommandError
 
 from weblate.addons.models import ADDONS, Addon
-from weblate.auth.models import User, get_anonymous
-from weblate.trans.management.commands import WeblateComponentCommand
+from weblate.utils.management.base import WeblateComponentCommand
+
+if TYPE_CHECKING:
+    from django.core.management.base import CommandParser
 
 
 class Command(WeblateComponentCommand):
     help = "installs add-on to all listed components"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: CommandParser) -> None:
         super().add_arguments(parser)
         parser.add_argument("--addon", required=True, help="Add-on name")
         parser.add_argument(
@@ -40,17 +44,13 @@ class Command(WeblateComponentCommand):
         try:
             addon = ADDONS[options["addon"]]
         except KeyError as error:
-            msg = "Add-on not found: {}".format(options["addon"])
+            msg = f"Add-on not found: {options['addon']}"
             raise CommandError(msg) from error
         try:
             configuration = json.loads(options["configuration"])
         except json.JSONDecodeError as error:
             msg = f"Invalid add-on configuration: {error}"
             raise CommandError(msg) from error
-        try:
-            user = User.objects.filter(is_superuser=True)[0]
-        except IndexError:
-            user = get_anonymous()
         for component in self.get_components(*args, **options):
             if addon.has_settings():
                 form = addon.get_add_form(None, component=component, data=configuration)
@@ -65,7 +65,7 @@ class Command(WeblateComponentCommand):
                     self.stderr.write(f"Already installed on {component}")
                 continue
 
-            if not addon.can_install(component, user):
+            if not addon.can_install(component=component):
                 self.stderr.write(f"Can not install on {component}")
                 continue
 

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from typing import TypedDict
+from typing import TYPE_CHECKING, ClassVar, TypedDict
 
 import dateutil.parser
 from appconf import AppConf
@@ -18,7 +18,7 @@ from django.utils import timezone
 from django.utils.functional import cached_property
 from django.utils.translation import gettext, gettext_lazy
 
-from weblate.auth.models import AuthenticatedHttpRequest, User
+from weblate.auth.models import User
 from weblate.trans.models import Component, Project
 from weblate.utils.backup import (
     BackupError,
@@ -30,11 +30,17 @@ from weblate.utils.backup import (
     prune,
 )
 from weblate.utils.const import SUPPORT_STATUS_CACHE_KEY
-from weblate.utils.requests import request
+from weblate.utils.requests import fetch_url
 from weblate.utils.site import get_site_url
 from weblate.utils.stats import GlobalStats
 from weblate.utils.validators import validate_backup_path
 from weblate.vcs.ssh import ensure_ssh_key
+
+if TYPE_CHECKING:
+    from weblate.auth.models import AuthenticatedHttpRequest
+    from weblate.utils.backup import (
+        BorgResult,
+    )
 
 
 class WeblateConf(AppConf):
@@ -57,7 +63,7 @@ class ConfigurationErrorManager(models.Manager["ConfigurationError"]):
         if checks is None:
             checks = run_checks(include_deployment_checks=True)
         checks_dict = {check.id: check for check in checks}
-        criticals = {
+        critical_checks = {
             "weblate.E002",
             "weblate.E003",
             "weblate.E007",
@@ -81,11 +87,17 @@ class ConfigurationErrorManager(models.Manager["ConfigurationError"]):
             "weblate.C038",
             "weblate.C040",
             "weblate.C041",
+            "weblate.E006",
+            "weblate.C044",
+            "weblate.C045",
+        }
+        retired_checks = {
+            "weblate.C046",
         }
         removals = []
         existing = {error.name: error for error in self.all()}
 
-        for check_id in criticals:
+        for check_id in critical_checks:
             if check_id in checks_dict:
                 check = checks_dict[check_id]
                 if check_id in existing:
@@ -97,6 +109,8 @@ class ConfigurationErrorManager(models.Manager["ConfigurationError"]):
                     self.create(name=check_id, message=check.msg)
             elif check_id in existing:
                 removals.append(check_id)
+
+        removals.extend(retired_checks.intersection(existing))
 
         if removals:
             self.filter(name__in=removals).delete()
@@ -111,7 +125,7 @@ class ConfigurationError(models.Model):
     objects = ConfigurationErrorManager()
 
     class Meta:
-        indexes = [
+        indexes: ClassVar = [
             models.Index(fields=["ignored", "timestamp"]),
         ]
         verbose_name = "Configuration error"
@@ -122,20 +136,28 @@ class ConfigurationError(models.Model):
 
 
 SUPPORT_NAMES = {
+    # Translators: The Weblate server has no paid support by the Weblate team
     "community": gettext_lazy("Community support"),
+    # Translators: The Weblate server is hosted by the Weblate team
     "hosted": gettext_lazy("Hosted service"),
+    # Translators: The Weblate server has paid support from the Weblate team
     "basic": gettext_lazy("Basic self-hosted support"),
+    # Translators: The Weblate server has extended support from the Weblate team
     "extended": gettext_lazy("Extended self-hosted support"),
+    # Translators: The Weblate server has premium support from the Weblate team
     "premium": gettext_lazy("Premium self-hosted support"),
 }
 
 
-class SupportStatusManager(models.Manager):
-    def get_current(self):
+class SupportStatusManager(models.Manager["SupportStatus"]):
+    def get_current(self, *, for_update: bool = False) -> SupportStatus:
+        base = self.filter(enabled=True)
+        if for_update:
+            base = base.select_for_update()
         try:
-            return self.latest("expiry")
+            return base.latest("expiry")
         except SupportStatus.DoesNotExist:
-            return SupportStatus(name="community")
+            return SupportStatus(name="community", enabled=False)
 
 
 class SupportStatus(models.Model):
@@ -147,6 +169,7 @@ class SupportStatus(models.Model):
     limits = models.JSONField(default=dict)
     has_subscription = models.BooleanField(default=False)
     backup_repository = models.CharField(max_length=500, default="", blank=True)
+    enabled = models.BooleanField(default=True, db_index=True, blank=True)
 
     objects = SupportStatusManager()
 
@@ -193,8 +216,7 @@ class SupportStatus(models.Model):
         ssh_key = ensure_ssh_key()
         if ssh_key:
             data["ssh_key"] = ssh_key["key"]
-        response = request("post", settings.SUPPORT_API_URL, data=data, timeout=360)
-        response.raise_for_status()
+        response = fetch_url("post", settings.SUPPORT_API_URL, data=data, timeout=360)
         payload = response.json()
         self.name = payload["name"]
         self.expiry = dateutil.parser.parse(payload["expiry"])
@@ -275,50 +297,83 @@ class BackupService(models.Model):
 
     @cached_property
     def last_logs(self) -> models.QuerySet[BackupLog]:
-        return self.backuplog_set.order_by("-timestamp")[:10]
+        return self.backuplog_set.order_by("-timestamp", "-pk")[:10]
 
     @cached_property
     def has_errors(self) -> bool:
+        return self.current_error is not None
+
+    @cached_property
+    def has_warnings(self) -> bool:
+        return self.current_warning is not None
+
+    @cached_property
+    def current_error(self) -> BackupLog | None:
+        # Any unresolved error keeps backup status failed; a newer backup
+        # completion clears it for the management UI even if borg emitted
+        # warnings and the operator should inspect the log.
         for log in self.last_logs:
             if log.event == "error":
-                return True
+                return log
             if log.event == "backup":
-                return True
-        return False
+                return None
+        return None
 
-    def ensure_init(self) -> None:
-        if not self.paperkey:
+    @cached_property
+    def current_warning(self) -> BackupLog | None:
+        for log in self.last_logs:
+            if log.event == "error":
+                return None
+            if log.warning:
+                return log
+            if log.event == "backup":
+                return None
+        return None
+
+    def create_backup_log(self, event: str, result: BorgResult) -> None:
+        self.backuplog_set.create(
+            event=event,
+            log=result.output,
+            warning=result.has_warnings,
+        )
+
+    def ensure_init(self) -> bool:
+        if self.paperkey:
+            return True
+
+        try:
+            self.paperkey = get_paper_key(self.repository)
+            self.save(update_fields=["paperkey"])
+        except BackupError:
             try:
+                result = initialize(self.repository, self.passphrase)
+                self.create_backup_log("init", result)
                 self.paperkey = get_paper_key(self.repository)
                 self.save(update_fields=["paperkey"])
-            except BackupError:
-                try:
-                    log = initialize(self.repository, self.passphrase)
-                    self.backuplog_set.create(event="init", log=log)
-                    self.paperkey = get_paper_key(self.repository)
-                    self.save()
-                except BackupError as error:
-                    self.backuplog_set.create(event="error", log=str(error))
+            except BackupError as error:
+                self.backuplog_set.create(event="error", log=str(error))
+                return False
+        return True
 
     def backup(self) -> None:
         try:
-            log = backup(self.repository, self.passphrase)
-            self.backuplog_set.create(event="backup", log=log)
+            result = backup(self.repository, self.passphrase)
+            self.create_backup_log("backup", result)
         except BackupError as error:
             self.backuplog_set.create(event="error", log=str(error))
 
     def prune(self) -> None:
         try:
-            log = prune(self.repository, self.passphrase)
-            self.backuplog_set.create(event="prune", log=log)
+            result = prune(self.repository, self.passphrase)
+            self.create_backup_log("prune", result)
         except BackupError as error:
             self.backuplog_set.create(event="error", log=str(error))
 
     def cleanup(self) -> None:
         initial = self.backuplog_set.filter(event="cleanup").exists()
         try:
-            log = cleanup(self.repository, self.passphrase, initial=initial)
-            self.backuplog_set.create(event="cleanup", log=log)
+            result = cleanup(self.repository, self.passphrase, initial=initial)
+            self.create_backup_log("cleanup", result)
         except BackupError as error:
             self.backuplog_set.create(event="error", log=str(error))
 
@@ -329,14 +384,20 @@ class BackupLog(models.Model):
     event = models.CharField(
         max_length=100,
         choices=(
+            # Translators: Backup repository operation
             ("backup", gettext_lazy("Backup performed")),
+            # Translators: Backup repository operation
             ("error", gettext_lazy("Backup failed")),
+            # Translators: Backup repository operation
             ("prune", gettext_lazy("Deleted the oldest backups")),
+            # Translators: Backup repository operation
             ("cleanup", gettext_lazy("Cleaned up backup storage")),
+            # Translators: Backup repository operation
             ("init", gettext_lazy("Repository initialization")),
         ),
         db_index=True,
     )
+    warning = models.BooleanField(default=False)
     log = models.TextField()
 
     class Meta:

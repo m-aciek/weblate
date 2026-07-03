@@ -25,7 +25,7 @@ class FilterRegistry:
             ("nottranslated", gettext_lazy("Untranslated strings"), "state:empty"),
             ("todo", gettext_lazy("Unfinished strings"), "state:<translated"),
             ("translated", gettext_lazy("Translated strings"), "state:>=translated"),
-            ("fuzzy", gettext_lazy("Strings marked for edit"), "state:needs-editing"),
+            ("fuzzy", gettext_lazy("Strings marked for edit"), "is:needs-editing"),
             ("suggestions", gettext_lazy("Strings with suggestions"), "has:suggestion"),
             ("variants", gettext_lazy("Strings with variants"), "has:variant"),
             ("screenshots", gettext_lazy("Strings with screenshots"), "has:screenshot"),
@@ -117,7 +117,7 @@ FILTERS = FilterRegistry()
 
 def get_filter_choice(project=None):
     """Return all filtering choices."""
-    result = [
+    result: list[tuple[str, StrOrPromise]] = [
         ("all", gettext("All strings")),
         ("nottranslated", gettext("Untranslated strings")),
         ("todo", gettext("Unfinished strings")),

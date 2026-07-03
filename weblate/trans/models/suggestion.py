@@ -8,6 +8,7 @@ from copy import copy
 from typing import TYPE_CHECKING
 
 from django.conf import settings
+from django.contrib.postgres import indexes as postgres_indexes
 from django.db import models, transaction
 from django.db.models import Q, Sum
 from django.utils.translation import gettext
@@ -39,6 +40,7 @@ class SuggestionManager(models.Manager["Suggestion"]):
         raise_exception: bool = True,
     ):
         """Create new suggestion for this unit."""
+        # ruff: ignore[import-outside-top-level]
         from weblate.auth.models import get_anonymous
 
         # Apply fixups
@@ -56,14 +58,12 @@ class SuggestionManager(models.Manager["Suggestion"]):
                 raise SuggestionSimilarToTranslationError
             return False
 
-        same_suggestions = self.filter(target=target_merged, unit=unit)
-        # Do not rely on the SQL as MySQL compares strings case insensitive
-        for same in same_suggestions:
-            if same.target == target_merged:
-                if same.user == user or not vote:
-                    return False
-                same.add_vote(request, Vote.POSITIVE)
+        same_suggestion = self.filter(target=target_merged, unit=unit).first()
+        if same_suggestion is not None:
+            if same_suggestion.user == user or not vote:
                 return False
+            same_suggestion.add_vote(request, Vote.POSITIVE)
+            return False
 
         # Create the suggestion
         suggestion = self.create(
@@ -98,7 +98,7 @@ class SuggestionManager(models.Manager["Suggestion"]):
         return suggestion
 
 
-class SuggestionQuerySet(models.QuerySet):
+class SuggestionQuerySet(models.QuerySet["Suggestion", "Suggestion"]):
     def order(self):
         return self.order_by("-timestamp")
 
@@ -106,7 +106,7 @@ class SuggestionQuerySet(models.QuerySet):
         result = self
         if user.needs_project_filter:
             result = result.filter(
-                unit__translation__component__project__in=user.allowed_projects
+                user.get_project_access_query("unit__translation__component__project")
             )
         if user.needs_component_restrictions_filter:
             result = result.filter(
@@ -130,7 +130,7 @@ class Suggestion(models.Model, UserDisplayMixin):
 
     votes = models.ManyToManyField(
         settings.AUTH_USER_MODEL, through="Vote", related_name="user_votes"
-    )
+    )  # type: ignore[var-annotated]
 
     objects = SuggestionManager.from_queryset(SuggestionQuerySet)()
 
@@ -138,15 +138,21 @@ class Suggestion(models.Model, UserDisplayMixin):
         app_label = "trans"
         verbose_name = "string suggestion"
         verbose_name_plural = "string suggestions"
+        # ruff: ignore[mutable-class-default]
+        indexes = [
+            postgres_indexes.GinIndex(
+                postgres_indexes.OpClass(models.F("target"), name="gin_trgm_ops"),
+                models.F("unit"),
+                name="suggestion_target_fulltext",
+            ),
+        ]
 
     def __str__(self) -> str:
-        return "suggestion for {} by {}".format(
-            self.unit, self.user.username if self.user else "unknown"
-        )
+        return f"suggestion for {self.unit} by {self.user.username if self.user else 'unknown'}"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.fixups = []
+        self.fixups: list[str] = []
 
     @transaction.atomic
     def accept(
@@ -230,6 +236,7 @@ class Suggestion(models.Model, UserDisplayMixin):
         fake_unit = copy(self.unit)
         fake_unit.target = self.target
         fake_unit.state = STATE_TRANSLATED
+        fake_unit.check_cache = {}
         source = fake_unit.get_source_plurals()
         target = fake_unit.get_target_plurals()
 
@@ -240,6 +247,15 @@ class Suggestion(models.Model, UserDisplayMixin):
             if check_obj.check_target(source, target, fake_unit):
                 result.append(Check(unit=fake_unit, dismissed=False, name=check))
         return result
+
+    @property
+    def target_list(self) -> list[str]:
+        """
+        Target split into a list of plurals.
+
+        Used for populating the translation widgets in the frontend.
+        """
+        return split_plural(self.target)
 
 
 class Vote(models.Model):
@@ -257,6 +273,7 @@ class Vote(models.Model):
     NEGATIVE = -1
 
     class Meta:
+        # ruff: ignore[mutable-class-default]
         unique_together = [("suggestion", "user")]
         app_label = "trans"
         verbose_name = "suggestion vote"

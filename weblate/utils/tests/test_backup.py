@@ -3,13 +3,28 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import os
+import shlex
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
+from contextlib import nullcontext
+from typing import cast
+from unittest.mock import patch
 
 from django.conf import settings
-from django.test import TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 from django.test.utils import override_settings
 
-from weblate.utils.backup import backup, cleanup, get_paper_key, initialize, prune
-from weblate.utils.data import data_dir
+from weblate.utils.backup import (
+    BackupError,
+    BorgResult,
+    backup,
+    cleanup,
+    get_paper_key,
+    initialize,
+    prune,
+    run_borg,
+    tag_cache_dirs,
+)
+from weblate.utils.data import data_path
 from weblate.utils.tasks import database_backup, settings_backup
 from weblate.utils.unittest import tempdir_setting
 
@@ -18,22 +33,22 @@ class BackupTest(TransactionTestCase):
     @tempdir_setting("DATA_DIR")
     def test_settings_backup(self) -> None:
         settings_backup()
-        filename = data_dir("backups", "settings-expanded.py")
-        with open(filename) as handle:
-            self.assertIn(settings.DATA_DIR, handle.read())
+        filename = data_path("backups") / "settings-expanded.py"
+        self.assertIn(settings.DATA_DIR, filename.read_text())
 
     @tempdir_setting("DATA_DIR")
     @tempdir_setting("BACKUP_DIR")
     def test_backup(self) -> None:
-        initialize(settings.BACKUP_DIR, "key")
-        output = get_paper_key(settings.BACKUP_DIR)
-        self.assertIn("BORG PAPER KEY", output)
-        output = backup(settings.BACKUP_DIR, "key")
-        self.assertIn("Creating archive", output)
-        output = prune(settings.BACKUP_DIR, "key")
-        self.assertIn("Keeping archive", output)
-        cleanup(settings.BACKUP_DIR, "key", True)
-        cleanup(settings.BACKUP_DIR, "key", False)
+        backup_dir = cast("str", settings.BACKUP_DIR)  # type: ignore[misc]
+        initialize(backup_dir, "key")
+        paper_key = get_paper_key(backup_dir)
+        self.assertIn("BORG PAPER KEY", paper_key)
+        backup_result = backup(backup_dir, "key")
+        self.assertIn("Creating archive", backup_result.output)
+        prune_result = prune(backup_dir, "key")
+        self.assertIn("Keeping archive", prune_result.output)
+        cleanup(backup_dir, "key", True)
+        cleanup(backup_dir, "key", False)
 
     @tempdir_setting("DATA_DIR")
     def test_database_backup(self) -> None:
@@ -51,3 +66,77 @@ class BackupTest(TransactionTestCase):
                 os.path.join(settings.DATA_DIR, "backups", "database.sql.gz")
             )
         )
+
+    @tempdir_setting("CACHE_DIR")
+    @tempdir_setting("DATA_DIR")
+    def test_tag_cache_dirs_marks_ssh_wrapper_cache(self) -> None:
+        ssh_cache_dir = data_path("cache") / "ssh"
+        ssh_cache_dir.mkdir(parents=True)
+
+        tag_cache_dirs()
+
+        self.assertTrue((ssh_cache_dir / "CACHEDIR.TAG").exists())
+
+
+class RunBorgTest(SimpleTestCase):
+    def test_run_borg_returns_warning_result(self) -> None:
+        result = subprocess.CompletedProcess(["borg", "create"], 1, "warning output")
+        with (
+            patch("weblate.utils.backup.backup_lock", return_value=nullcontext()),
+            patch("weblate.utils.backup.SSH_WRAPPER.create"),
+            patch("weblate.utils.backup.report_error"),
+            patch("weblate.utils.backup.subprocess.run", return_value=result),
+        ):
+            borg_result = run_borg(["create"])
+
+        self.assertEqual(borg_result, BorgResult("warning output", returncode=1))
+
+    def test_run_borg_disables_weak_crypto_warning(self) -> None:
+        result = subprocess.CompletedProcess(["borg", "create"], 0, "")
+        with (
+            patch("weblate.utils.backup.backup_lock", return_value=nullcontext()),
+            patch("weblate.utils.backup.SSH_WRAPPER.create"),
+            patch("weblate.utils.backup.subprocess.run", return_value=result) as run,
+        ):
+            run_borg(["create"])
+
+        borg_command = run.call_args.args[0]
+        ssh_command = shlex.split(borg_command[2])
+        self.assertEqual(borg_command[:2], ["borg", "--rsh"])
+        self.assertEqual(
+            ssh_command[-4:],
+            [
+                "-o",
+                "IgnoreUnknown=WarnWeakCrypto",
+                "-o",
+                "WarnWeakCrypto=no-pq-kex",
+            ],
+        )
+
+    def test_run_borg_reports_silent_failure(self) -> None:
+        result = subprocess.CompletedProcess(["borg", "create"], 2, "")
+        with (
+            patch("weblate.utils.backup.backup_lock", return_value=nullcontext()),
+            patch("weblate.utils.backup.SSH_WRAPPER.create"),
+            patch("weblate.utils.backup.add_breadcrumb"),
+            patch("weblate.utils.backup.report_error"),
+            patch("weblate.utils.backup.subprocess.run", return_value=result),
+            self.assertRaises(BackupError) as raised,
+        ):
+            run_borg(["create"])
+
+        self.assertEqual(
+            str(raised.exception),
+            "Borg exited with status 2 without any output",
+        )
+
+
+class BackupCommandTest(SimpleTestCase):
+    @override_settings(BORG_EXTRA_ARGS=())
+    def test_backup_includes_changed_files_in_filter(self) -> None:
+        with patch(
+            "weblate.utils.backup.run_borg", return_value=BorgResult(output="")
+        ) as mocked:
+            backup("/backup/repository", "key")
+
+        self.assertIn("ACME", mocked.call_args.args[0])

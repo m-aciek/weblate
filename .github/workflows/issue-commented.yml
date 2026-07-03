@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   apply-label:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
     if: |
       ! github.event.issue.pull_request &&
       contains(github.event.issue.labels.*.name, 'Waiting for: Community') &&
@@ -25,7 +25,7 @@ jobs:
       ! endsWith(github.event.sender.login, '[bot]') &&
       ! endsWith(github.event.sender.login, 'bot')
     steps:
-    - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+    - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
         script: |
           var is_member = false;
@@ -62,10 +62,12 @@ jobs:
                 })
               }
             }
-            await github.rest.issues.addLabels({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: ['Waiting for: Triage']
-            })
+            if (context.payload.issue.state == 'open') {
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['Waiting for: Triage']
+              })
+            }
           }

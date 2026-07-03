@@ -18,14 +18,15 @@ Installing from sources
    website <https://weblate.org/>. Those downloads are cryptographically
    signed, please see :ref:`verify`.
 
-#. Install current Weblate code into the virtualenv:
+#. Install current Weblate code into the Python environment:
 
    .. code-block:: sh
 
         . ~/weblate-env/bin/activate
         uv pip install -e 'weblate-src[all]'
-        # In case you intentd to run testsuite, install test deps as well:
-        uv pip install -e 'weblate-src[all,test]'
+
+   If you intend to run the testsuite from the source checkout, install the
+   development dependencies as described in :ref:`local-tests`.
 
 #. Copy :file:`weblate/settings_example.py` to :file:`weblate/settings.py`.
 
@@ -46,3 +47,35 @@ Installing from sources
    .. note::
 
          This step should be repeated whenever you update the repository.
+
+.. _distribution-packaging:
+
+Packaging Weblate for distributions
+-----------------------------------
+
+The dependency versions in :file:`pyproject.toml` describe the runtime
+environment tested by the Weblate project. They are intentionally strict for
+installs from PyPI and for the Weblate release process, because Weblate cannot
+validate every dependency-version combination covered by wider version ranges.
+
+Distribution packages can replace those Python packages with versions from the
+distribution package set. When doing so, run Weblate's test suite against the
+packaged dependency set and treat passing tests as the compatibility signal for
+the distribution package.
+
+Keep Weblate's tightly coupled companion packages in sync with the Weblate
+release:
+
+* :pypi:`weblate-fonts`
+* :pypi:`weblate-schemas`
+* :pypi:`weblate-language-data`
+* :pypi:`translation-finder`
+* :pypi:`translate-toolkit`
+
+Mismatched versions of these packages are more likely to break at runtime or
+during tests than other Python dependency substitutions.
+
+.. seealso::
+
+   See :ref:`local-tests` for test setup and :ref:`release-cycle` for Weblate's
+   release cadence.

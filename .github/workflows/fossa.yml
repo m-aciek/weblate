@@ -14,21 +14,21 @@ permissions:
 
 jobs:
   fossa-scan:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
     if: ${{ github.repository == 'WeblateOrg/weblate' }}
     steps:
     - name: Checkout Code
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       with:
         persist-credentials: false
     - name: Run FOSSA Scan
-      uses: fossas/fossa-action@3ebcea1862c6ffbd5cf1b4d0bd6b3fe7bd6f2cac # v1.7.0
+      uses: fossas/fossa-action@29693cc50323968e039056be419b32989fc5880c # v2.0.0
       with:
-        api-key: ${{secrets.fossaApiKey}}
+        api-key: ${{secrets.fossaApiKey}} # zizmor: ignore[secrets-outside-env]
 
     - name: Run FOSSA Test
-      uses: fossas/fossa-action@3ebcea1862c6ffbd5cf1b4d0bd6b3fe7bd6f2cac # v1.7.0
+      uses: fossas/fossa-action@29693cc50323968e039056be419b32989fc5880c # v2.0.0
       with:
-        api-key: ${{secrets.fossaApiKey}}
+        api-key: ${{secrets.fossaApiKey}} # zizmor: ignore[secrets-outside-env]
         run-tests: true

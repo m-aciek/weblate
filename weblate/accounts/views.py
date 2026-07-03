@@ -6,36 +6,33 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from base64 import b32encode
 from binascii import unhexlify
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import timedelta
-from importlib import import_module
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import quote
 
 import qrcode
 import qrcode.image.svg
-import social_django.utils
 from django.conf import settings
-from django.contrib.auth import REDIRECT_FIELD_NAME
+from django.contrib.auth import REDIRECT_FIELD_NAME, get_backends
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_not_required, login_required
 from django.contrib.auth.views import LoginView, RedirectURLMixin
-from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
-from django.core.mail.message import EmailMessage
-from django.core.signing import (
-    BadSignature,
-    SignatureExpired,
-    TimestampSigner,
-    dumps,
-    loads,
+from django.core.exceptions import (
+    ImproperlyConfigured,
+    ObjectDoesNotExist,
+    ValidationError,
 )
+from django.core.mail.message import EmailMessage
+from django.core.signing import BadSignature, SignatureExpired
 from django.db import transaction
 from django.db.models import Count, Q
 from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse
-from django.http.response import HttpResponseServerError
 from django.middleware.csrf import rotate_token
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
@@ -64,23 +61,26 @@ from django_otp.models import Device
 from django_otp.plugins.otp_static.models import StaticDevice, StaticToken
 from django_otp.plugins.otp_totp.models import TOTPDevice
 from django_otp.util import random_hex
+from django_otp_webauthn.exceptions import OTPWebAuthnApiError
 from django_otp_webauthn.models import WebAuthnCredential
 from django_otp_webauthn.views import (
     BeginCredentialAuthenticationView,
     CompleteCredentialAuthenticationView,
 )
-from rest_framework.authtoken.models import Token
+from requests.exceptions import HTTPError
 from social_core.actions import do_auth
-from social_core.backends.open_id import OpenIdAuth
+from social_core.backends.base import BaseAuth
 from social_core.exceptions import (
     AuthAlreadyAssociated,
     AuthCanceled,
+    AuthConnectionError,
     AuthException,
     AuthFailed,
     AuthForbidden,
     AuthMissingParameter,
     AuthStateForbidden,
     AuthStateMissing,
+    AuthTokenError,
     AuthUnreachableProvider,
     InvalidEmail,
     MissingBackend,
@@ -88,7 +88,15 @@ from social_core.exceptions import (
 from social_django.utils import load_backend, load_strategy
 from social_django.views import complete, disconnect
 
+from weblate.accounts.auth import WeblateUserBackend
 from weblate.accounts.avatar import get_avatar_image, get_fallback_avatar_url
+from weblate.accounts.flows import (
+    PASSWORD_RESET_EMAIL_SESSION,
+    PASSWORD_RESET_SCOPE_SESSION,
+    PASSWORD_RESET_SCOPE_TOKEN_PARAM,
+    PASSWORD_RESET_SCOPE_TOKEN_SESSION,
+    get_signed_password_reset_scope,
+)
 from weblate.accounts.forms import (
     CommitForm,
     ContactForm,
@@ -102,7 +110,6 @@ from weblate.accounts.forms import (
     NotificationForm,
     OTPTokenForm,
     PasswordConfirmForm,
-    ProfileBaseForm,
     ProfileForm,
     RegistrationForm,
     ResetForm,
@@ -125,43 +132,62 @@ from weblate.accounts.notifications import (
 )
 from weblate.accounts.pipeline import EmailAlreadyAssociated, UsernameAlreadyAssociated
 from weblate.accounts.utils import (
+    SECOND_FACTOR_VERIFY_SECONDS,
     SESSION_SECOND_FACTOR_SOCIAL,
+    SESSION_SECOND_FACTOR_TIMESTAMP,
     SESSION_SECOND_FACTOR_TOTP,
     SESSION_SECOND_FACTOR_USER,
     SESSION_WEBAUTHN_AUDIT,
-    DeviceType,
+    adjust_session_expiry,
     get_key_name,
     lock_user,
     remove_user,
+    reset_api_token,
 )
+from weblate.auth.decorators import check_management_access
 from weblate.auth.forms import UserEditForm
-from weblate.auth.models import (
-    AuthenticatedHttpRequest,
-    Invitation,
-    User,
-    get_anonymous,
+from weblate.auth.models import Invitation, User, get_anonymous
+from weblate.auth.utils import (
+    format_address,
+    format_membership_limit_language_codes,
     get_auth_keys,
+    prefetch_membership_limit_languages,
+    validate_team_assignable_user,
 )
-from weblate.auth.utils import format_address
 from weblate.logger import LOGGER
 from weblate.trans.models import Change, Component, Project, Suggestion, Translation
 from weblate.trans.models.component import translation_prefetch_tasks
 from weblate.trans.models.project import prefetch_project_flags
+from weblate.trans.tasks import (
+    cleanup_user_contributions as cleanup_user_contributions_task,
+)
+from weblate.trans.tasks import (
+    revert_user_edits as revert_user_edits_task,
+)
 from weblate.trans.util import redirect_next
 from weblate.utils import messages
-from weblate.utils.errors import add_breadcrumb, report_error
+from weblate.utils.errors import add_breadcrumb, log_handled_exception, report_error
 from weblate.utils.ratelimit import check_rate_limit, session_ratelimit_post
 from weblate.utils.request import get_ip_address, get_user_agent
 from weblate.utils.stats import prefetch_stats
-from weblate.utils.token import get_token
+from weblate.utils.validators import (
+    WeblateURLValidator,
+    validate_code_site_url,
+    validate_contact_url,
+    validate_profile_url,
+)
+from weblate.utils.version import USER_AGENT
 from weblate.utils.views import get_paginator, parse_path
 from weblate.utils.zammad import ZammadError, submit_zammad_ticket
 
 if TYPE_CHECKING:
-    from weblate.auth.models import AuthenticatedHttpRequest
+    from collections.abc import Callable
 
-AUTHID_SALT = "weblate.authid"
-AUTHID_MAX_AGE = 600
+    from django.forms import Form
+
+    from weblate.accounts.forms import ProfileBaseForm
+    from weblate.accounts.types import DeviceType
+    from weblate.auth.models import AuthenticatedHttpRequest
 
 CONTACT_TEMPLATE = """
 Message from %(name)s <%(email)s>:
@@ -188,10 +214,40 @@ CONTACT_SUBJECTS = {
 }
 
 ANCHOR_RE = re.compile(r"^#[a-z]+$")
+HANDLED_AUTH_PARAMETERS = frozenset(
+    {
+        "email",
+        "user",
+        "expires",
+        "state",
+        "code",
+        "RelayState",
+        "RelayState.idp",
+        "disabled",
+        "invitation",
+    }
+)
+HANDLED_AUTH_FAILED_MARKERS = (
+    "bad_verification_code",
+    "incorrect or expired",
+)
+
+
+@dataclass(frozen=True)
+class AuthErrorPolicy:
+    response: HttpResponse | None
+    reportable: bool
+    cause: str
+    handled: bool = True
+
 
 NOTIFICATION_PREFIX_TEMPLATE = "notifications__{}"
 
+# Override python-social-auth User-Agent header
+settings.SOCIAL_AUTH_USER_AGENT = USER_AGENT
 
+
+@method_decorator(login_not_required, name="dispatch")
 class EmailSentView(TemplateView):
     r"""Class for rendering "E-mail sent" page."""
 
@@ -256,7 +312,7 @@ def mail_admins_contact(
     )
 
     if not to and settings.ADMINS:
-        to = [a[1] for a in settings.ADMINS]
+        to = list(settings.ADMINS)
     elif not settings.ADMINS:
         messages.error(request, gettext("Could not send message to administrator."))
         LOGGER.error("ADMINS not configured, cannot send message")
@@ -289,7 +345,7 @@ def mail_admins_contact(
 
         if settings.CONTACT_FORM == "reply-to":
             headers["Reply-To"] = sender
-            from_email = to[0]
+            from_email = settings.DEFAULT_FROM_EMAIL
         else:
             from_email = sender
 
@@ -317,7 +373,7 @@ def get_notification_forms(request: AuthenticatedHttpRequest):
     subscriptions: dict[tuple[NotificationScope, int, int], dict[str, int]] = (
         defaultdict(dict)
     )
-    initials: dict[tuple[NotificationScope, int, int], dict[str, Any]] = {}
+    initials: dict[tuple[NotificationScope | int, int, int], dict[str, Any]] = {}
     key: tuple[NotificationScope, int, int]
 
     # Ensure watched, admin and all scopes are visible
@@ -335,6 +391,9 @@ def get_notification_forms(request: AuthenticatedHttpRequest):
     if "notify_project" in request.GET:
         try:
             project = user.allowed_projects.get(pk=request.GET["notify_project"])
+        except (ObjectDoesNotExist, ValueError):
+            pass
+        else:
             active = key = (NotificationScope.SCOPE_PROJECT, project.pk, -1)
             subscriptions[key] = {}
             initials[key] = {
@@ -342,21 +401,20 @@ def get_notification_forms(request: AuthenticatedHttpRequest):
                 "project": project,
                 "component": None,
             }
-        except (ObjectDoesNotExist, ValueError):
-            pass
     if "notify_component" in request.GET:
         try:
             component = Component.objects.filter_access(user).get(
                 pk=request.GET["notify_component"],
             )
+        except (ObjectDoesNotExist, ValueError):
+            pass
+        else:
             active = key = (NotificationScope.SCOPE_COMPONENT, -1, component.pk)
             subscriptions[key] = {}
             initials[key] = {
                 "scope": NotificationScope.SCOPE_COMPONENT,
                 "component": component,
             }
-        except (ObjectDoesNotExist, ValueError):
-            pass
 
     # Populate scopes from the database
     for subscription in user.subscription_set.select_related("project", "component"):
@@ -386,7 +444,7 @@ def get_notification_forms(request: AuthenticatedHttpRequest):
         )
     for i in range(len(subscriptions), 200):
         prefix = NOTIFICATION_PREFIX_TEMPLATE.format(i)
-        if prefix + "-scope" in request.POST or i < len(subscriptions):
+        if f"{prefix}-scope" in request.POST or i < len(subscriptions):
             yield NotificationForm(
                 user=user,
                 show_default=i > 1,
@@ -395,7 +453,7 @@ def get_notification_forms(request: AuthenticatedHttpRequest):
                 is_active=i == 0,
                 prefix=prefix,
                 data=request.POST,
-                initial=initials[details[0]],
+                initial=initials[active],
             )
 
 
@@ -447,10 +505,17 @@ def user_profile(request: AuthenticatedHttpRequest):
     license_components = (
         Component.objects.filter_access(user)
         .filter(translation__id__in=user_translation_ids)
-        .exclude(license="")
         .prefetch(alerts=False)
         .distinct()
-        .order_by("license")
+    )
+    license_components = sorted(
+        (
+            component
+            for component in license_components
+            if component.effective_license
+            and component.effective_license != "proprietary"
+        ),
+        key=lambda component: component.effective_license,
     )
 
     return render(
@@ -466,9 +531,11 @@ def user_profile(request: AuthenticatedHttpRequest):
             "userform": forms[6],
             "notification_forms": forms[7:],
             "all_forms": forms,
-            "user_groups": user.cached_groups.prefetch_related(
-                "roles", "projects", "languages", "components"
-            ),
+            "user_groups": user.groups.select_related(
+                "defining_project", "defining_workspace"
+            )
+            .prefetch_related("roles", "projects", "languages", "components")
+            .order(),
             "profile": profile,
             "title": gettext("User profile"),
             "licenses": license_components,
@@ -519,6 +586,7 @@ def user_remove(request: AuthenticatedHttpRequest):
 
 
 @session_ratelimit_post("confirm")
+@login_not_required
 @never_cache
 def confirm(request: AuthenticatedHttpRequest):
     details = request.session.get("reauthenticate")
@@ -552,8 +620,15 @@ def get_initial_contact(request: AuthenticatedHttpRequest):
 
 
 @never_cache
+@login_not_required
 def contact(request: AuthenticatedHttpRequest):
+    if settings.CONTACT_FORM == "disabled":
+        msg = "Contact form is disabled."
+        raise Http404(msg)
+
+    show_form = False
     if request.method == "POST":
+        show_form = True
         form = ContactForm(
             request=request,
             hide_captcha=request.user.is_authenticated,
@@ -578,6 +653,9 @@ def contact(request: AuthenticatedHttpRequest):
         initial = get_initial_contact(request)
         if request.GET.get("t") in CONTACT_SUBJECTS:
             initial["subject"] = CONTACT_SUBJECTS[request.GET["t"]]
+            show_form = True
+        if request.GET.get("topic") == "server":
+            show_form = True
         form = ContactForm(
             request=request, hide_captcha=request.user.is_authenticated, initial=initial
         )
@@ -585,7 +663,7 @@ def contact(request: AuthenticatedHttpRequest):
     return render(
         request,
         "accounts/contact.html",
-        {"form": form, "title": gettext("Contact")},
+        {"form": form, "title": gettext("Contact"), "show_form": show_form},
     )
 
 
@@ -597,6 +675,7 @@ def hosting(request: AuthenticatedHttpRequest):
     if not settings.OFFER_HOSTING:
         return redirect("home")
 
+    # ruff: ignore[import-outside-top-level]
     from weblate.billing.models import Billing
 
     billings = (
@@ -635,10 +714,11 @@ def trial(request: AuthenticatedHttpRequest):
                 "best solution for you."
             ),
         )
-        return redirect(reverse("contact") + "?t=trial")
+        return redirect(f"{reverse('contact')}?t=trial")
 
     if request.method == "POST":
-        from weblate.billing.models import Billing, Plan
+        # ruff: ignore[import-outside-top-level]
+        from weblate.billing.models import Billing, BillingEvent, Plan
 
         AuditLog.objects.create(request.user, request, "trial")
         billing = Billing.objects.create(
@@ -646,7 +726,8 @@ def trial(request: AuthenticatedHttpRequest):
             state=Billing.STATE_TRIAL,
             expiry=timezone.now() + timedelta(days=14),
         )
-        billing.owners.add(request.user)
+        billing.billinglog_set.create(event=BillingEvent.CREATED, user=request.user)
+        billing.workspace.add_owner(request.user, request)
         messages.info(
             request,
             gettext(
@@ -654,7 +735,7 @@ def trial(request: AuthenticatedHttpRequest):
                 "create your translation project and start Weblating!"
             ),
         )
-        return redirect(reverse("create-project") + f"?billing={billing.pk}")
+        return redirect(f"{reverse('create-project')}?workspace={billing.workspace_id}")
 
     return render(request, "accounts/trial.html", {"title": gettext("Gratis trial")})
 
@@ -670,39 +751,112 @@ class UserPage(UpdateView):
     group_form = None
     request: AuthenticatedHttpRequest
 
+    def handle_add_group(
+        self, request: AuthenticatedHttpRequest, user: User
+    ) -> HttpResponseRedirect | None:
+        self.group_form = GroupAddForm(request.POST)
+        if not self.group_form.is_valid():
+            return None
+        try:
+            validate_team_assignable_user(user)
+        except ValidationError as error:
+            for message in error.messages:
+                messages.error(request, message)
+            return HttpResponseRedirect(f"{self.get_success_url()}#groups")
+        group = self.group_form.cleaned_data["add_group"]
+        had_membership = user.team_memberships.filter(group=group).exists()
+        user.add_team(request, group)
+        membership = user.team_memberships.get(group=group)
+        membership.set_limit_languages(
+            self.group_form.cleaned_data["limit_languages"],
+            request,
+            audit=had_membership,
+        )
+        return HttpResponseRedirect(f"{self.get_success_url()}#groups")
+
     def post(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
-        if not request.user.has_perm("user.edit"):
-            raise PermissionDenied
+        check_management_access(request, "user.edit")
         user = self.object = self.get_object()
         if "add_group" in request.POST:
-            self.group_form = GroupAddForm(request.POST)
-            if self.group_form.is_valid():
-                user.add_team(request, self.group_form.cleaned_data["add_group"])
-                return HttpResponseRedirect(self.get_success_url() + "#groups")
+            response = self.handle_add_group(request, user)
+            if response is not None:
+                return response
         if "remove_group" in request.POST:
             form = GroupRemoveForm(request.POST)
             if form.is_valid():
                 user.remove_team(request, form.cleaned_data["remove_group"])
-                return HttpResponseRedirect(self.get_success_url() + "#groups")
+                return HttpResponseRedirect(f"{self.get_success_url()}#groups")
+        if (
+            "cleanup_user_contributions" in request.POST
+            or "revert_user_edits" in request.POST
+        ):
+            cleanup_form_submitted = "cleanup_user_contributions" in request.POST
+            revert_edits = "revert_edits" in request.POST or (
+                "revert_user_edits" in request.POST and not cleanup_form_submitted
+            )
+            reject_suggestions = "reject_suggestions" in request.POST
+            delete_comments = "delete_comments" in request.POST
+            if revert_edits:
+                revert_user_edits_task.delay(
+                    target_user_id=user.id,
+                    acting_user_id=request.user.id,
+                    sitewide=True,
+                )
+                messages.success(
+                    request,
+                    gettext("Reverting edits by %(user)s site-wide was scheduled.")
+                    % {
+                        "user": user.username,
+                    },
+                )
+            if reject_suggestions or delete_comments:
+                cleanup_user_contributions_task.delay(
+                    target_user_id=user.id,
+                    acting_user_id=request.user.id,
+                    sitewide=True,
+                    reject_suggestions=reject_suggestions,
+                    delete_comments=delete_comments,
+                )
+                messages.success(
+                    request,
+                    gettext(
+                        "Cleaning up contributions by %(user)s site-wide was scheduled."
+                    )
+                    % {
+                        "user": user.username,
+                    },
+                )
+            if not revert_edits and not reject_suggestions and not delete_comments:
+                messages.error(request, gettext("No cleanup action was selected."))
+            return HttpResponseRedirect(f"{self.get_success_url()}#edit")
         if "remove_user" in request.POST:
             remove_user(user, request, skip_notify=True)
-            return HttpResponseRedirect(self.get_success_url() + "#groups")
+            return HttpResponseRedirect(f"{self.get_success_url()}#groups")
 
         if "remove_2fa" in request.POST:
             for device in user.profile.second_factors:
                 key_name = get_key_name(device)
                 device.delete()
                 AuditLog.objects.create(user, None, "twofactor-remove", device=key_name)
-            return HttpResponseRedirect(self.get_success_url() + "#edit")
+            return HttpResponseRedirect(f"{self.get_success_url()}#edit")
 
         if "disable_password" in request.POST:
             lock_user(user, "admin-locked")
-            return HttpResponseRedirect(self.get_success_url() + "#edit")
+            return HttpResponseRedirect(f"{self.get_success_url()}#edit")
 
-        return super().post(request, *args, **kwargs)
+        user.store_audit_state()
+        form = self.get_form()
+        if form.is_valid():
+            return self.form_valid(form)
+        return self.form_invalid(form)
 
     def get_queryset(self):
         return super().get_queryset().select_related("profile")
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        self.object.log_audit_state(self.request)
+        return response
 
     def get_context_data(self, **kwargs):
         """Create context for rendering page."""
@@ -749,11 +903,45 @@ class UserPage(UpdateView):
         )
         context["user_languages"] = user.profile.all_languages[:7]
         context["group_form"] = self.group_form or GroupAddForm()
-        context["page_user_groups"] = (
+        memberships = (
+            user.team_memberships.select_related(
+                "group", "group__defining_project", "group__defining_workspace"
+            )
+            .prefetch_related(prefetch_membership_limit_languages())
+            .order_by(
+                "group__defining_project__name",
+                "group__defining_workspace__name",
+                "group__name",
+            )
+        )
+        memberships_by_group_id = {}
+        for membership in memberships:
+            membership.limit_language_codes = format_membership_limit_language_codes(
+                membership
+            )
+            memberships_by_group_id[membership.group_id] = membership
+        page_user_groups = list(
             user.groups.annotate(Count("user"))
-            .prefetch_related("defining_project")
+            .select_related("defining_project", "defining_workspace")
             .order()
         )
+        for group in page_user_groups:
+            group.team_membership = memberships_by_group_id.get(group.pk)
+        context["page_user_groups"] = page_user_groups
+        context["page_user_billings"] = []
+        if "weblate.billing" in settings.INSTALLED_APPS:
+            # ruff: ignore[import-outside-top-level]
+            from weblate.billing.models import Billing
+
+            context["page_user_billings"] = list(
+                Billing.objects.filter(
+                    workspace__defined_groups__memberships__user=user,
+                    workspace__defined_groups__memberships__limit_languages__isnull=True,
+                    workspace__defined_groups__roles__permissions__codename="workspace.edit",
+                )
+                .distinct()
+                .prefetch()
+            )
         return context
 
 
@@ -779,14 +967,62 @@ def user_contributions(request: AuthenticatedHttpRequest, user: str):
             "page_user": page_user,
             "page_profile": page_user.profile,
             "page_user_translations": translation_prefetch_tasks(
-                prefetch_stats(get_paginator(request, user_translations))
+                prefetch_stats(
+                    get_paginator(
+                        request, user_translations, sort_by=request.GET.get("sort_by")
+                    )
+                )
             ),
         },
     )
 
 
-def user_avatar(request: AuthenticatedHttpRequest, user: str, size: int):
-    """User avatar view."""
+PROFILE_EXTERNAL_LINKS: dict[str, tuple[Any, Callable[[str | None], None]]] = {
+    "website": (gettext_lazy("Website"), validate_profile_url),
+    "contact": (gettext_lazy("Contact"), validate_contact_url),
+    "codesite": (gettext_lazy("Code site"), validate_code_site_url),
+}
+
+
+@login_not_required
+def user_profile_link(request: AuthenticatedHttpRequest, user: str, link: str):
+    page_user = get_object_or_404(User.objects.select_related("profile"), username=user)
+    page_profile = page_user.profile
+    try:
+        link_label, link_validator = PROFILE_EXTERNAL_LINKS[link]
+    except KeyError as error:
+        raise Http404 from error
+    link_url = getattr(page_profile, link)
+    if not link_url:
+        raise Http404
+    try:
+        WeblateURLValidator()(link_url)
+        link_validator(link_url)
+    except ValidationError:
+        messages.warning(request, gettext("This profile link is no longer available."))
+        return redirect(page_profile.get_absolute_url())
+
+    return render(
+        request,
+        "accounts/user_profile_link.html",
+        {
+            "link_field": link,
+            "link_label": link_label,
+            "link_url": link_url,
+            "page_user": page_user,
+            "page_profile": page_profile,
+            "title": gettext("External profile link"),
+        },
+    )
+
+
+@login_not_required
+def user_contact(request: AuthenticatedHttpRequest, user: str):
+    return user_profile_link(request, user, "contact")
+
+
+def validate_avatar_size(size: int | str) -> int:
+    """Validate requested avatar size."""
     allowed_sizes = (
         # Used in top navigation
         24,
@@ -797,19 +1033,39 @@ def user_avatar(request: AuthenticatedHttpRequest, user: str, size: int):
         # Public profile
         128,
     )
-    if size not in allowed_sizes:
+    try:
+        value = int(size)
+    except ValueError as error:
+        msg = f"Not supported size: {size}"
+        raise Http404(msg) from error
+    if value not in allowed_sizes:
         msg = f"Not supported size: {size}"
         raise Http404(msg)
+    return value
+
+
+@login_not_required
+def user_avatar(request: AuthenticatedHttpRequest, user: str, size: int | str):
+    """User avatar view."""
+    avatar_size = validate_avatar_size(size)
 
     avatar_user = get_object_or_404(User, username=user)
+    email = avatar_user.email
 
-    if avatar_user.email == "noreply@weblate.org":
-        return redirect(get_fallback_avatar_url(int(size)))
-    if avatar_user.email == f"noreply+{avatar_user.pk}@weblate.org":
-        return redirect(os.path.join(settings.STATIC_URL, "state/ghost.svg"))
+    # Deleted users
+    if email == f"noreply+{avatar_user.pk}@weblate.org":
+        return redirect(
+            os.path.join(settings.STATIC_URL, "state/ghost.svg"), permanent=True
+        )
+    # Bot and anonymous accounts
+    if not email or (email.startswith("noreply") and email.endswith("@weblate.org")):
+        return redirect(get_fallback_avatar_url(avatar_size), permanent=True)
+    # Project API tokens
+    if email.endswith("@bots.noreply.weblate.org"):
+        return redirect(get_fallback_avatar_url(avatar_size, "api"), permanent=True)
 
     response = HttpResponse(
-        content_type="image/png", content=get_avatar_image(avatar_user, size)
+        content_type="image/png", content=get_avatar_image(avatar_user, avatar_size)
     )
 
     patch_response_headers(response, 3600 * 24 * 7)
@@ -849,9 +1105,13 @@ class BaseLoginView(LoginView):
             )
             return HttpResponseRedirect(f"{login_url}?{urlencode(login_params)}")
         auth_login(self.request, user)
+        adjust_session_expiry(
+            request=self.request, user=user, is_login=False, force=True
+        )
         return HttpResponseRedirect(self.get_success_url())
 
 
+@method_decorator(login_not_required, name="dispatch")
 class WeblateLoginView(BaseLoginView):
     """Login handler, just a wrapper around standard Django login."""
 
@@ -859,11 +1119,24 @@ class WeblateLoginView(BaseLoginView):
     template_name = "accounts/login.html"
     redirect_authenticated_user = True
 
+    @cached_property
+    def has_email_auth(self) -> bool:
+        return "email" in get_auth_keys()
+
+    @cached_property
+    def show_login_form(self) -> bool:
+        return self.has_email_auth or any(
+            not isinstance(backend, (BaseAuth, WeblateUserBackend))
+            for backend in get_backends()
+        )
+
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         auth_backends = get_auth_keys()
         context["login_backends"] = [x for x in sorted(auth_backends) if x != "email"]
-        context["can_reset"] = "email" in auth_backends
+        context["can_reset"] = self.has_email_auth or bool(settings.PASSWORD_RESET_URL)
+        # Show login form for e-mail login or any third-party Django auth backend such as LDAP
+        context["show_login_form"] = self.show_login_form
         context["title"] = gettext("Sign in")
         return context
 
@@ -878,6 +1151,9 @@ class WeblateLoginView(BaseLoginView):
         if len(auth_backends) == 1 and "email" not in auth_backends:
             return redirect_single(request, auth_backends.pop())
 
+        if request.method == "POST" and not self.show_login_form:
+            return redirect("login")
+
         return super().dispatch(request, *args, **kwargs)
 
 
@@ -889,6 +1165,7 @@ class WeblateLogoutView(TemplateView):
     - login_required decorator
     """
 
+    # ruff: ignore[mutable-class-default]
     http_method_names = ["post", "options"]
     template_name = "registration/logged_out.html"
     request: AuthenticatedHttpRequest
@@ -917,8 +1194,12 @@ def fake_email_sent(request: AuthenticatedHttpRequest, reset: bool = False):
 
 
 @never_cache
+@login_not_required
 def register(request: AuthenticatedHttpRequest):
     """Registration form."""
+    if request.user.is_authenticated:
+        return redirect_profile("#account")
+
     # Fetch invitation
     invitation: Invitation | None = None
     initial = {}
@@ -928,9 +1209,13 @@ def register(request: AuthenticatedHttpRequest):
         except Invitation.DoesNotExist:
             del request.session["invitation_link"]
         else:
-            initial["email"] = invitation.email
-            initial["username"] = invitation.username
-            initial["fullname"] = invitation.full_name
+            if invitation.is_expired():
+                del request.session["invitation_link"]
+                invitation = None
+            else:
+                initial["email"] = invitation.email
+                initial["username"] = invitation.username
+                initial["fullname"] = invitation.full_name
 
     # Allow registration at all?
     registration_open = settings.REGISTRATION_OPEN or bool(invitation)
@@ -950,13 +1235,22 @@ def register(request: AuthenticatedHttpRequest):
             request=request, data=request.POST, hide_captcha=hide_captcha
         )
         if form.is_valid():
-            if form.cleaned_data["email_user"]:
+            if invitation and not invitation.matches_email(form.cleaned_data["email"]):
+                form.add_error(
+                    "email",
+                    gettext(
+                        "This invitation can be accepted only by the e-mail address "
+                        "chosen by the inviter; it can't be used by your account."
+                    ),
+                )
+            elif form.cleaned_data["email_user"]:
                 AuditLog.objects.create(
                     form.cleaned_data["email_user"], request, "connect"
                 )
                 return fake_email_sent(request)
-            store_userid(request)
-            return social_complete(request, "email")
+            else:
+                store_userid(request)
+                return social_complete(request, "email")
     else:
         form = RegistrationForm(
             request=request, initial=initial, hide_captcha=hide_captcha
@@ -1011,7 +1305,30 @@ def password(request: AuthenticatedHttpRequest):
     """Password change / set form."""
     do_change = True
     change_form = None
-    usable = request.user.has_usable_password()
+    user = request.user
+    usable = user.has_usable_password()
+
+    if user.profile.has_2fa and (
+        SESSION_SECOND_FACTOR_TIMESTAMP not in request.session
+        or request.session[SESSION_SECOND_FACTOR_TIMESTAMP]
+        + SECOND_FACTOR_VERIFY_SECONDS
+        < int(time.time())
+    ):
+        messages.info(
+            request,
+            gettext(
+                "Please confirm your identity using a second factor before proceeding."
+            ),
+        )
+        request.session[SESSION_SECOND_FACTOR_USER] = (
+            user.id,
+            "weblate.accounts.auth.WeblateUserBackend",
+        )
+        login_params: dict[str, str] = {"next": reverse("password")}
+        login_url = reverse(
+            "2fa-login", kwargs={"backend": user.profile.get_second_factor_type()}
+        )
+        return HttpResponseRedirect(f"{login_url}?{urlencode(login_params)}")
 
     if "email" not in get_auth_keys() and not usable:
         messages.error(
@@ -1078,14 +1395,47 @@ def reset_password_set(request: AuthenticatedHttpRequest):
     )
 
 
+def remember_password_reset_scope_token(request: AuthenticatedHttpRequest) -> None:
+    token = request.POST.get(PASSWORD_RESET_SCOPE_TOKEN_PARAM) or request.GET.get(
+        PASSWORD_RESET_SCOPE_TOKEN_PARAM, ""
+    )
+    if not token:
+        return
+    if get_signed_password_reset_scope(token):
+        request.session[PASSWORD_RESET_SCOPE_TOKEN_SESSION] = token
+    else:
+        request.session.pop(PASSWORD_RESET_SCOPE_TOKEN_SESSION, None)
+
+
+def get_password_reset_scope(request: AuthenticatedHttpRequest, email: str) -> str:
+    token = request.session.get(PASSWORD_RESET_SCOPE_TOKEN_SESSION, "")
+    if token:
+        return get_signed_password_reset_scope(token, email)
+    return ""
+
+
+def send_password_reset_email(
+    request: AuthenticatedHttpRequest, user: User, *, email: str, scope: str = ""
+) -> HttpResponse | None:
+    """Start the existing e-mail password reset flow for a known user."""
+    audit = AuditLog.objects.create(user, request, "reset-request")
+    if audit.check_rate_limit(request):
+        return None
+    request.session[PASSWORD_RESET_EMAIL_SESSION] = email
+    store_userid(request, reset=True, reset_scope=scope)
+    return social_complete(request, "email")
+
+
 def get_registration_hint(email: str) -> str | None:
     domain = email.rsplit("@", 1)[-1]
     return settings.REGISTRATION_HINTS.get(domain)
 
 
 @never_cache
+@login_not_required
 def reset_password(request: AuthenticatedHttpRequest):
     """Password reset handling."""
+    remember_password_reset_scope_token(request)
     if request.user.is_authenticated:
         return redirect_profile()
     if "email" not in get_auth_keys():
@@ -1101,15 +1451,17 @@ def reset_password(request: AuthenticatedHttpRequest):
     if request.method == "POST":
         form = ResetForm(request=request, data=request.POST)
         if form.is_valid():
+            email = form.cleaned_data["email"]
             if form.cleaned_data["email_user"]:
-                audit = AuditLog.objects.create(
-                    form.cleaned_data["email_user"], request, "reset-request"
+                response = send_password_reset_email(
+                    request,
+                    form.cleaned_data["email_user"],
+                    email=email,
+                    scope=get_password_reset_scope(request, email),
                 )
-                if not audit.check_rate_limit(request):
-                    store_userid(request, reset=True)
-                    return social_complete(request, "email")
+                if response is not None:
+                    return response
             else:
-                email = form.cleaned_data["email"]
                 send_notification_email(
                     None,
                     [email],
@@ -1140,10 +1492,8 @@ def reset_password(request: AuthenticatedHttpRequest):
 @session_ratelimit_post("reset_api")
 def reset_api_key(request: AuthenticatedHttpRequest):
     """Reset user API key."""
-    # Need to delete old token as key is primary key
     with transaction.atomic():
-        Token.objects.filter(user=request.user).delete()
-        Token.objects.create(user=request.user, key=get_token("wlu"))
+        reset_api_token(request.user)
 
     return redirect_profile("#api")
 
@@ -1235,15 +1585,11 @@ def mute(request: AuthenticatedHttpRequest, path):
             component=obj,
             project=None,
         )
-        return redirect(
-            "{}?notify_component={}#notifications".format(reverse("profile"), obj.pk)
-        )
+        return redirect(f"{reverse('profile')}?notify_component={obj.pk}#notifications")
     mute_real(
         request.user, scope=NotificationScope.SCOPE_PROJECT, component=None, project=obj
     )
-    return redirect(
-        "{}?notify_project={}#notifications".format(reverse("profile"), obj.pk)
-    )
+    return redirect(f"{reverse('profile')}?notify_project={obj.pk}#notifications")
 
 
 class SuggestionView(ListView):
@@ -1273,12 +1619,23 @@ class SuggestionView(ListView):
 
 
 def store_userid(
-    request: AuthenticatedHttpRequest, *, reset: bool = False, remove: bool = False
+    request: AuthenticatedHttpRequest,
+    *,
+    reset: bool = False,
+    remove: bool = False,
+    reset_scope: str = "",
 ) -> None:
     """Store user ID in the session."""
     request.session["social_auth_user"] = request.user.pk
     request.session["password_reset"] = reset
     request.session["account_remove"] = remove
+    if reset and reset_scope:
+        request.session[PASSWORD_RESET_SCOPE_SESSION] = reset_scope
+    else:
+        request.session.pop(PASSWORD_RESET_SCOPE_SESSION, None)
+    request.session.pop(PASSWORD_RESET_SCOPE_TOKEN_SESSION, None)
+    if not reset:
+        request.session.pop(PASSWORD_RESET_EMAIL_SESSION, None)
 
 
 @require_POST
@@ -1314,6 +1671,7 @@ def social_disconnect(
 
 
 @never_cache
+@login_not_required
 @require_POST
 def social_auth(request: AuthenticatedHttpRequest, backend: str):
     """
@@ -1339,16 +1697,6 @@ def social_auth(request: AuthenticatedHttpRequest, backend: str):
         msg = "Backend not found"
         raise Http404(msg) from None
 
-    # Store session ID for OpenID based auth. The session cookies will
-    # not be sent on returning POST request due to SameSite cookie policy
-    if isinstance(request.backend, OpenIdAuth):
-        request.backend.redirect_uri += "?authid={}".format(
-            dumps(
-                (request.session.session_key, get_ip_address(request)),
-                salt=AUTHID_SALT,
-            )
-        )
-
     try:
         return do_auth(request.backend, redirect_name=REDIRECT_FIELD_NAME)
     except AuthException as error:
@@ -1363,20 +1711,24 @@ def auth_fail(request: AuthenticatedHttpRequest, message: str):
 
 
 def registration_fail(request: AuthenticatedHttpRequest, message: str):
-    messages.error(request, gettext("Could not complete registration.") + " " + message)
+    messages.error(request, f"{gettext('Could not complete registration.')} {message}")
     messages.info(
         request,
-        gettext("Please check if you have already registered an account.")
-        + " "
-        + gettext(
-            "You can also request a new password, if you have lost your credentials."
-        ),
+        f"{gettext('Please check if you have already registered an account.')} {gettext('You can also request a new password, if you have lost your credentials.')}",
     )
 
     return redirect(reverse("login"))
 
 
 def auth_redirect_token(request: AuthenticatedHttpRequest):
+    if request.session.get("password_reset"):
+        return auth_fail(
+            request,
+            gettext(
+                "Try resetting your password again to verify your identity, "
+                "the confirmation link probably expired."
+            ),
+        )
     return auth_fail(
         request,
         gettext(
@@ -1395,16 +1747,26 @@ def auth_redirect_state(request: AuthenticatedHttpRequest):
 def handle_missing_parameter(
     request: AuthenticatedHttpRequest, backend: str, error: AuthMissingParameter
 ):
+    if (
+        error.parameter == "user"
+        and request.user.is_authenticated
+        and request.session.get("password_reset")
+    ):
+        return redirect("login")
     if backend != "email" and error.parameter == "email":
-        messages = [
+        error_messages = [
             gettext("Got no e-mail address from third party authentication service.")
         ]
         if "email" in get_auth_keys():
             # Show only if e-mail authentication is turned on
-            messages.append(gettext("Please register using e-mail instead."))
-        return auth_fail(request, " ".join(messages))
-    if error.parameter in {"email", "user", "expires"}:
+            error_messages.append(gettext("Please register using e-mail instead."))
+        return auth_fail(request, " ".join(error_messages))
+    if error.parameter in {"email", "user", "expires", "invitation"}:
         return auth_redirect_token(request)
+    if error.parameter == "RelayState.idp":
+        return auth_fail(
+            request, gettext("Could not parse RelayState from SAML Identity Provider.")
+        )
     if error.parameter in {"state", "code", "RelayState"}:
         return auth_redirect_state(request)
     if error.parameter == "disabled":
@@ -1412,104 +1774,227 @@ def handle_missing_parameter(
     return None
 
 
+def log_handled_auth_failure(
+    request: AuthenticatedHttpRequest,
+    backend: str,
+    error: Exception,
+) -> None:
+    action = "activation"
+    if request.session.get("password_reset"):
+        action = "reset"
+    elif request.session.get("account_remove"):
+        action = "remove"
+    elif request.session.get("reauthenticate"):
+        action = "connect"
+
+    details = [
+        f"backend={backend}",
+        f"action={action}",
+        f"path={request.path}",
+    ]
+
+    if isinstance(error, AuthMissingParameter):
+        details.append(f"parameter={error.parameter}")
+        if error.parameter == "user":
+            details.extend(
+                [
+                    f"current_user={request.user.pk}",
+                    f"init_user={request.session.get('social_auth_user')}",
+                ]
+            )
+    elif message := get_handled_auth_reason(error):
+        details.append(f"reason={message}")
+
+    log_handled_exception("Handled auth failure", extra_log=", ".join(details))
+
+
+def get_handled_auth_reason(error: Exception) -> str:
+    for arg in error.args:
+        if isinstance(arg, str) and arg:
+            return arg
+    return str(error)
+
+
+def is_handled_auth_failed(error: AuthFailed) -> bool:
+    details = " ".join(str(arg) for arg in error.args if isinstance(arg, str)).lower()
+    return any(marker in details for marker in HANDLED_AUTH_FAILED_MARKERS)
+
+
+def get_auth_error_policy(
+    request: AuthenticatedHttpRequest,
+    backend: str,
+    error: Exception,
+) -> AuthErrorPolicy:
+    match error:
+        case InvalidEmail():
+            return AuthErrorPolicy(
+                response=auth_redirect_token(request),
+                reportable=False,
+                cause="Could not register",
+            )
+        case AuthMissingParameter(parameter=parameter) if (
+            parameter in HANDLED_AUTH_PARAMETERS
+        ):
+            return AuthErrorPolicy(
+                response=handle_missing_parameter(request, backend, error),
+                reportable=False,
+                cause="Could not register",
+            )
+        case AuthMissingParameter():
+            return AuthErrorPolicy(
+                response=None,
+                reportable=True,
+                cause="Could not register",
+                handled=False,
+            )
+        case AuthStateMissing() | AuthStateForbidden():
+            return AuthErrorPolicy(
+                response=auth_redirect_state(request),
+                reportable=False,
+                cause="Could not register",
+            )
+        case AuthFailed() if is_handled_auth_failed(error):
+            return AuthErrorPolicy(
+                response=auth_fail(
+                    request,
+                    gettext(
+                        "Could not authenticate, probably due to an expired token "
+                        "or connection error."
+                    ),
+                ),
+                reportable=False,
+                cause="Could not authenticate",
+            )
+        case AuthFailed():
+            return AuthErrorPolicy(
+                response=auth_fail(
+                    request,
+                    gettext(
+                        "Could not authenticate, probably due to an expired token "
+                        "or connection error."
+                    ),
+                ),
+                reportable=True,
+                cause="Could not authenticate",
+            )
+        case AuthCanceled():
+            return AuthErrorPolicy(
+                response=auth_fail(request, gettext("Authentication cancelled.")),
+                reportable=False,
+                cause="Could not register",
+            )
+        case AuthForbidden():
+            return AuthErrorPolicy(
+                response=auth_fail(
+                    request, gettext("The server does not allow authentication.")
+                ),
+                reportable=True,
+                cause="Could not authenticate",
+            )
+        case EmailAlreadyAssociated():
+            return AuthErrorPolicy(
+                response=registration_fail(
+                    request,
+                    gettext(
+                        "The supplied e-mail address is already in use for another account."
+                    ),
+                ),
+                reportable=False,
+                cause="Could not register",
+            )
+        case UsernameAlreadyAssociated():
+            return AuthErrorPolicy(
+                response=registration_fail(
+                    request,
+                    gettext(
+                        "The supplied username is already in use for another account."
+                    ),
+                ),
+                reportable=False,
+                cause="Could not register",
+            )
+        case AuthTokenError():
+            return AuthErrorPolicy(
+                response=registration_fail(
+                    request,
+                    gettext("Authentication failed: %s") % error,
+                ),
+                reportable=True,
+                cause="Could not authenticate",
+            )
+        case AuthAlreadyAssociated():
+            return AuthErrorPolicy(
+                response=registration_fail(
+                    request,
+                    gettext(
+                        "The supplied user identity is already in use for another account."
+                    ),
+                ),
+                reportable=False,
+                cause="Could not register",
+            )
+        case AuthUnreachableProvider() | AuthConnectionError() | HTTPError():
+            return AuthErrorPolicy(
+                response=registration_fail(
+                    request,
+                    gettext("The authentication provider could not be reached."),
+                ),
+                reportable=True,
+                cause="Could not authenticate",
+            )
+        case ValidationError():
+            return AuthErrorPolicy(
+                response=registration_fail(request, str(error)),
+                reportable=True,
+                cause="Could not register",
+            )
+        case _:
+            return AuthErrorPolicy(
+                response=None,
+                reportable=True,
+                cause="Could not register",
+                handled=False,
+            )
+
+
 @csrf_exempt
+@login_not_required
 @never_cache
-def social_complete(request: AuthenticatedHttpRequest, backend: str):  # noqa: C901
+def social_complete(request: AuthenticatedHttpRequest, backend: str):
     """
     Social authentication completion endpoint.
 
     Wrapper around social_django.views.complete:
 
     - Handles backend errors gracefully
-    - Intermediate page (autosubmitted by JavaScript) to avoid
-      confirmations by bots
-    - Restores session from authid for some backends (see social_auth)
     """
-    if "authid" in request.GET:
-        try:
-            session_key, ip_address = loads(
-                request.GET["authid"],
-                max_age=AUTHID_MAX_AGE,
-                salt=AUTHID_SALT,
-            )
-        except (BadSignature, SignatureExpired):
-            report_error("authid signature")
-            return auth_redirect_token(request)
-        if ip_address != get_ip_address(request):
-            return auth_fail(request, "IP address changed, please try again.")
-        engine = import_module(settings.SESSION_ENGINE)
-        request.session = engine.SessionStore(session_key)
-
-    if (
-        "partial_token" in request.GET
-        and "verification_code" in request.GET
-        and "confirm" not in request.GET
-    ):
-        return render(
-            request,
-            "accounts/token.html",
-            {
-                "partial_token": request.GET["partial_token"],
-                "verification_code": request.GET["verification_code"],
-                "backend": backend,
-            },
-        )
     try:
         response = complete(request, backend)
-    except InvalidEmail:
-        report_error("Could not register")
-        return auth_redirect_token(request)
-    except AuthMissingParameter as error:
-        report_error("Could not register")
-        result = handle_missing_parameter(request, backend, error)
-        if result:
-            return result
+    except (
+        InvalidEmail,
+        AuthMissingParameter,
+        AuthStateMissing,
+        AuthStateForbidden,
+        AuthFailed,
+        AuthCanceled,
+        AuthForbidden,
+        EmailAlreadyAssociated,
+        UsernameAlreadyAssociated,
+        AuthTokenError,
+        AuthAlreadyAssociated,
+        AuthUnreachableProvider,
+        AuthConnectionError,
+        HTTPError,
+        ValidationError,
+    ) as error:
+        policy = get_auth_error_policy(request, backend, error)
+        if policy.reportable:
+            report_error(policy.cause)
+        else:
+            log_handled_auth_failure(request, backend, error)
+        if policy.handled:
+            return policy.response
         raise
-    except (AuthStateMissing, AuthStateForbidden):
-        report_error("Could not register")
-        return auth_redirect_state(request)
-    except AuthFailed:
-        report_error("Could not register")
-        return auth_fail(
-            request,
-            gettext(
-                "Could not authenticate, probably due to an expired token "
-                "or connection error."
-            ),
-        )
-    except AuthCanceled:
-        report_error("Could not register")
-        return auth_fail(request, gettext("Authentication cancelled."))
-    except AuthForbidden:
-        report_error("Could not register")
-        return auth_fail(request, gettext("The server does not allow authentication."))
-    except EmailAlreadyAssociated:
-        return registration_fail(
-            request,
-            gettext(
-                "The supplied e-mail address is already in use for another account."
-            ),
-        )
-    except UsernameAlreadyAssociated:
-        return registration_fail(
-            request,
-            gettext("The supplied username is already in use for another account."),
-        )
-    except AuthAlreadyAssociated:
-        return registration_fail(
-            request,
-            gettext(
-                "The supplied user identity is already in use for another account."
-            ),
-        )
-    except AuthUnreachableProvider:
-        return registration_fail(
-            request,
-            gettext("The authentication provider could not be reached."),
-        )
-    except ValidationError as error:
-        report_error("Could not register")
-        return registration_fail(request, str(error))
 
     # Finish second factor authentication
     if persistent_id := request.session.pop(DEVICE_ID_SESSION_KEY, None):
@@ -1535,24 +2020,30 @@ def subscribe(request: AuthenticatedHttpRequest):
             onetime=True,
         )
         try:
-            subscription.full_clean()
-            subscription.save()
+            subscription.full_clean(validate_unique=False, validate_constraints=False)
         except ValidationError:
             pass
+        else:
+            Subscription.objects.update_or_create(
+                user=subscription.user,
+                notification=subscription.notification,
+                scope=subscription.scope,
+                project=subscription.project,
+                component=subscription.component,
+                defaults={
+                    "frequency": subscription.frequency,
+                    "onetime": subscription.onetime,
+                },
+            )
         messages.success(request, gettext("Notification settings adjusted."))
     return redirect_profile("#notifications")
 
 
+@login_not_required
 def unsubscribe(request: AuthenticatedHttpRequest):
     if "i" in request.GET:
-        signer = TimestampSigner()
         try:
-            subscription = Subscription.objects.get(
-                pk=int(signer.unsign(request.GET["i"], max_age=24 * 3600))
-            )
-            subscription.frequency = NotificationFrequency.FREQ_NONE
-            subscription.save(update_fields=["frequency"])
-            messages.success(request, gettext("Notification settings adjusted."))
+            subscription = Subscription.get_by_signed_id(request.GET["i"])
         except (BadSignature, SignatureExpired, Subscription.DoesNotExist):
             messages.error(
                 request,
@@ -1561,11 +2052,16 @@ def unsubscribe(request: AuthenticatedHttpRequest):
                     "please sign in to configure notifications."
                 ),
             )
+        else:
+            subscription.frequency = NotificationFrequency.FREQ_NONE
+            subscription.save(update_fields=["frequency"])
+            messages.success(request, gettext("Notification settings adjusted."))
 
     return redirect_profile("#notifications")
 
 
 @csrf_exempt
+@login_not_required
 @never_cache
 def saml_metadata(request: AuthenticatedHttpRequest):
     if "social_core.backends.saml.SAMLAuth" not in settings.AUTHENTICATION_BACKENDS:
@@ -1573,16 +2069,16 @@ def saml_metadata(request: AuthenticatedHttpRequest):
 
     # Generate metadata
     complete_url = reverse("social:complete", args=("saml",))
-    saml_backend = social_django.utils.load_backend(
-        load_strategy(request), "saml", complete_url
-    )
+    saml_backend = load_backend(load_strategy(request), "saml", complete_url)
     metadata, errors = saml_backend.generate_metadata_xml()
 
     # Handle errors
     if errors:
-        add_breadcrumb(category="auth", message="SAML errors", errors=errors)
-        report_error("SAML metadata", level="error")
-        return HttpResponseServerError(content=", ".join(errors))
+        add_breadcrumb(
+            category="auth", message="SAML errors", errors=errors, metadata=metadata
+        )
+        msg = "Invalid SAML metadata"
+        raise ImproperlyConfigured(msg)
 
     return HttpResponse(content=metadata, content_type="text/xml")
 
@@ -1603,7 +2099,9 @@ class UserList(ListView):
         if form.is_valid():
             search = form.cleaned_data.get("q", "")
             if search:
-                users = users.search(search, parser=form.fields["q"].parser)
+                users = users.search(
+                    search, parser=form.fields["q"].parser, user=self.request.user
+                )
         else:
             users = users.order()
 
@@ -1728,6 +2226,8 @@ class TOTPView(FormView):
     form_class = TOTPDeviceForm
     session_key = SESSION_SECOND_FACTOR_TOTP
 
+    request: AuthenticatedHttpRequest
+
     @cached_property
     def totp_key(self) -> str:
         key = self.request.session.get(self.session_key, None)
@@ -1765,7 +2265,8 @@ class TOTPView(FormView):
     @property
     def totp_svg(self):
         image = qrcode.make(self.totp_url, image_factory=qrcode.image.svg.SvgPathImage)
-        return mark_safe(image.to_string(encoding="unicode"))  # noqa: S308
+        # ruff: ignore[suspicious-mark-safe-usage]
+        return mark_safe(image.to_string(encoding="unicode"))
 
     def get_context_data(self, **kwargs):
         """Create context for rendering page."""
@@ -1782,31 +2283,54 @@ class TOTPView(FormView):
         return kwargs
 
     def form_valid(self, form: TOTPDeviceForm):
+        user = self.request.user
         device = form.save()
         AuditLog.objects.create(
-            self.request.user,
+            user,
             self.request,
             "twofactor-add",
             device=get_key_name(device),
         )
+        if form.cleaned_data["remove_previous"]:
+            for old in user.totpdevice_set.exclude(pk=device.pk):
+                key_name = get_key_name(old)
+                old.delete()
+                AuditLog.objects.create(
+                    user, self.request, "twofactor-remove", device=key_name
+                )
+
         return redirect_profile("#account")
 
 
 class SecondFactorMixin(View):
-    def second_factor_completed(self, device: Device) -> None:
-        # Store audit log entry aboute used device and update last used device type
+    request: AuthenticatedHttpRequest
+
+    def second_factor_completed(self, device: Device) -> User:
+        # Store audit log entry about used device and update last used device type
         user = self.get_user()
         user.profile.log_2fa(self.request, device)
         del self.request.session[SESSION_SECOND_FACTOR_USER]
+        self.request.session[SESSION_SECOND_FACTOR_TIMESTAMP] = int(time.time())
 
         if not self.request.session.get(SESSION_SECOND_FACTOR_SOCIAL):
             # Keep login on social pipeline if we got here from it
             auth_login(self.request, user)
             # Perform OTP login
             otp_login(self.request, device)
+            adjust_session_expiry(
+                request=self.request,
+                user=user,
+                is_login=False,
+                force=True,
+            )
         else:
             self.request.session[DEVICE_ID_SESSION_KEY] = device.persistent_id
             # This is completed in social_complete after completing social login
+        return user
+
+    def second_factor_failed(self) -> None:
+        user = self.get_user()
+        user.profile.log_2fa_failed(self.request, self.get_backend())
 
     def get_user(self) -> User:
         try:
@@ -1820,15 +2344,20 @@ class SecondFactorMixin(View):
         user.backend = backend
         return user
 
+    def get_backend(self) -> DeviceType:
+        raise NotImplementedError
 
+
+@method_decorator(login_not_required, name="dispatch")
 class SecondFactorLoginView(SecondFactorMixin, RedirectURLMixin, FormView):
     template_name = "accounts/2fa.html"
     next_page = settings.LOGIN_REDIRECT_URL
-    forms = {
+    forms: ClassVar[dict[str, type[Form]]] = {
         "totp": TOTPTokenForm,
         "webauthn": WebAuthnTokenForm,
         "recovery": OTPTokenForm,
     }
+    request: AuthenticatedHttpRequest
 
     def get_backend(self) -> DeviceType:
         backend = self.kwargs["backend"]
@@ -1856,6 +2385,7 @@ class SecondFactorLoginView(SecondFactorMixin, RedirectURLMixin, FormView):
         return context
 
     @method_decorator(session_ratelimit_post("second_factor"))
+    @method_decorator(login_not_required)
     def dispatch(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         self.user = self.get_user()
         return super().dispatch(request, *args, **kwargs)
@@ -1865,16 +2395,34 @@ class SecondFactorLoginView(SecondFactorMixin, RedirectURLMixin, FormView):
 
         return HttpResponseRedirect(self.get_success_url())
 
+    def form_invalid(self, form):
+        self.second_factor_failed()
+        return super().form_invalid(form)
 
+
+class WebAuthnMixin(SecondFactorMixin):
+    def get_backend(self) -> DeviceType:
+        return "webauthn"
+
+
+@method_decorator(login_not_required, name="dispatch")
 class WeblateBeginCredentialAuthenticationView(
-    SecondFactorMixin, BeginCredentialAuthenticationView
+    WebAuthnMixin, BeginCredentialAuthenticationView
 ):
     pass
 
 
 @method_decorator(session_ratelimit_post("second_factor"), name="dispatch")
+@method_decorator(login_not_required, name="dispatch")
 class WeblateCompleteCredentialAuthenticationView(
-    SecondFactorMixin, CompleteCredentialAuthenticationView
+    WebAuthnMixin, CompleteCredentialAuthenticationView
 ):
     def complete_auth(self, device: WebAuthnCredential) -> User:
         return self.second_factor_completed(device)
+
+    def post(self, *args, **kwargs):
+        try:
+            return super().post(*args, **kwargs)
+        except OTPWebAuthnApiError:
+            self.second_factor_failed()
+            raise

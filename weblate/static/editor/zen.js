@@ -5,38 +5,54 @@
 (() => {
   const EditorBase = WLT.Editor.Base;
 
-  const $window = $(window);
-  const $document = $(document);
-
   function ZenEditor() {
     EditorBase.call(this);
 
-    $window.scroll(() => {
-      const $loadingNext = $("#loading-next");
-      const loader = $("#zen-load");
+    window.addEventListener("scroll", () => {
+      const loadingNext = document.getElementById("loading-next");
+      const loader = document.getElementById("zen-load");
+      if (loadingNext === null || loader === null) {
+        return;
+      }
 
-      if ($window.scrollTop() >= $document.height() - 2 * $window.height()) {
+      if (
+        window.scrollY >=
+        document.documentElement.scrollHeight - 2 * window.innerHeight
+      ) {
         if (
-          $("#last-section").length > 0 ||
-          $loadingNext.css("display") !== "none"
+          document.getElementById("last-section") !== null ||
+          getComputedStyle(loadingNext).display !== "none"
         ) {
           return;
         }
-        $loadingNext.show();
+        loadingNext.style.display = "";
 
-        loader.data("offset", 20 + Number.parseInt(loader.data("offset"), 10));
+        const newOffset = 20 + Number.parseInt(loader.dataset.offset, 10);
+        loader.dataset.offset = String(newOffset);
 
-        $.get(
-          `${loader.attr("href")}&offset=${loader.data("offset")}`,
-          (data) => {
-            $loadingNext.hide();
+        fetch(`${loader.getAttribute("href")}&offset=${newOffset}`, {
+          credentials: "same-origin",
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        })
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            return response.text();
+          })
+          .then((data) => {
+            loadingNext.style.display = "none";
 
-            $(".zen tfoot").before(data);
+            const tfoot = document.querySelector(".zen tfoot");
+            tfoot?.insertAdjacentHTML("beforebegin", data);
 
             this.init();
             initHighlight(document);
-          },
-        );
+          })
+          .catch((err) => {
+            loadingNext.style.display = "none";
+            addAlert(err.message);
+          });
       }
     });
 
@@ -45,72 +61,77 @@
      * - show whole element if moving back
      * - scroll down if in bottom half of the window
      */
-    $document.on("focus", ".zen .translation-editor", function () {
-      const editor = $(this);
-      const container = editor.closest(".translator").closest("tr");
-      const current = $window.scrollTop();
-      const rowOffset = $(this).closest("tbody").offset().top;
-      if (rowOffset < current || rowOffset - current > $window.height() / 2) {
+    delegate(document, "focusin", ".zen .translation-editor", function () {
+      const container = this.closest(".translator")?.closest("tr");
+      const current = window.scrollY;
+      const tbody = this.closest("tbody");
+      if (!tbody) {
+        return;
+      }
+      const rowOffset = tbody.getBoundingClientRect().top + window.scrollY;
+      if (rowOffset < current || rowOffset - current > window.innerHeight / 2) {
         // Scroll to view source string
-        $([document.documentElement, document.body]).animate(
-          {
-            scrollTop: rowOffset,
-          },
-          100,
-        );
+        window.scrollTo({ top: rowOffset, behavior: "smooth" });
         // Stick the editor to the bottom of the screen when out of view
-        $(".sticky-bottom").removeClass("sticky-bottom"); // Hide previous
-        container?.addClass("sticky-bottom");
-        container.find(".hide-sticky").on("click", () => {
-          container.removeClass("sticky-bottom");
-        });
+        for (const el of document.querySelectorAll(".sticky-bottom")) {
+          el.classList.remove("sticky-bottom"); // Hide previous
+        }
+        if (container) {
+          container.classList.add("sticky-bottom");
+          for (const hide of container.querySelectorAll(".hide-sticky")) {
+            hide.addEventListener("click", () => {
+              container.classList.remove("sticky-bottom");
+            });
+          }
+        }
       }
     });
 
-    $document.on("change", ".translation-editor", handleTranslationChange);
-    $document.on("change", ".fuzzy_checkbox", handleTranslationChange);
-    $document.on("change", ".review_radio", handleTranslationChange);
-
-    Mousetrap.bindGlobal("mod+end", (_e) => {
-      $(".zen-unit:last").find(".translation-editor:first").focus();
+    hotkeys("ctrl+end,command+end", () => {
+      const units = document.querySelectorAll(".zen-unit");
+      units[units.length - 1]?.querySelector(".translation-editor")?.focus();
       return false;
     });
-    Mousetrap.bindGlobal("mod+home", (_e) => {
-      $(".zen-unit:first").find(".translation-editor:first").focus();
+    hotkeys("ctrl+home,command+home", () => {
+      document
+        .querySelector(".zen-unit")
+        ?.querySelector(".translation-editor")
+        ?.focus();
       return false;
     });
-    Mousetrap.bindGlobal("mod+pagedown", (_e) => {
-      const focus = $(":focus");
-
-      if (focus.length === 0) {
-        $(".zen-unit:first").find(".translation-editor:first").focus();
+    hotkeys("ctrl+pagedown,command+pagedown", () => {
+      const focus = document.activeElement;
+      if (!focus || focus === document.body) {
+        document
+          .querySelector(".zen-unit")
+          ?.querySelector(".translation-editor")
+          ?.focus();
       } else {
         focus
           .closest(".zen-unit")
-          .next()
-          .find(".translation-editor:first")
-          .focus();
+          ?.nextElementSibling?.querySelector(".translation-editor")
+          ?.focus();
       }
       return false;
     });
-    Mousetrap.bindGlobal("mod+pageup", (_e) => {
-      const focus = $(":focus");
-
-      if (focus.length === 0) {
-        $(".zen-unit:last").find(".translation-editor:first").focus();
+    hotkeys("ctrl+pageup,command+pageup", () => {
+      const focus = document.activeElement;
+      if (!focus || focus === document.body) {
+        const units = document.querySelectorAll(".zen-unit");
+        units[units.length - 1]?.querySelector(".translation-editor")?.focus();
       } else {
         focus
           .closest(".zen-unit")
-          .prev()
-          .find(".translation-editor:first")
-          .focus();
+          ?.previousElementSibling?.querySelector(".translation-editor")
+          ?.focus();
       }
       return false;
     });
 
-    $window.on("beforeunload", () => {
-      if ($(".translation-modified").length > 0) {
-        return gettext(
+    window.addEventListener("beforeunload", (e) => {
+      if (document.querySelector(".translation-modified") !== null) {
+        e.preventDefault();
+        e.returnValue = gettext(
           "There are some unsaved changes, are you sure you want to leave?",
         );
       }
@@ -123,74 +144,157 @@
     EditorBase.prototype.init.call(this);
 
     /* Minimal height for side-by-side editor */
-    $(".zen-horizontal .translator").each(function () {
-      const $this = $(this);
-      const tdHeight = $this.height();
+    const getContentHeight = (el) =>
+      Number.parseFloat(getComputedStyle(el).height) || 0;
+    for (const translator of document.querySelectorAll(
+      ".zen-horizontal .translator",
+    )) {
+      const tdHeight = getContentHeight(translator);
+      const form = translator.querySelector("form");
+      const contentHeight = form ? getContentHeight(form) : 0;
+      const editors = translator.querySelectorAll(".translation-editor");
       let editorHeight = 0;
-      const contentHeight = $this.find("form").height();
-      const $editors = $this.find(".translation-editor");
-      $editors.each(function () {
-        const $editor = $(this);
-        editorHeight += $editor.height();
-      });
+      for (const editor of editors) {
+        editorHeight += getContentHeight(editor);
+      }
       /* There is 10px padding */
-      $editors.css(
-        "min-height",
-        `${
-          (tdHeight - (contentHeight - editorHeight - 10)) / $editors.length
-        }px`,
-      );
-    });
+      const minHeight =
+        (tdHeight - (contentHeight - editorHeight - 10)) / editors.length;
+      for (const editor of editors) {
+        editor.style.minHeight = `${minHeight}px`;
+      }
+    }
   };
 
   /* Handlers */
 
+  delegate(document, "focusin", ".translation-editor", function () {
+    const row = this.closest("tr");
+    if (!row) {
+      return;
+    }
+    const checksum = row.querySelector("[name=checksum]")?.value;
+    const statusdiv = document.getElementById(`status-${checksum}`);
+    const focusTimeout = row._focusTimer;
+    // Focus returned quickly; cancel pending save
+    if (focusTimeout) {
+      statusdiv?.classList.remove("unit-state-save-timeout");
+      clearTimeout(focusTimeout);
+      row._focusTimer = undefined;
+    }
+  });
+
+  delegate(document, "focusout", ".translation-editor", function () {
+    const row = this.closest("tr");
+    if (!row) {
+      return;
+    }
+    const checksum = row.querySelector("[name=checksum]")?.value;
+    const statusdiv = document.getElementById(`status-${checksum}`);
+    // Editor lost focus and has changes
+    if (this.classList.contains("has-changes")) {
+      statusdiv?.classList.add("unit-state-save-timeout");
+      const focusTimeout = setTimeout(() => {
+        row._focusTimer = undefined;
+        handleTranslationChange.call(this);
+      }, 1000); // Grace period before saving
+      row._focusTimer = focusTimeout;
+    }
+  });
+
+  // Allow immediate saves for checkbox/radio changes
+  delegate(document, "change", ".fuzzy_checkbox", function () {
+    handleTranslationChange.call(this);
+  });
+  delegate(document, "change", ".review_radio", function () {
+    handleTranslationChange.call(this);
+  });
+
   function handleTranslationChange() {
-    const $this = $(this);
-    const $row = $this.closest("tr");
-    const checksum = $row.find("[name=checksum]").val();
+    const row = this.closest("tr");
+    if (!row) {
+      return;
+    }
+    const checksum = row.querySelector("[name=checksum]")?.value;
+    const statusdiv = document.getElementById(`status-${checksum}`);
+    const form = row.querySelector("form");
+    if (!form || !statusdiv) {
+      return;
+    }
+    const payload = new URLSearchParams(new FormData(form)).toString();
+    const lastPayload = statusdiv._lastPayload;
 
-    const statusdiv = $(`#status-${checksum}`);
-
-    /* Wait until previous operation on this field is completed */
-    if (statusdiv.hasClass("unit-state-saving")) {
+    // Guard: skip if a save is already happening
+    if (statusdiv.classList.contains("unit-state-saving")) {
       setTimeout(() => {
-        $this.trigger("change");
+        handleTranslationChange.call(this); // Reinvoke
       }, 100);
       return;
     }
 
-    $row.addClass("translation-modified");
-
-    const form = $row.find("form");
-    statusdiv.addClass("unit-state-saving");
-    const payload = form.serialize();
-    if (payload === statusdiv.data("last-payload")) {
+    // First save
+    if (lastPayload === undefined) {
+      statusdiv._lastPayload = payload;
+    }
+    // Guard: skip if nothing has changed
+    if (payload === lastPayload) {
+      statusdiv.classList.remove("unit-state-save-timeout");
       return;
     }
-    statusdiv.data("last-payload", payload);
-    $.ajax({
-      type: "POST",
-      url: form.attr("action"),
-      data: payload,
-      dataType: "json",
-      error: (_jqXhr, _textStatus, errorThrown) => {
-        addAlert(errorThrown);
+
+    row.classList.add("translation-modified");
+    statusdiv.classList.add("unit-state-saving");
+    statusdiv._lastPayload = payload;
+
+    fetch(form.getAttribute("action"), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Requested-With": "XMLHttpRequest",
+        Accept: "application/json",
       },
-      success: (data) => {
-        statusdiv.attr("class", `unit-state-cell ${data.unit_state_class}`);
-        statusdiv.attr("title", data.unit_state_title);
-        $.each(data.messages, (_i, val) => {
-          addAlert(val.text, val.kind);
-        });
-        $row.removeClass("translation-modified").addClass("translation-saved");
-        $row.find("#unsaved-label").remove();
-        $row.find(".translation-editor").removeClass("has-changes");
-        if (data.translationsum !== "") {
-          $row.find("input[name=translationsum]").val(data.translationsum);
+      body: payload,
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
         }
-      },
-    });
+        return response.json();
+      })
+      .then((data) => {
+        statusdiv.setAttribute(
+          "class",
+          `unit-state-cell ${data.unit_state_class}`,
+        );
+        statusdiv.setAttribute("title", data.unit_state_title);
+
+        for (const val of data.messages) {
+          addAlert(val.text, val.kind);
+        }
+
+        row.classList.remove("translation-modified");
+        row.classList.add("translation-saved");
+        row.querySelector("#unsaved-label")?.remove();
+        for (const el of row.querySelectorAll(".translation-editor")) {
+          el.classList.remove("has-changes");
+        }
+
+        if (data.translationsum !== "") {
+          const sum = row.querySelector("input[name=translationsum]");
+          if (sum) {
+            sum.value = data.translationsum;
+          }
+        }
+      })
+      .catch((err) => {
+        addAlert(err.message);
+      })
+      .finally(() => {
+        statusdiv.classList.remove("unit-state-saving");
+        statusdiv.classList.remove("unit-state-save-timeout");
+        row._saveTimer = undefined;
+      });
   }
 
   document.addEventListener("DOMContentLoaded", () => {

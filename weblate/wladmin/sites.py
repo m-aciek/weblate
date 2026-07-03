@@ -10,6 +10,7 @@ from django.conf import settings
 from django.contrib import admin
 from django.contrib.admin import AdminSite, sites
 from django.contrib.auth import REDIRECT_FIELD_NAME
+from django.contrib.auth.decorators import login_not_required
 from django.http import HttpResponseRedirect
 from django.urls import reverse
 from django.utils.decorators import method_decorator
@@ -27,17 +28,20 @@ class WeblateAdminSite(AdminSite):
     enable_nav_sidebar = False
 
     @property
-    def login_form(self):
+    def login_form(self):  # type: ignore[override]
+        # ruff: ignore[import-outside-top-level]
         from weblate.accounts.forms import AdminLoginForm
 
         return AdminLoginForm
 
     def logout(self, request, extra_context=None):
+        # ruff: ignore[import-outside-top-level]
         from weblate.accounts.views import WeblateLogoutView
 
         return WeblateLogoutView.as_view()(request)
 
     @method_decorator(never_cache)
+    @method_decorator(login_not_required)
     def login(self, request, extra_context=None):
         """
         Display the login form for the given HttpRequest.
@@ -48,6 +52,7 @@ class WeblateAdminSite(AdminSite):
         # it cannot import models from other applications at the module level,
         # and django.contrib.admin.forms eventually imports User.
 
+        # ruff: ignore[import-outside-top-level]
         from weblate.accounts.views import BaseLoginView
 
         if request.method == "GET" and self.has_permission(request):
@@ -78,12 +83,13 @@ class WeblateAdminSite(AdminSite):
         return BaseLoginView.as_view(**defaults)(request)
 
     @property
-    def site_url(self):
+    def site_url(self) -> str:  # type: ignore[override]
         if settings.URL_PREFIX:
             return settings.URL_PREFIX
         return "/"
 
     def each_context(self, request: AuthenticatedHttpRequest):  # type: ignore[override]
+        # ruff: ignore[import-outside-top-level]
         from weblate.wladmin.models import ConfigurationError
 
         result = super().each_context(request)

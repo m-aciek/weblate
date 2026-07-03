@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import os.path
+from pathlib import Path
 from ssl import CertificateError
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -17,13 +18,13 @@ from django.utils.html import format_html
 from django.utils.translation import gettext, pgettext
 
 from weblate.utils.errors import report_error
-from weblate.utils.requests import request
+from weblate.utils.requests import fetch_url
 
 if TYPE_CHECKING:
     from weblate.auth.models import User
 
 
-def avatar_for_email(email, size=80) -> str:
+def avatar_for_email(email: str, size: int = 80) -> str:
     """Generate url for avatar."""
     # Safely handle blank e-mail
     if not email:
@@ -36,22 +37,24 @@ def avatar_for_email(email, size=80) -> str:
     return f"{settings.AVATAR_URL_PREFIX}avatar/{mail_hash}?{querystring}"
 
 
-def get_fallback_avatar_url(size: int):
+def get_fallback_avatar_url(size: int, name: Literal["weblate", "api"] = "weblate"):
     """Return URL of fallback avatar."""
-    return os.path.join(settings.STATIC_URL, f"weblate-{size}.png")
+    return os.path.join(settings.STATIC_URL, f"{name}-{size}.png")
 
 
-def get_fallback_avatar(size: int):
+def get_fallback_avatar(size: int) -> bytes:
     """Return fallback avatar."""
     filename = finders.find(f"weblate-{size}.png")
-    with open(filename, "rb") as handle:
-        return handle.read()
+    if filename is None:
+        msg = f"Missing fallback avatar file for {size=}!"
+        raise OSError(msg)
+    return Path(filename).read_bytes()
 
 
-def get_avatar_image(user: User, size: int):
+def get_avatar_image(user: User, size: int) -> bytes:
     """Return avatar image from cache (if available) or download it."""
     username = user.username
-    cache_key = "-".join(("avatar-img", username, str(size)))
+    cache_key = f"avatar-img-{username}-{size!s}"
 
     # Try using avatar specific cache if available
     try:
@@ -71,14 +74,14 @@ def get_avatar_image(user: User, size: int):
     return image
 
 
-def download_avatar_image(email: str, size: int):
+def download_avatar_image(email: str, size: int) -> bytes:
     """Download avatar image from remote server."""
     url = avatar_for_email(email, size)
-    response = request("get", url, timeout=1.0)
+    response = fetch_url("get", url, timeout=1.0)
     return response.content
 
 
-def get_user_display(user: User, icon: bool = True, link: bool = False):
+def get_user_display(user: User | None, icon: bool = True, link: bool = False) -> str:
     """Nicely format user for display."""
     # Did we get any user?
     if user is None:
@@ -103,10 +106,12 @@ def get_user_display(user: User, icon: bool = True, link: bool = False):
         if email == "noreply@weblate.org":
             avatar = get_fallback_avatar_url(32)
         else:
-            avatar = reverse("user_avatar", kwargs={"user": user.username, "size": 32})
+            avatar = reverse(
+                "user_avatar", kwargs={"user": cast("User", user).username, "size": 32}
+            )
 
         username = format_html(
-            '<img src="{}" class="avatar w32" alt="{}" /> {}',
+            '<img src="{}" class="avatar w32" loading="lazy" alt="{}" /> {}',
             avatar,
             gettext("User avatar"),
             username,
@@ -114,7 +119,7 @@ def get_user_display(user: User, icon: bool = True, link: bool = False):
 
     if link and user is not None:
         return format_html(
-            '<a href="{}" title="{}">{}</a>',
+            '<a href="{}" title="{}" class="user-link"><span>{}</span></a>',
             user.get_absolute_url(),
             full_name,
             username,

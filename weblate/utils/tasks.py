@@ -2,14 +2,17 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from __future__ import annotations
+
 import gzip
 import os
 import shutil
-import subprocess
-import sys
+import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import time
 from importlib import import_module
+from pathlib import Path
 from shutil import copyfile
+from typing import cast
 
 from celery.schedules import crontab
 from django.conf import settings
@@ -21,17 +24,17 @@ import weblate.utils.version
 from weblate.formats.models import FILE_FORMATS
 from weblate.logger import LOGGER
 from weblate.machinery.models import MACHINERY
-from weblate.trans.models import Component, Translation
-from weblate.trans.util import get_clean_env
+from weblate.trans.models import Component, Project, Translation
 from weblate.utils.backup import backup_lock
 from weblate.utils.celery import app
+from weblate.utils.commands import get_clean_env
 from weblate.utils.data import data_dir
-from weblate.utils.db import using_postgresql
 from weblate.utils.errors import add_breadcrumb, report_error
 from weblate.utils.lock import WeblateLockTimeoutError
 from weblate.vcs.models import VCS_REGISTRY
 
 from .const import HEARTBEAT_FREQUENCY
+from .encoding import get_encoding_list
 
 
 @app.task(trail=False)
@@ -41,7 +44,7 @@ def ping():
         "vcs": sorted(VCS_REGISTRY.keys()),
         "formats": sorted(FILE_FORMATS.keys()),
         "mt_services": sorted(MACHINERY.keys()),
-        "encoding": [sys.getfilesystemencoding(), sys.getdefaultencoding()],
+        "encoding": get_encoding_list(),
         "uid": os.getuid(),
         "data_dir": settings.DATA_DIR,
     }
@@ -51,19 +54,17 @@ def ping():
 def heartbeat() -> None:
     cache.set("celery_loaded", time.time())
     cache.set("celery_heartbeat", time.time())
-    cache.set(
-        "celery_encoding", [sys.getfilesystemencoding(), sys.getdefaultencoding()]
-    )
+    cache.set("celery_encoding", get_encoding_list())
 
 
-@app.task(trail=False, autoretry_for=(WeblateLockTimeoutError,))
-def settings_backup() -> None:
+def run_settings_backup() -> None:
     with backup_lock():
         # Expand settings in case it contains non-trivial code
         command = diffsettings.Command()
         kwargs = {"default": None, "all": False, "output": "hash"}
-        with open(data_dir("backups", "settings-expanded.py"), "w") as handle:
-            handle.write(command.handle(**kwargs))
+        Path(data_dir("backups", "settings-expanded.py")).write_text(
+            command.handle(**kwargs), encoding="utf-8"
+        )
 
         # Backup original settings
         if settings.SETTINGS_MODULE:
@@ -72,25 +73,48 @@ def settings_backup() -> None:
                 copyfile(settings_mod.__file__, data_dir("backups", "settings.py"))
 
         # Backup environment (to make restoring Docker easier)
-        with open(data_dir("backups", "environment.yml"), "w") as handle:
+        with open(
+            data_dir("backups", "environment.yml"), "w", encoding="utf-8"
+        ) as handle:
             yaml = YAML()
             yaml.dump(dict(os.environ), handle)
 
 
+@app.task(trail=False, autoretry_for=(WeblateLockTimeoutError,))
+def settings_backup() -> None:
+    run_settings_backup()
+
+
 @app.task(trail=False)
 def update_translation_stats_parents(pk: int) -> None:
-    translation = Translation.objects.get(pk=pk)
+    try:
+        translation = Translation.objects.get(pk=pk)
+    except Translation.DoesNotExist:
+        return
     translation.stats.update_parents()
 
 
 @app.task(trail=False)
 def update_language_stats_parents(pk: int) -> None:
-    component = Component.objects.get(pk=pk)
+    try:
+        component = Component.objects.get(pk=pk)
+    except Component.DoesNotExist:
+        return
     component.stats.update_language_stats_parents()
 
 
-@app.task(trail=False, autoretry_for=(WeblateLockTimeoutError,))
-def database_backup() -> None:
+@app.task(trail=False)
+def update_project_stats_link(pk: int) -> None:
+    try:
+        project = Project.objects.get(pk=pk)
+    except Project.DoesNotExist:
+        return
+    for language in project.stats.get_language_stats():
+        language.update_stats(update_parents=False)
+    project.stats.update_stats()
+
+
+def run_database_backup() -> None:
     if settings.DATABASE_BACKUP == "none":
         return
     with backup_lock():
@@ -101,50 +125,30 @@ def database_backup() -> None:
         out_compressed = data_dir("backups", "database.sql.gz")
         out_text = data_dir("backups", "database.sql")
 
-        if using_postgresql():
-            cmd = [
-                "pg_dump",
-                # Superuser only, crashes on Alibaba Cloud Database PolarDB
-                "--no-subscriptions",
-                "--clean",
-                "--if-exists",
-                "--dbname",
-                database["NAME"],
-            ]
+        cmd = [
+            "pg_dump",
+            # Superuser only, crashes on Alibaba Cloud Database PolarDB
+            "--no-subscriptions",
+            "--clean",
+            "--if-exists",
+            "--dbname",
+            database["NAME"],
+        ]
 
-            if database["HOST"]:
-                cmd.extend(["--host", database["HOST"]])
-            if database["PORT"]:
-                cmd.extend(["--port", database["PORT"]])
-            if database["USER"]:
-                cmd.extend(["--username", database["USER"]])
-            if settings.DATABASE_BACKUP == "compressed":
-                cmd.extend(["--file", out_compressed])
-                cmd.extend(["--compress", "6"])
-                compress = False
-            else:
-                cmd.extend(["--file", out_text])
-
-            env["PGPASSWORD"] = database["PASSWORD"]
+        if database["HOST"]:
+            cmd.extend(["--host", database["HOST"]])
+        if database["PORT"]:
+            cmd.extend(["--port", database["PORT"]])
+        if database["USER"]:
+            cmd.extend(["--username", database["USER"]])
+        if settings.DATABASE_BACKUP == "compressed":
+            cmd.extend(["--file", out_compressed])
+            cmd.extend(["--compress", "6"])
+            compress = False
         else:
-            cmd = [
-                "mysqldump",
-                "--result-file",
-                out_text,
-                "--single-transaction",
-                "--skip-lock-tables",
-            ]
+            cmd.extend(["--file", out_text])
 
-            if database["HOST"]:
-                cmd.extend(["--host", database["HOST"]])
-            if database["PORT"]:
-                cmd.extend(["--port", database["PORT"]])
-            if database["USER"]:
-                cmd.extend(["--user", database["USER"]])
-
-            cmd.extend(["--databases", database["NAME"]])
-
-            env["MYSQL_PWD"] = database["PASSWORD"]
+        env["PGPASSWORD"] = cast("str", database["PASSWORD"])
 
         try:
             subprocess.run(
@@ -170,6 +174,11 @@ def database_backup() -> None:
             with open(out_text, "rb") as f_in, gzip.open(out_compressed, "wb") as f_out:
                 shutil.copyfileobj(f_in, f_out)
             os.unlink(out_text)
+
+
+@app.task(trail=False, autoretry_for=(WeblateLockTimeoutError,))
+def database_backup() -> None:
+    run_database_backup()
 
 
 @app.on_after_finalize.connect

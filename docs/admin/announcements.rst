@@ -5,7 +5,8 @@ Announcements
 
    In prior releases this feature was called whiteboard messages.
 
-Provide info to your translators by posting announcements, site-wide, per project, component, or language.
+Provide info to your translators by posting announcements, site-wide, per project,
+category, component, or language.
 
 Announce the purpose, deadlines, status, or specify targets for translation.
 
@@ -15,17 +16,13 @@ projects (unless they opt out).
 This can be useful for various things from announcing the purpose of the website to
 specifying targets for translations.
 
-The announcements can posted on each level in the :guilabel:`Manage` menu, using
+The announcements can posted on each level in the :guilabel:`Operations` menu, using
 :guilabel:`Post announcement`:
 
 .. image:: /screenshots/announcement-project.webp
     :alt: Image showing an announcement that reads: "Translations will be used only if they reach 60%" atop the dashboard view.
 
-It can be also added using the admin interface:
-
-.. image:: /screenshots/announcement.webp
-
-The announcements are then shown based on their specified context:
+The announcements are shown based on their specified context:
 
 No context specified
 
@@ -34,6 +31,15 @@ No context specified
 Project specified
 
     Shown within the project, including all its components and translations.
+
+Project and language specified
+
+    Shown within the project for the specified language, including all its
+    translations.
+
+Category specified
+
+    Shown within the category, including all its components and translations.
 
 Component specified
 

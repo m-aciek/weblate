@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from django.contrib.auth.decorators import login_not_required
 from django.core.cache import cache
 from django.http import HttpResponse
 from django.template.loader import render_to_string
@@ -21,7 +22,8 @@ if TYPE_CHECKING:
     from weblate.auth.models import AuthenticatedHttpRequest
 
 
-@method_decorator(cache_control(max_age=7200), name="get")
+@method_decorator(cache_control(max_age=7200), name="dispatch")
+@method_decorator(login_not_required, name="dispatch")
 class CustomCSSView(TemplateView):
     template_name = "configuration/custom.css"
     cache_key = "css:custom"
@@ -74,7 +76,7 @@ class CustomCSSView(TemplateView):
         request.weblate_custom_css = css
         return css
 
-    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):
+    def get(self, request: AuthenticatedHttpRequest, *args, **kwargs):  # type: ignore[override]
         return HttpResponse(content_type="text/css", content=self.get_css(request))
 
     @classmethod

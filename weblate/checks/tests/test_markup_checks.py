@@ -6,7 +6,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from django.contrib.admindocs.utils import docutils_is_available
+from docutils.nodes import Text, substitution_reference
+from docutils.nodes import target as docutils_target
 
 from weblate.checks.markup import (
     BBCodeCheck,
@@ -17,13 +21,14 @@ from weblate.checks.markup import (
     RSTSyntaxCheck,
     SafeHTMLCheck,
     URLCheck,
+    XMLCharsAroundTagsCheck,
     XMLTagsCheck,
     XMLValidityCheck,
+    extract_rst_references,
+    has_changed_placeholder_attributes,
 )
-from weblate.checks.models import Check
 from weblate.checks.tests.test_checks import CheckTestCase
-from weblate.lang.models import Language, Plural
-from weblate.trans.models import Component, Translation, Unit
+from weblate.trans.tests.factories import make_check, make_unit
 
 
 class BBCodeCheckTest(CheckTestCase):
@@ -152,6 +157,68 @@ class XMLTagsCheckTest(CheckTestCase):
         )
 
 
+class XMLCharsAroundTagsCheckTest(CheckTestCase):
+    check = XMLCharsAroundTagsCheck()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.test_good_matching = ("<a>string</a>", "<a>string</a>", "")
+        self.test_good_none = ("string", "string", "")
+        self.test_failure_1 = ("<a>string</a>", "<a> string</a>", "")
+        self.test_failure_2 = ("<a> string</a>", "<a>string</a>", "")
+        self.test_failure_3 = ("<a>string</a>", "<a>string </a>", "")
+        self.test_failure_4 = ("<a>string </a>", "<a>string</a>", "")
+
+    def test_outside_of_tags(self) -> None:
+        self.do_test(True, ("b <a>c</a>", "b<a>c</a>", ""))
+        self.do_test(True, ("b<a>c</a>", "!<a>c</a>", ""))
+        self.do_test(False, ("b<a>c</a>", "<a>c</a>", ""))
+        self.do_test(False, ("<a>c</a>b", "<a>c</a>", ""))
+
+    def test_multiple_tags(self) -> None:
+        self.do_test(False, ("<a><b>c</b></a>", "<a><b>d</b></a>", ""))
+        self.do_test(True, ("c<a>d</a>e<b>f</b>g", "c<a>d</a> <b>f</b>g", ""))
+
+    def test_special_chars(self) -> None:
+        self.do_test(False, ("<a> ! </a>", "<a>!</a>", ""))
+        self.do_test(False, ('"b <a>c</a>d"', '"<a>c</a>b d"', ""))
+        self.do_test(True, ('"b<a>c</a>d"', '"<a>c</a>b d"', ""))
+
+    def test_unicode(self) -> None:
+        self.do_test(False, ("š<a>c</a>", "b<a>c</a>", ""))
+        self.do_test(True, ("š <a>c</a>", "b<a>c</a>", ""))
+        self.do_test(False, ("š<a>š</a>š", "b<a>b</a>b", ""))
+        self.do_test(False, ("<a>š</a>", "<a>ü</a>", ""))
+        self.do_test(True, ("<a>!</a>", "<a>š</a>", ""))
+
+    def test_flags(self) -> None:
+        self.do_test(False, ("<a> b</a>", "<a>b</a>", "safe-html"))
+        self.do_test(True, ("<a> b</a>", "<a>b</a>", "xml-text"))
+
+    def test_arabic_waw(self) -> None:
+        # Arabic Waw "و" (and) is a conjunction that commonly attaches directly
+        # to the adjacent word without a space — should not be flagged
+        self.do_test(
+            False,
+            ("and <a>updates</a>", "و<a>التحديثات</a>", ""),
+        )
+        # Waw after a closing tag should also not flag
+        self.do_test(
+            False,
+            ("<a>updates</a> and", "<a>التحديثات</a>و", ""),
+        )
+        # Other Arabic letters adjacent to tags should still flag
+        self.do_test(
+            True,
+            ("text <a>word</a>", "نص<a>كلمة</a>", ""),
+        )
+        # Punctuation vs Waw should still flag
+        self.do_test(
+            True,
+            (".<a>word</a>", "و<a>كلمة</a>", ""),
+        )
+
+
 class MarkdownRefLinkCheckTest(CheckTestCase):
     check = MarkdownRefLinkCheck()
 
@@ -211,28 +278,26 @@ class MarkdownLinkCheckTest(CheckTestCase):
         )
 
     def test_fixup(self) -> None:
-        unit = Unit(
+        unit = make_unit(
             source="[My Home Page](http://example.com)",
             target="[Moje stránka] (http://example.com)",
         )
 
-        self.assertEqual(self.check.get_fixup(unit), [(r"\] +\(", "](")])
+        self.assertEqual(self.check.get_fixup(unit), [("regex", r"\] +\(", "](", "u")])
 
-        unit = Unit(
+        unit = make_unit(
             source="[My Home Page](http://example.com)",
             target="[Moje stránka]",
         )
 
         self.assertIsNone(self.check.get_fixup(unit))
 
-    def test_mutliple_ordered(self) -> None:
+    def test_multiple_ordered(self) -> None:
         self.do_test(
             False,
             (
-                "[Weblate](#weblate) has an [example]({{example}}) "
-                "for illustrating the usage of [Weblate](#weblate)",
-                "Ein [Beispiel]({{example}}) in [Webspät](#weblate) "
-                "illustriert die Verwendung von [Webspät](#weblate)",
+                "[Weblate](#weblate) has an [example]({{example}}) for illustrating the usage of [Weblate](#weblate)",
+                "Ein [Beispiel]({{example}}) in [Webspät](#weblate) illustriert die Verwendung von [Webspät](#weblate)",  # codespell:ignore
                 "md-text",
             ),
         )
@@ -240,20 +305,16 @@ class MarkdownLinkCheckTest(CheckTestCase):
         self.do_test(
             True,
             (
-                "[Weblate](#weblate) has an [example]({{example}}) "
-                "for illustrating the usage of [Weblate](#weblate)",
-                "Ein [Beispiel]({{example}}) in [Webspät](#weblate) "
-                "illustriert die Verwendung von [Webspät](#Webspät)",
+                "[Weblate](#weblate) has an [example]({{example}}) for illustrating the usage of [Weblate](#weblate)",
+                "Ein [Beispiel]({{example}}) in [Webspät](#weblate) illustriert die Verwendung von [Webspät](#Webspät)",  # codespell:ignore
                 "md-text",
             ),
         )
         self.do_test(
             True,
             (
-                "[Weblate](#weblate) has an [example]({{example}}) "
-                "for illustrating the usage of [Weblate](#weblate)",
-                "Ein [Beispiel]({{example}}) in [Webspät](#weblate) "
-                "illustriert die Verwendung von Webspät",
+                "[Weblate](#weblate) has an [example]({{example}}) for illustrating the usage of [Weblate](#weblate)",
+                "Ein [Beispiel]({{example}}) in [Webspät](#weblate) illustriert die Verwendung von Webspät",  # codespell:ignore
                 "md-text",
             ),
         )
@@ -385,6 +446,195 @@ class SafeHTMLCheckTest(CheckTestCase):
             ),
         )
 
+    def test_placeholder_attribute(self) -> None:
+        source = '<a href="%(terms_url)s">terms</a>'
+        self.do_test(False, (source, source, "safe-html"))
+        self.do_test(
+            True,
+            (source, '<a href="„%(terms_url)s“">terms</a>', "safe-html"),
+        )
+        self.do_test(
+            True,
+            (
+                '<a href="%(url)s">Organize</a>',
+                '<a href="\\&quot;%(url)s\\&quot;">Organize</a>',
+                "safe-html",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                '<a href="%(url)s">Organize</a>',
+                '<a href="&quot;%(url)s&quot;">Organize</a>',
+                "safe-html",
+            ),
+        )
+
+    def test_no_placeholder_attribute_skips_target_normalization(self) -> None:
+        target = f'<a title="{"„" * 1000}">link</a>'
+        with patch(
+            "weblate.checks.markup.get_wrapped_placeholder_attribute"
+        ) as wrapped:
+            self.assertFalse(
+                has_changed_placeholder_attributes('<a title="plain">link</a>', target)
+            )
+        wrapped.assert_not_called()
+
+    def test_repeated_placeholder_attributes(self) -> None:
+        source = '<a href="%(url)s">link</a>' * 1000
+        self.do_test(False, (source, source, "safe-html"))
+        self.do_test(True, (source, '<a href="„%(url)s“">link</a>', "safe-html"))
+
+    def test_positional_printf_placeholder_attribute(self) -> None:
+        source = '<a href="%1$s">terms</a>'
+        self.do_test(False, (source, source, "safe-html"))
+        self.do_test(True, (source, '<a href="„%1$s“">terms</a>', "safe-html"))
+
+    def test_reordered_placeholder_attributes(self) -> None:
+        source = '<a href="%terms%">terms</a> and <a href="%privacy%">privacy</a>'
+        self.do_test(
+            False,
+            (
+                source,
+                '<a href="%privacy%">privacy</a> and <a href="%terms%">terms</a>',
+                "safe-html",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                source,
+                '<a href="„%privacy%“">privacy</a> and <a href="%terms%">terms</a>',
+                "safe-html",
+            ),
+        )
+
+    def test_mixed_placeholder_static_attributes(self) -> None:
+        source = '<a href="%terms%">terms</a><a href="/help">help</a>'
+        self.do_test(
+            False,
+            (
+                source,
+                '<a href="%terms%">terms</a><a href="/support">help</a>',
+                "safe-html",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                source,
+                '<a href="/help">help</a><a href="%terms%">terms</a>',
+                "safe-html",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                source,
+                '<a href="%terms%">terms</a> help',
+                "safe-html",
+            ),
+        )
+
+    def test_localizable_placeholder_attribute(self) -> None:
+        self.do_test(
+            False,
+            (
+                '<a href="/%(terms_url)s">terms</a>',
+                '<a href="/cs/%(terms_url)s">terms</a>',
+                "safe-html",
+            ),
+        )
+
+    def test_auto_safe_html_plain_text(self) -> None:
+        self.do_test(True, ("Plain text", "<b>Plain text</b>", "auto-safe-html"))
+
+    def test_auto_safe_html_unmatched_tag_text(self) -> None:
+        self.do_test(
+            False,
+            ("Press <b to continue", "<script>alert(1)</script>", "auto-safe-html"),
+        )
+
+    def test_auto_safe_html_html(self) -> None:
+        self.do_test(
+            True,
+            (
+                '<a href="https://weblate.org/">link</a>',
+                '<a href="javascript:foo()">link</a>',
+                "auto-safe-html",
+            ),
+        )
+
+    def test_auto_safe_html_custom_element(self) -> None:
+        self.do_test(
+            True,
+            (
+                "<x-demo>link</x-demo>",
+                '<x-demo onclick="alert(1)">link</x-demo>',
+                "auto-safe-html",
+            ),
+        )
+
+    def test_auto_safe_html_html_with_quoted_gt(self) -> None:
+        self.do_test(
+            True,
+            (
+                '<a title="1 > 0">link</a>',
+                '<a title="1 > 0" href="javascript:foo()">link</a>',
+                "auto-safe-html",
+            ),
+        )
+
+    def test_auto_safe_html_html_with_quoted_lt(self) -> None:
+        self.do_test(
+            True,
+            (
+                '<a title="a<b">link</a>',
+                '<a title="a<b" href="javascript:foo()">link</a>',
+                "auto-safe-html",
+            ),
+        )
+
+    def test_auto_safe_html_normalized_html(self) -> None:
+        self.do_test(
+            True,
+            (
+                "Line<br/>break",
+                "Line<script>alert(1)</script>break",
+                "auto-safe-html",
+            ),
+        )
+
+    def test_auto_safe_html_inferred_structure(self) -> None:
+        self.do_test(
+            False,
+            (
+                "<option selected>",
+                "<script>alert(1)</script>",
+                "auto-safe-html",
+            ),
+        )
+
+    def test_auto_safe_html_markdown_component(self) -> None:
+        self.do_test(
+            False,
+            (
+                "<TOCInline toc={toc.filter((node)) => node.level === 2)} />",
+                "<TOCInline toc={toc.filter((node)) => node.level === 2)} />",
+                "auto-safe-html,md-text",
+            ),
+        )
+
+    def test_auto_safe_html_safe_html_wins(self) -> None:
+        self.do_test(
+            True,
+            (
+                "<TOCInline toc={toc.filter((node)) => node.level === 2)} />",
+                "<script>alert(1)</script>",
+                "auto-safe-html,md-text,safe-html",
+            ),
+        )
+
 
 class RSTReferencesCheckTest(CheckTestCase):
     check = RSTReferencesCheck()
@@ -401,35 +651,25 @@ class RSTReferencesCheckTest(CheckTestCase):
         self.test_highlight = (
             "rst-text",
             ":ref:`bar` is :doc:`foo <baz>`",
-            [(0, 10, ":ref:`bar`"), (14, 30, ":doc:`foo <baz>`")],
+            [(0, 10, ":ref:`bar`"), (14, 20, ":doc:`"), (23, 30, " <baz>`")],
         )
 
     def test_description(self) -> None:
-        unit = Unit(
+        unit = make_unit(
             source=":ref:`bar` `baz`_",
             target=":ref:`bar <baz>` `baz`",
-            extra_flags="rst-text",
-            translation=Translation(
-                component=Component(
-                    file_format="po",
-                    source_language=Language(code="en"),
-                ),
-                plural=Plural(),
-            ),
+            flags="rst-text",
         )
-        check = Check(unit=unit)
+        check = make_check(unit, self.check)
         self.assertHTMLEqual(
-            self.check.get_description(check),
+            str(self.check.get_description(check)),
             """
-            The following format strings are missing:
-            <span class="hlcheck" data-value=":ref:`bar`">:ref:`bar`</span>
+            The following reStructuredText markup is missing:
+            <span class="hlcheck" data-value=":ref:`bar`">:ref:`bar`</span>,
+            <span class="hlcheck" data-value="`baz`_">`baz`_</span>
             <br />
-            The following format strings are extra:
+            The following reStructuredText markup is extra:
             <span class="hlcheck" data-value=":ref:`bar &lt;baz&gt;`">:ref:`bar &lt;baz&gt;`</span>
-            <br>
-            The following errors were found:
-            <br>
-            Inconsistent external links in the translated message.
             """,
         )
 
@@ -465,6 +705,73 @@ class RSTReferencesCheckTest(CheckTestCase):
                 ":tag:`acl`",
                 "rst-text",
             ),
+        )
+
+    def test_targets_advance_offset(self) -> None:
+        text = "Before _`|foo|`|foo|"
+
+        with patch(
+            "weblate.checks.markup.Inliner.parse",
+            return_value=(
+                [
+                    Text("Before "),
+                    docutils_target(rawsource="_`|foo|`"),
+                    substitution_reference(rawsource="|foo|"),
+                ],
+                [],
+            ),
+        ):
+            extract_rst_references.cache_clear()
+            self.addCleanup(extract_rst_references.cache_clear)
+            _references, _counter, highlights = extract_rst_references(text)
+
+        self.assertEqual(
+            tuple(
+                (highlight.start, highlight.end, highlight.text)
+                for highlight in highlights
+            ),
+            ((15, 20, "|foo|"),),
+        )
+
+    def test_repeated_explicit_link_targets_keep_offset(self) -> None:
+        text = (
+            "Installing Ubuntu Touch is easy, and a lot of work has gone in to "
+            "making the installation process less intimidating to the average "
+            "user. The UBports Installer is a nice graphical tool that you can "
+            "use to install Ubuntu Touch on a `supported device "
+            "<https://devices.ubuntu-touch.io/>`_ from your `Linux "
+            "<https://snapcraft.io/ubports-installer>`_, `Mac "
+            "<https://devices.ubuntu-touch.io/installer/?package=dmg>`_ or "
+            "`Windows "
+            "<https://devices.ubuntu-touch.io/installer/?package=exe>`_ "
+            "computer. For more experienced users, we also have manual "
+            "installation instructions for every device `on the devices page "
+            "<https://devices.ubuntu-touch.io/>`_."
+        )
+
+        _references, counter, highlights = extract_rst_references(text)
+
+        expected_targets = (
+            "<https://devices.ubuntu-touch.io/>",
+            "<https://snapcraft.io/ubports-installer>",
+            "<https://devices.ubuntu-touch.io/installer/?package=dmg>",
+            "<https://devices.ubuntu-touch.io/installer/?package=exe>",
+            "<https://devices.ubuntu-touch.io/>",
+        )
+        expected_highlights = []
+        offset = 0
+        for target in expected_targets:
+            start = text.index(target, offset)
+            expected_highlights.append((start, start + len(target), target))
+            offset = start + len(target)
+
+        self.assertEqual(counter["`... <...>`_"], len(expected_targets))
+        self.assertEqual(
+            tuple(
+                (highlight.start, highlight.end, highlight.text)
+                for highlight in highlights
+            ),
+            tuple(expected_highlights),
         )
 
     def test_option_space(self) -> None:
@@ -520,6 +827,16 @@ class RSTReferencesCheckTest(CheckTestCase):
             ),
         )
 
+    def test_ref_widechar(self) -> None:
+        self.do_test(
+            True,
+            (
+                ":file:`/app/data/python/customize` (see :ref:`docker-volume`)",
+                ":file:`/app/data/python/customize`（见：:ref:`docker-volume`）",
+                "rst-text",
+            ),
+        )
+
     def test_translatable(self) -> None:
         self.do_test(
             True,
@@ -550,6 +867,54 @@ class RSTReferencesCheckTest(CheckTestCase):
             (
                 ":kbd:`Ctrl+Home`",
                 ":kbd:`Ctrl+Inicio `",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                ":code:`Save`",
+                ":code:`Ulozit`",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                ":Code:`Save`",
+                ":Code:`Ulozit`",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "`Save`:guilabel:",
+                "`Ulozit`:guilabel:",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "`review workflow <reviews>`:ref:",
+                "`pracovni postup kontroly <reviews>`:ref:",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "`review workflow <reviews>`:ref:",
+                "`pracovni postup kontroly <other-reviews>`:ref:",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                ":code:`Save`",
+                "``Ulozit``",
                 "rst-text",
             ),
         )
@@ -599,7 +964,85 @@ class RSTReferencesCheckTest(CheckTestCase):
             ),
         )
 
+    def test_broken_literals(self) -> None:
+        self.do_test(
+            False,
+            (
+                "including both components in it: ``foo/bar`` and ``foo/baz``.",
+                "包括它的兩個元件：``foo / bar`` 和 ``foo / baz``。",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "including both components in it: ``foo/bar`` and ``foo/baz``.",
+                "包括它的兩個元件：``fee / ber`` 和 ``fee / bez``。",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "including both components in it: ``foo/bar`` and ``foo/baz``.",
+                "包括它的兩個元件：``foo / bar``和``foo / baz``。",
+                "rst-text",
+            ),
+        )
+
+    def test_broken_emphasis(self) -> None:
+        self.do_test(
+            False,
+            (
+                "statuses: *active* and *pending*",
+                "状态：*活跃* 和 *待定*",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "statuses: **active** and **pending**",
+                "状态：*活跃*和*待定*",
+                "rst-text",
+            ),
+        )
+
+    def test_broken_strong(self) -> None:
+        self.do_test(
+            False,
+            (
+                "statuses: **active** and **pending**",
+                "状态：**活跃** 和 **待定**",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "statuses: **active** and **pending**",
+                "状态：**活跃**和**待定**",
+                "rst-text",
+            ),
+        )
+
     def test_broken_links(self) -> None:
+        self.do_test(
+            False,
+            (
+                "`Webhooks in Gitea manual <https://docs.gitea.io/en-us/webhooks/>`_",
+                "`Webhooks în manualul Gitea <https://docs.gitea.io/en-us/webhooks/>`_",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "`Webhooks in Gitea manual <https://docs.gitea.io/en-us/webhooks/>`_",
+                "`Webhooks în manualul Gitea <https://docs.gitea.io/de-de/webhooks/>`_",
+                "rst-text",
+            ),
+        )
         self.do_test(
             True,
             (
@@ -642,6 +1085,32 @@ class RSTReferencesCheckTest(CheckTestCase):
                 "rst-text",
             ),
         )
+        self.do_test(
+            True,
+            (
+                "`Amazon Translate Documentation <https://docs.aws.amazon.com/translate/>`_",
+                "`Amazon Translate Documentație <https://docs.aws.amazon.com/translate/>``_",
+                "rst-text",
+            ),
+        )
+
+    def test_ref_translated(self) -> None:
+        self.do_test(
+            False,
+            (
+                "Available only if :ref:`review workflow <reviews>` is on.",
+                "Kun tilgængelig, hvis :ref:`gennemgå arbejdsgang <reviews>` er slået til.",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "Available only if :ref:`review workflow <reviews>` is on.",
+                "Kun tilgængelig, hvis :ref:`gennemgå arbejdsgang <gennemga>` er slået til.",
+                "rst-text",
+            ),
+        )
 
     def test_references_space(self) -> None:
         result = self.do_test(
@@ -661,7 +1130,41 @@ class RSTReferencesCheckTest(CheckTestCase):
             False,
             (
                 "The code should follow :pep:`8` coding guidelines and should be formatted using :program:`ruff` code formatter.",
-                "Kód by měl následovat :pep:`8` a být zformátovan programem :program:`ruff`.",
+                "Kód by měl následovat :pep:`8` a být zformátovan programem :program:`ruff`.",  # codespell:ignore
+                "rst-text",
+            ),
+        )
+
+    def test_substitution(self) -> None:
+        self.do_test(
+            False,
+            (
+                "|regular| Small",
+                "|regular| Small",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "|regular| Small",
+                "|other| Small",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "|regular| Small",
+                "Small",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "Small",
+                "|regular| Small",
                 "rst-text",
             ),
         )
@@ -722,6 +1225,40 @@ class RSTSyntaxCheckTest(CheckTestCase):
             ),
         )
 
+    def test_wrapped_role(self) -> None:
+        self.do_test(
+            True,
+            (
+                "set :setting:`LEGAL_DOCUMENT_CSS_CLASS` to an empty string",
+                "setzen Sie ` :setting:`LEGAL_DOCUMENT_CSS_CLASS` ` auf eine leere Zeichenkette",  # codespell:ignore
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "set `LEGAL_DOCUMENT_CSS_CLASS`:setting: to an empty string",
+                "setzen Sie ` `LEGAL_DOCUMENT_CSS_CLASS`:setting: ` auf eine leere Zeichenkette",  # codespell:ignore
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "`Users` :ref:`default team <default-teams>` `Teams`",
+                "`Benutzer` :ref:`Standardteam <default-teams>` `Teams`",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "`Users` `default-teams`:ref: `Teams`",
+                "`Benutzer` `default-teams`:ref: `Teams`",
+                "rst-text",
+            ),
+        )
+
     def test_admindocs_tags(self) -> None:
         # admindocs registers own parsers which fail without specific settings
         self.assertTrue(docutils_is_available)
@@ -735,23 +1272,84 @@ class RSTSyntaxCheckTest(CheckTestCase):
         )
 
     def test_description(self) -> None:
-        unit = Unit(
+        unit = make_unit(
             source=":ref:`bar`",
             target=":ref:`bar",
-            extra_flags="rst-text",
-            translation=Translation(
-                component=Component(
-                    file_format="po",
-                    source_language=Language(code="en"),
-                ),
-                plural=Plural(),
-            ),
+            flags="rst-text",
         )
-        check = Check(unit=unit)
+        check = make_check(unit, self.check)
         self.assertHTMLEqual(
-            self.check.get_description(check),
+            str(self.check.get_description(check)),
             """
             The following errors were found:<br>
             Inline interpreted text or phrase reference start-string without end-string.
             """,
+        )
+
+    def test_substitution(self) -> None:
+        self.do_test(
+            False,
+            (
+                "|regular| Small",
+                "|regular| Small",
+                "rst-text",
+            ),
+        )
+
+    def test_list(self) -> None:
+        self.do_test(
+            False,
+            (
+                "Text",
+                "Text",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "Text",
+                "* Text",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "Text",
+                "- Text",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            True,
+            (
+                "Text",
+                "+ Text",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "- Text",
+                "- Text",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "- Text",
+                "* Text",
+                "rst-text",
+            ),
+        )
+        self.do_test(
+            False,
+            (
+                "- Text",
+                "+ Text",
+                "rst-text",
+            ),
         )

@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import datetime
 from itertools import zip_longest
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from django.core.cache import cache
 from django.db import models, transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Exists, OuterRef, Q
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django.utils import timezone
@@ -18,7 +18,7 @@ from django.utils.functional import cached_property
 
 from weblate.auth.models import User
 from weblate.lang.models import Language
-from weblate.memory.models import Memory
+from weblate.memory.models import Memory, MemoryScope
 from weblate.screenshots.models import Screenshot
 from weblate.trans.actions import ActionEvents
 from weblate.trans.models import (
@@ -28,15 +28,20 @@ from weblate.trans.models import (
     Project,
     Translation,
 )
-from weblate.trans.models.change import Change, ChangeQuerySet
+from weblate.trans.models.change import Change
 from weblate.utils.decorators import disable_for_loaddata
 from weblate.utils.stats import (
-    BaseStats,
     CategoryLanguage,
     GlobalStats,
     ProjectLanguage,
     prefetch_stats,
 )
+
+if TYPE_CHECKING:
+    from weblate.trans.models.change import ChangeQuerySet
+    from weblate.utils.stats import (
+        BaseStats,
+    )
 
 BASIC_KEYS = {
     "all",
@@ -93,7 +98,7 @@ METRIC_ORDER = [
 ]
 
 
-class MetricQuerySet(models.QuerySet["Metric"]):
+class MetricQuerySet(models.QuerySet["Metric", "Metric"]):
     def filter_metric(
         self, scope: int, relation: int, secondary: int = 0
     ) -> MetricQuerySet:
@@ -349,12 +354,19 @@ class MetricManager(models.Manager["Metric"]):
         )
         for project_language in languages:
             self.collect_project_language(project_language)
+        project_scope = MemoryScope.objects.filter(
+            memory_id=OuterRef("pk"),
+            project=project,
+            scope__in=(MemoryScope.SCOPE_PROJECT, MemoryScope.SCOPE_PROJECT_FILE),
+        )
         data = {
             "components": project.component_set.count(),
             "translations": Translation.objects.filter(
                 component__project=project
             ).count(),
-            "memory": project.memory_set.count(),
+            "memory": Memory.objects.alias(has_project_scope=Exists(project_scope))
+            .filter(has_project_scope=True)
+            .count(),
             "screenshots": Screenshot.objects.filter(
                 translation__component__project=project
             ).count(),

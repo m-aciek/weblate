@@ -32,7 +32,11 @@ Install it, or use the Hosted Weblate service at `weblate.org`_.
 
 .. image:: https://img.shields.io/github/license/WeblateOrg/weblate.svg
     :alt: License
-    :target: https://github.com/WeblateOrg/weblate/blob/main/COPYING
+    :target: https://github.com/WeblateOrg/weblate/blob/main/LICENSE
+
+.. image:: https://argos-ci.com/badge.svg
+    :alt: Covered by Argos Visual Testing
+    :target: https://app.argos-ci.com/weblate/weblate/reference?utm_source=weblate&utm_campaign=oss
 
 Support
 -------
@@ -60,11 +64,12 @@ Please report feature requests and problems to:
 
 https://github.com/WeblateOrg/weblate/issues
 
+Accessibility
+-------------
 
-Live chat
----------
-
-Live chat about Weblate is available at `Libera.Chat <https://libera.chat/>`_ IRC network. The channel name is ``#weblate``. This can be accessed by, for example, https://web.libera.chat/#weblate or an IRC client installed on your computer.
+Please report accessibility problems using the accessibility issue template.
+See ``ACCESSIBILITY.md`` for Weblate's accessibility target and reporting
+guidance.
 
 Stats
 -----

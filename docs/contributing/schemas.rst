@@ -7,25 +7,25 @@ Weblate uses `JSON Schema <https://json-schema.org/>`_ to define layout of exter
 
    .. _schema-memory:
 
-   .. jsonschema:: ../schemas/weblate-memory.schema.json
+   .. jsonschema:: ../specs/schemas/weblate-memory.schema.json
 
 .. seealso::
 
-    :ref:`translation-memory`,
-    :wladmin:`dump_memory`,
-    :wladmin:`import_memory`
+   * :ref:`translation-memory`
+   * :wladmin:`dump_memory`
+   * :wladmin:`import_memory`
 
 
 .. only:: not gettext
 
    .. _schema-userdata:
 
-   .. jsonschema:: ../schemas/weblate-userdata.schema.json
+   .. jsonschema:: ../specs/schemas/weblate-userdata.schema.json
 
 .. seealso::
 
-    :ref:`user-profile`,
-    :wladmin:`dumpuserdata`
+   * :ref:`user-profile`
+   * :wladmin:`dumpuserdata`
 
 
 
@@ -33,9 +33,10 @@ Weblate uses `JSON Schema <https://json-schema.org/>`_ to define layout of exter
 
    .. _schema-messaging:
 
-   .. jsonschema:: ../schemas/weblate-messaging.schema.json
+   .. jsonschema:: ../specs/schemas/weblate-messaging.schema.json
 
 .. seealso::
 
-    :ref:`fedora-messaging`,
-    :ref:`addon-weblate.webhook.webhook`
+   * :ref:`fedora-messaging`
+   * :ref:`addon-weblate.webhook.webhook`
+   * :ref:`change-actions`

@@ -12,14 +12,15 @@ from django import template
 from django.conf import settings
 from django.contrib.staticfiles.storage import staticfiles_storage
 from django.utils.html import format_html
-from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy
 
-from weblate.accounts.utils import DeviceType, get_key_name
+from weblate.accounts.utils import get_key_name
 
 if TYPE_CHECKING:
     from django_otp.models import Device
     from django_stubs_ext import StrOrPromise
+
+    from weblate.accounts.types import DeviceType
 
 register = template.Library()
 
@@ -33,15 +34,17 @@ SOCIALS: dict[str, dict[str, StrOrPromise]] = {
     "email": {"name": gettext_lazy("E-mail"), "image": "email.svg"},
     "ubuntu": {"name": "Ubuntu", "image": "ubuntu.svg"},
     "opensuse": {"name": "openSUSE", "image": "opensuse.svg"},
-    "fedora": {"name": "Fedora", "image": "fedora.svg"},
+    "fedora": {"name": "Fedora OpenID", "image": "fedora.svg"},
+    "fedora-oidc": {"name": "Fedora", "image": "fedora.svg"},
     "facebook": {"name": "Facebook", "image": "facebook.svg"},
     "github": {"name": "GitHub", "image": "github.svg"},
     "github-enterprise": {"name": "GitHub Enterprise", "image": "github.svg"},
     "github-org": {"name": "GitHub Organization", "image": "github.svg"},
     "bitbucket": {"name": "Bitbucket", "image": "bitbucket.svg"},
     "bitbucket-oauth2": {"name": "Bitbucket", "image": "bitbucket.svg"},
-    "azuread-oauth2": {"name": "Azure", "image": "azure.svg"},
-    "azuread-tenant-oauth2": {"name": "Azure", "image": "azure.svg"},
+    # Follow Microsoft's sign-in branding guidance for end-user Entra login.
+    "azuread-oauth2": {"name": "Microsoft", "image": "microsoft.svg"},
+    "azuread-tenant-oauth2": {"name": "Microsoft", "image": "microsoft.svg"},
     "gitlab": {"name": "GitLab", "image": "gitlab.svg"},
     "amazon": {"name": "Amazon", "image": "amazon.svg"},
     "twitter": {"name": "Twitter", "image": "twitter.svg"},
@@ -56,15 +59,11 @@ SECOND_FACTORS: dict[DeviceType, StrOrPromise] = {
     "recovery": gettext_lazy("Use recovery codes"),
 }
 
-IMAGE_SOCIAL_TEMPLATE = """
-<img class="auth-image" src="{image}" />
-"""
+IMAGE_SOCIAL_TEMPLATE = (
+    """<img class="auth-image" src="{image}" alt="" aria-hidden="true" />"""
+)
 
-SOCIAL_TEMPLATE = """
-{icon}
-{separator}
-{name}
-"""
+SOCIAL_TEMPLATE = """{icon}<span class="auth-name">{name}</span>"""
 
 
 def get_auth_params(auth: str) -> dict[str, StrOrPromise]:
@@ -89,22 +88,19 @@ def get_auth_params(auth: str) -> dict[str, StrOrPromise]:
     return params
 
 
-auth_name_default_separator = mark_safe("<br />")
-
-
 @register.simple_tag
-def auth_name(auth: str, separator: str = auth_name_default_separator, only: str = ""):
+def auth_name(auth: str, only: str = ""):
     """Create HTML markup for social authentication method."""
     params = get_auth_params(auth)
 
-    if not params["image"].startswith("http"):
-        params["image"] = staticfiles_storage.url("auth/" + params["image"])
-    params["icon"] = format_html(IMAGE_SOCIAL_TEMPLATE, separator=separator, **params)
+    if not params["image"].startswith(("http", "data:")):
+        params["image"] = staticfiles_storage.url(f"auth/{params['image']}")
+    params["icon"] = format_html(IMAGE_SOCIAL_TEMPLATE, **params)
 
     if only:
         return params[only]
 
-    return format_html(SOCIAL_TEMPLATE, separator=separator, **params)
+    return format_html(SOCIAL_TEMPLATE, **params)
 
 
 def get_auth_name(auth: str):
@@ -114,11 +110,11 @@ def get_auth_name(auth: str):
 
 @register.simple_tag
 def key_name(device: Device) -> str:
-    return format_html('<span class="auth-name">{}</span>', get_key_name(device))
+    return format_html('<span class="key-name">{}</span>', get_key_name(device))
 
 
 @register.simple_tag
-def second_factor_name(name: DeviceType) -> str:
+def second_factor_name(name: DeviceType) -> StrOrPromise:
     return SECOND_FACTORS[name]
 
 

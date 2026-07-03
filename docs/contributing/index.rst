@@ -9,12 +9,15 @@ coding, graphics design, documentation, sponsorship, or an idea:
 
 * :doc:`issues`
 * :doc:`start`
+* :doc:`code`
 * :doc:`modules`
+* :doc:`submodules`
 * :ref:`translating-weblate`
 * :doc:`documentation`
 * :ref:`discussions`
 * :ref:`funding-weblate`
 * :doc:`communication`
+* :doc:`code_of_conduct`
 
 .. _translating-weblate:
 
@@ -29,17 +32,6 @@ If you find a possible mistake in the source string, you can mark it with a comm
 This way, it can be discussed and corrected. If you’re certain, you can also click on the link in the
 :guilabel:`Source string location` section and submit a PR with your correction.
 
-
-.. _extending-languages:
-
-Extending built-in language definitions
----------------------------------------
-
-The language definitions are in the `weblate-language-data repository
-<https://github.com/WeblateOrg/language-data/>`_.
-
-You are welcome to add missing language definitions to :file:`languages.csv`,
-other files are generated from that file.
 
 .. _discussions:
 

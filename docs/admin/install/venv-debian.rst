@@ -36,8 +36,8 @@ Installing on Debian and Ubuntu
     # Web server option 2: Apache with ``mod_wsgi``
     apt install -y apache2 libapache2-mod-wsgi-py3
 
-    # Caching backend: Redis
-    apt install -y redis-server
+    # Caching backend: Valkey
+    apt install -y valkey-server
 
     # Database server: PostgreSQL
     apt install -y postgresql postgresql-contrib
@@ -45,7 +45,7 @@ Installing on Debian and Ubuntu
     # SMTP server
     apt install -y exim4
 
-    # Gettext for the msgmerge add-on
+    # Gettext tools for gettext POT/PO update add-ons
     apt install -y gettext
 
 .. include:: steps/install-uv.rst

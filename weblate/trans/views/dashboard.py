@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models import Count
+from django.db.models import Exists, OuterRef
+from django.http import Http404
 from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils import translation
@@ -19,23 +20,36 @@ from django.views.decorators.cache import never_cache
 from weblate.accounts.models import Profile
 from weblate.lang.models import Language
 from weblate.metrics.models import Metric
-from weblate.trans.forms import ReportsForm, SearchForm
-from weblate.trans.models import Component, ComponentList, Project, Translation
+from weblate.trans.alerts.base import AlertSeverity
+from weblate.trans.forms import (
+    CostEstimateReportsForm,
+    CountsReportsForm,
+    ReportsForm,
+    SearchForm,
+)
+from weblate.trans.models import Alert, Component, ComponentList, Project, Translation
 from weblate.trans.models.component import translation_prefetch_tasks
 from weblate.trans.models.project import prefetch_project_flags
-from weblate.trans.models.translation import GhostTranslation, TranslationQuerySet
+from weblate.trans.models.translation import GhostTranslation
 from weblate.trans.util import render
 from weblate.utils import messages
 from weblate.utils.stats import prefetch_stats
 from weblate.utils.views import get_paginator
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from django.http import HttpResponse
+
     from weblate.auth.models import AuthenticatedHttpRequest, User
+    from weblate.trans.models.translation import TranslationQuerySet
 
 
-def get_untranslated(base, limit: int | None = None):
+def get_untranslated(
+    base: Iterable[Translation], limit: int | None = None
+) -> list[Translation]:
     """Filter untranslated."""
-    result = []
+    result: list[Translation] = []
     for item in base:
         if item.stats.translated != item.stats.all:
             result.append(item)
@@ -49,11 +63,16 @@ def get_suggestions(
     user_has_languages: bool,
     base: TranslationQuerySet,
     filtered: bool = False,
-):
+) -> list[Translation]:
     """Return suggested translations for user."""
     if not filtered:
-        non_alerts = base.annotate(alert_count=Count("component__alert__pk")).filter(
-            alert_count=0
+        problem_alerts = Alert.objects.filter(
+            component_id=OuterRef("component_id"),
+            dismissed=False,
+            severity__gte=AlertSeverity.ERROR,
+        )
+        non_alerts = base.annotate(has_problem_alert=Exists(problem_alerts)).filter(
+            has_problem_alert=False
         )
         result = get_suggestions(user, user_has_languages, non_alerts, True)
         if result:
@@ -106,13 +125,18 @@ def guess_user_language(
 
 def get_user_translations(
     request: AuthenticatedHttpRequest, user: User, user_has_languages: bool
-):
+) -> TranslationQuerySet:
     """
     Get list of translations in user languages.
 
     Works also for anonymous users based on current UI language.
     """
-    result = Translation.objects.prefetch().filter_access(user).order()
+    result = (
+        Translation.objects.exclude(component__is_glossary=True)
+        .prefetch()
+        .filter_access(user)
+        .order()
+    )
 
     if user_has_languages:
         result = result.filter(language__in=user.profile.all_languages)
@@ -125,7 +149,7 @@ def get_user_translations(
     return result
 
 
-def redirect_single_project(user: User):
+def redirect_single_project(user: User) -> HttpResponse:
     target: Component | Project
     if isinstance(settings.SINGLE_PROJECT, str):
         target = project = Project.objects.get(slug=settings.SINGLE_PROJECT)
@@ -144,7 +168,7 @@ def redirect_single_project(user: User):
 
 
 @never_cache
-def home(request: AuthenticatedHttpRequest):
+def home(request: AuthenticatedHttpRequest) -> HttpResponse:
     """Home page handler serving different views based on user."""
     user = request.user
 
@@ -176,7 +200,7 @@ def home(request: AuthenticatedHttpRequest):
             request,
             format_html(
                 '<a href="{}">{}</a>',
-                reverse("profile") + "#account",
+                f"{reverse('profile')}#account",
                 gettext("Please set your full name and e-mail in your profile."),
             ),
         )
@@ -191,7 +215,9 @@ def home(request: AuthenticatedHttpRequest):
     return dashboard_user(request)
 
 
-def fetch_componentlists(user: User, user_translations):
+def fetch_componentlists(
+    user: User, user_translations: TranslationQuerySet
+) -> list[ComponentList]:
     componentlists = list(
         ComponentList.objects.filter(
             show_dashboard=True,
@@ -222,7 +248,9 @@ def fetch_componentlists(user: User, user_translations):
                     language.code,
                 ) in existing or not component.can_add_new_language(user, fast=True):
                     continue
-                translations.append(GhostTranslation(component, language))
+                translations.append(
+                    GhostTranslation(component.project, language, component)
+                )
 
         componentlist.translations = translations
 
@@ -231,7 +259,30 @@ def fetch_componentlists(user: User, user_translations):
     return [c for c in componentlists if c.translations]
 
 
-def dashboard_user(request: AuthenticatedHttpRequest):
+def component_list_user(request: AuthenticatedHttpRequest, name: str) -> HttpResponse:
+    user = request.user
+    user_has_languages = user.is_authenticated and user.profile.all_languages
+
+    user_translations = get_user_translations(request, user, user_has_languages)
+
+    componentlist = None
+    for current in fetch_componentlists(request.user, user_translations):
+        if current.slug == name:
+            componentlist = current
+
+    if componentlist is None:
+        raise Http404
+
+    if user.is_authenticated and user.profile.hide_completed:
+        componentlist.translations = get_untranslated(
+            prefetch_stats(componentlist.translations)
+        )
+    return render(
+        request, "dashboard/componentlist.html", {"componentlist": componentlist}
+    )
+
+
+def dashboard_user(request: AuthenticatedHttpRequest) -> HttpResponse:
     """Home page of Weblate for authenticated user."""
     user = request.user
 
@@ -265,7 +316,9 @@ def dashboard_user(request: AuthenticatedHttpRequest):
                     prefetch_stats(componentlist.translations)
                 )
 
-        usersubscriptions = get_paginator(request, usersubscriptions, stats=True)
+        usersubscriptions = get_paginator(
+            request, usersubscriptions, stats=True, sort_by=request.GET.get("sort_by")
+        )
         usersubscriptions = translation_prefetch_tasks(usersubscriptions)
         owned = user.owned_projects.order()
     else:
@@ -289,13 +342,15 @@ def dashboard_user(request: AuthenticatedHttpRequest):
             ),
             "active_tab_slug": active_tab_slug,
             "reports_form": ReportsForm({}),
+            "reports_count_form": CountsReportsForm({}),
+            "reports_cost_form": CostEstimateReportsForm({}),
             "all_owned_projects": owned,
             "owned_projects": prefetch_project_flags(prefetch_stats(owned[:10])),
         },
     )
 
 
-def dashboard_anonymous(request: AuthenticatedHttpRequest):
+def dashboard_anonymous(request: AuthenticatedHttpRequest) -> HttpResponse:
     """Home page of Weblate showing list of projects for anonymous user."""
     top_project_ids_cache = cache.get("dashboard-anonymous-projects")
     if top_project_ids_cache is not None:

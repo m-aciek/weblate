@@ -1,3 +1,5 @@
+.. _cmp-resource:
+
 Compose Multiplatform resources
 -------------------------------
 
@@ -11,9 +13,11 @@ A variant of :doc:`/formats/android`. It differs in escaping.
 
 .. seealso::
 
-    `JetBrains Compose Multiplatform Resources <https://www.jetbrains.com/help/kotlin-multiplatform-dev/compose-multiplatform-resources.html>`_,
-    :doc:`/formats/android`,
-    :doc:`tt:formats/android`
+   * `Kotlin Compose Multiplatform Resources <https://kotlinlang.org/docs/multiplatform/compose-multiplatform-resources.html>`_
+   * :doc:`/formats/android`
+   * :doc:`tt:formats/android`
+
+.. include:: /snippets/format-features/cmp-resource-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

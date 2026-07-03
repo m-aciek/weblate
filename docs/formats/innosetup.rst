@@ -24,9 +24,11 @@ Inno Setup INI translations are usually used as monolingual translations.
 
 .. seealso::
 
-    :doc:`tt:formats/ini`,
-    :ref:`joomla`,
-    :ref:`ini`
+    * :doc:`tt:formats/ini`
+    * :ref:`joomla`
+    * :ref:`ini`
+
+.. include:: /snippets/format-features/islu-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

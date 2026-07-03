@@ -12,14 +12,16 @@ Joomla translations are usually used as monolingual translations.
 
 .. seealso::
 
-    :doc:`tt:formats/properties`,
-    :ref:`ini`,
-    :ref:`islu`
+   * :doc:`tt:formats/properties`
+   * :ref:`ini`
+   * :ref:`islu`
 
 Example file:
 
 .. literalinclude:: ../../weblate/trans/tests/data/cs.joomla.ini
     :language: ini
+
+.. include:: /snippets/format-features/joomla-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

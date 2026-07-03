@@ -2,13 +2,22 @@
 # Copyright © Sun Zhigang <hzsunzhigang@corp.netease.com>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
 
 import random
 import time
 from hashlib import sha1
+from typing import TYPE_CHECKING, ClassVar
 
-from .base import DownloadTranslations, MachineTranslation, MachineTranslationError
+from .base import (
+    MACHINERY_DEFAULT_THRESHOLD,
+    MachineTranslation,
+    MachineTranslationError,
+)
 from .forms import KeySecretMachineryForm
+
+if TYPE_CHECKING:
+    from .base import DownloadTranslations
 
 NETEASE_API_ROOT = "https://jianwai.netease.com/api/text/trans"
 
@@ -20,7 +29,7 @@ class NeteaseSightTranslation(MachineTranslation):
     max_score = 90
 
     # Map codes used by Netease Sight to codes used by Weblate
-    language_map = {"zh_Hans": "zh"}
+    language_map: ClassVar[dict[str, str]] = {"zh_Hans": "zh"}
     settings_form = KeySecretMachineryForm
 
     def download_languages(self):
@@ -29,7 +38,8 @@ class NeteaseSightTranslation(MachineTranslation):
 
     def get_headers(self):
         """Add authentication headers to request."""
-        nonce = str(random.randint(1000, 99999999))  # noqa: S311
+        # ruff: ignore[suspicious-non-cryptographic-random-usage]
+        nonce = str(random.randint(1000, 99999999))
         timestamp = str(int(1000 * time.time()))
 
         payload = self.settings["secret"] + nonce + timestamp
@@ -50,7 +60,7 @@ class NeteaseSightTranslation(MachineTranslation):
         text: str,
         unit,
         user,
-        threshold: int = 75,
+        threshold: int = MACHINERY_DEFAULT_THRESHOLD,
     ) -> DownloadTranslations:
         """Download list of possible translations from a service."""
         response = self.request(

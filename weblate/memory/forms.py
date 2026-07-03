@@ -6,12 +6,14 @@ from pathlib import PurePath
 
 from django import forms
 from django.core.validators import FileExtensionValidator
-from django.utils.translation import gettext_lazy
+from django.utils.html import format_html
+from django.utils.translation import gettext, gettext_lazy
 
 from weblate.lang.models import Language
 from weblate.memory.models import SUPPORTED_FORMATS
 from weblate.utils.forms import SortedSelect
 from weblate.utils.html import format_html_join_comma, list_to_tuples
+from weblate.utils.validators import validate_translation_upload_size
 
 
 class UploadForm(forms.Form):
@@ -19,9 +21,10 @@ class UploadForm(forms.Form):
 
     file = forms.FileField(
         label=gettext_lazy("File"),
-        validators=[FileExtensionValidator(allowed_extensions=SUPPORTED_FORMATS)],
-        help_text=gettext_lazy("You can upload a file of following formats: %s.")
-        % format_html_join_comma("{}", list_to_tuples(SUPPORTED_FORMATS)),
+        validators=[
+            validate_translation_upload_size,
+            FileExtensionValidator(allowed_extensions=SUPPORTED_FORMATS),
+        ],
     )
     source_language = forms.ModelChoiceField(
         widget=SortedSelect,
@@ -41,6 +44,14 @@ class UploadForm(forms.Form):
         queryset=Language.objects.all(),
         required=False,
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["file"].help_text = format_html(
+            "{} {}",
+            gettext("You can upload a file of following formats:"),
+            format_html_join_comma("{}", list_to_tuples(SUPPORTED_FORMATS)),
+        )
 
     def clean(self):
         data = self.cleaned_data

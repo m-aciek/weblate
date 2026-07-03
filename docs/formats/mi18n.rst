@@ -17,14 +17,16 @@ File format used for JavaScript localization by `draggable/i18n`_. Syntactically
 
 .. seealso::
 
-    `draggable/i18n`_,
-    :doc:`tt:formats/properties`,
-    :ref:`javaprop`,
-    :ref:`updating-target-files`,
-    :ref:`addon-weblate.properties.sort`,
-    :ref:`addon-weblate.cleanup.generic`
+    * `draggable/i18n`_
+    * :doc:`tt:formats/properties`
+    * :ref:`javaprop`
+    * :ref:`updating-target-files`
+    * :ref:`addon-weblate.properties.sort`
+    * :ref:`addon-weblate.cleanup.generic`
 
 .. _draggable/i18n: https://github.com/Draggable/i18n
+
+.. include:: /snippets/format-features/mi18n-lang-features.rst
 
 Weblate configuration
 +++++++++++++++++++++

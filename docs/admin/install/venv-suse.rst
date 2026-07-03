@@ -9,7 +9,7 @@ Installing on SUSE and openSUSE
 
    zypper install \
       libxslt-devel libxml2-devel freetype-devel libjpeg-devel zlib-devel \
-      libyaml-devel libffi-devel cairo-devel pango-devel \
+      libyaml-devel libffi-devel cairo-devel pango-devel librsvg-devel \
       gobject-introspection-devel libacl-devel liblz4-devel libzstd-devel libxxhash-devel \
       python3-devel git
 
@@ -30,8 +30,8 @@ Installing on SUSE and openSUSE
     # Web server option 2: Apache with ``mod_wsgi``
     zypper install apache2 apache2-mod_wsgi
 
-    # Caching backend: Redis
-    zypper install redis-server
+    # Caching backend: Valkey
+    zypper install valkey-server
 
     # Database server: PostgreSQL
     zypper install postgresql postgresql-contrib
@@ -39,7 +39,7 @@ Installing on SUSE and openSUSE
     # SMTP server
     zypper install postfix
 
-    # Gettext for the msgmerge add-on
+    # Gettext tools for gettext POT/PO update add-ons
     zypper install gettext
 
 .. include:: steps/install-uv.rst
