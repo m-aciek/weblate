@@ -257,3 +257,20 @@ class MultipleRepositoriesTest(TestCase):
                 call("https://example.com/fr.git"),
             ],
         )
+
+    def test_get_remote_branch_rejects_conflicting_subrepository_defaults(self) -> None:
+        config = json.dumps(
+            {
+                "pl": {"vcs": "git", "repo": "https://example.com/pl.git"},
+                "fr": {"vcs": "git", "repo": "https://example.com/fr.git"},
+            }
+        )
+        with patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}), patch(
+            "weblate.vcs.git.GitRepository.get_remote_branch",
+            side_effect=["main", "master"],
+        ):
+            with self.assertRaisesMessage(
+                RepositoryError,
+                "Repositories use different default branches",
+            ):
+                MultipleRepositories.get_remote_branch(config)
