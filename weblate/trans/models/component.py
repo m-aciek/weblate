@@ -5114,6 +5114,7 @@ class Component(  # ruff: ignore[too-many-public-methods]
         self._clean_repository_settings()
 
     def clean_fields(self, exclude=None) -> None:
+        """Allow fixed file masks for many-repositories while preserving other errors."""
         try:
             super().clean_fields(exclude=exclude)
         except ValidationError as error:

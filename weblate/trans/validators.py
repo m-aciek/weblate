@@ -14,6 +14,8 @@ from weblate.checks.flags import FlagsValidator
 from weblate.lang.models import Language
 from weblate.trans.defines import LANGUAGE_CODE_LENGTH
 
+# Shared message used for both direct validation errors and conditional filtering
+# in Component.clean_fields().
 FILEMASK_LANGUAGE_PLACEHOLDER_ERROR = gettext(
     "File mask does not contain * as a language placeholder!"
 )
