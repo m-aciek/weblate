@@ -34,6 +34,7 @@ class FakeRepository(Repository):
         super().__init__(path, local=True, **kwargs)
         self.key = os.path.basename(path)
         self.configure_remote_calls = []
+        self.clone_from_calls = []
         self.commit_calls = []
         self.changed_files = []
         self._last_revision = f"local-{self.key}"
@@ -100,6 +101,9 @@ class FakeRepository(Repository):
     ) -> None:
         self.configure_remote_calls.append((pull_url, push_url, branch, fast))
 
+    def clone_from(self, source: str) -> None:
+        self.clone_from_calls.append(source)
+
     def configure_branch(self, branch) -> None:
         return
 
@@ -149,6 +153,24 @@ class MultipleRepositoriesTest(TestCase):
                 "fr": {"vcs": "fake", "repo": "ssh://example.com/fr.git"},
             }
         )
+
+    def test_clone_from_clones_each_subrepository(self) -> None:
+        with TemporaryDirectory() as tempdir, patch(
+            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        ):
+            multi = MultipleRepositories(
+                tempdir, branch="main", local=True, repo=self.create_repositories()
+            )
+            multi.clone_from(self.create_repositories())
+
+            self.assertEqual(
+                FakeRepository.instances["pl"].clone_from_calls,
+                ["https://example.com/pl.git"],
+            )
+            self.assertEqual(
+                FakeRepository.instances["fr"].clone_from_calls,
+                ["https://example.com/fr.git"],
+            )
 
     def test_routes_commit_files_per_repository(self) -> None:
         with TemporaryDirectory() as tempdir, patch(

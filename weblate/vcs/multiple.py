@@ -186,6 +186,12 @@ class MultipleRepositories(Repository):
     def last_remote_revision(self):
         return self._combined_revision(remote=True)
 
+    def clone_from(self, source: str) -> None:
+        """Clone all repositories."""
+        configs = self.parse_repo_config(source)
+        for key, config in configs.items():
+            self.repositories_by_key[key].clone_from(config["repo"])
+
     def configure_remote(
         self, pull_url: str, push_url: str, branch: str, fast: bool = True
     ) -> None:
