@@ -1,5 +1,5 @@
-Weblate 5.12.2
---------------
+Weblate 5.13
+------------
 
 *Not yet released.*
 
@@ -9,9 +9,31 @@ Weblate 5.12.2
 
 .. rubric:: Bug fixes
 
-* Restoring :ref:`projectbackup` with votes.
-
 .. rubric:: Compatibility
+
+.. rubric:: Upgrading
+
+Please follow :ref:`generic-upgrade-instructions` in order to perform update.
+
+.. rubric:: Contributors
+
+.. include:: changes/contributors/5.13.rst
+
+`All changes in detail <https://github.com/WeblateOrg/weblate/milestone/143?closed=1>`__.
+
+Weblate 5.12.2
+--------------
+
+*Released on June 20th 2025.*
+
+.. rubric:: Improvements
+
+* :ref:`mt-deepl` integration now supports using next-gen LLM model.
+
+.. rubric:: Bug fixes
+
+* Restoring :ref:`projectbackup` with votes.
+* Improved error handling in :ref:`mt-apertium-apy`.
 
 .. rubric:: Upgrading
 
