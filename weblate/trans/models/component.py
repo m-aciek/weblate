@@ -4592,6 +4592,7 @@ class Component(  # ruff: ignore[too-many-public-methods]
             if path == self.template:
                 return self.source_language.code
             if self.vcs == "many-repositories" and "*" not in self.filemask:
+                # Many repositories paths are prefixed by the repository key.
                 return path.partition("/")[0]
             return ""
 

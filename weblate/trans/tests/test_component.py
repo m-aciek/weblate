@@ -1319,7 +1319,7 @@ class ComponentValidationTest(RepoTestCase):
         self.component.repo = json.dumps({"cs": repo})
         self.component.push = ""
         self.component.filemask = "cs/po/cs.po"
-        self.assertIsNone(self.component.full_clean())
+        self.component.full_clean()
 
     def test_fileformat(self) -> None:
         """Unknown file format."""
