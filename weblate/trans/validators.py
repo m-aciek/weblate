@@ -16,17 +16,18 @@ from weblate.trans.defines import LANGUAGE_CODE_LENGTH
 
 # Shared message used for both direct validation errors and conditional filtering
 # in Component.clean_fields().
-FILEMASK_LANGUAGE_PLACEHOLDER_ERROR = gettext(
+FILEMASK_LANGUAGE_PLACEHOLDER_ERROR_MESSAGE = gettext(
     "File mask does not contain * as a language placeholder!"
 )
+FILEMASK_MISSING_PLACEHOLDER_CODE = "missing-language-placeholder"
 
 
 def validate_filemask(val) -> None:
     """Validate that the filemask contains *."""
     if "*" not in val:
         raise ValidationError(
-            FILEMASK_LANGUAGE_PLACEHOLDER_ERROR,
-            code="missing-language-placeholder",
+            FILEMASK_LANGUAGE_PLACEHOLDER_ERROR_MESSAGE,
+            code=FILEMASK_MISSING_PLACEHOLDER_CODE,
         )
 
 
