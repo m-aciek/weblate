@@ -5112,6 +5112,30 @@ class Component(  # ruff: ignore[too-many-public-methods]
         self.clean_model_settings()
         self._clean_repository_settings()
 
+    def clean_fields(self, exclude=None) -> None:
+        try:
+            super().clean_fields(exclude=exclude)
+        except ValidationError as error:
+            if self.vcs != "many-repositories" or "filemask" not in error.error_dict:
+                raise
+
+            filemask_message = gettext(
+                "File mask does not contain * as a language placeholder!"
+            )
+            filtered = [
+                item
+                for item in error.error_dict["filemask"]
+                if filemask_message not in item.messages
+            ]
+
+            if filtered:
+                error.error_dict["filemask"] = filtered
+            else:
+                error.error_dict.pop("filemask")
+
+            if error.error_dict:
+                raise
+
     def can_validate_repository_compatibility(self, old: Component | None) -> bool:
         """Check whether repository validation can avoid worktree updates."""
         return (

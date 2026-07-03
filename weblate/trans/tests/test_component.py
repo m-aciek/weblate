@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 from types import SimpleNamespace
@@ -1294,6 +1295,18 @@ class ComponentValidationTest(RepoTestCase):
     def test_no_matches(self) -> None:
         """Not matching mask."""
         self.component.filemask = "foo/*.po"
+        with self.assertRaisesMessage(
+            ValidationError, "The file mask did not match any files."
+        ):
+            self.component.full_clean()
+
+    def test_filemask_without_language_placeholder_many_repositories(self) -> None:
+        """Allow mask without language placeholder for many repositories."""
+        repo = self.format_local_path(self.git_repo_path)
+        self.component.vcs = "many-repositories"
+        self.component.repo = json.dumps({"cs": repo, "fr": repo})
+        self.component.push = ""
+        self.component.filemask = "po/cs.po"
         with self.assertRaisesMessage(
             ValidationError, "The file mask did not match any files."
         ):
