@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import os
 from collections import defaultdict
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from hashlib import sha256
 from json import loads
 from operator import attrgetter, itemgetter
@@ -11,7 +11,7 @@ from operator import attrgetter, itemgetter
 from django.utils.translation import gettext, gettext_lazy
 
 from weblate.utils.lock import WeblateLock
-from weblate.vcs.base import Repository, RepositoryError
+from weblate.vcs.base import Repository, RepositoryError, RepositoryLock
 from weblate.vcs.models import VCS_REGISTRY
 
 
@@ -40,7 +40,7 @@ class MultipleRepositories(Repository):
         )
         self.repositories: list[Repository] = []
         self.repositories_by_key: dict[str, Repository] = {}
-        self._locks: list[WeblateLock] = []
+        self._locks: list[RepositoryLock] = []
         for key, config in self.repo_configs.items():
             repo_path = os.path.join(self.path, key)
             repository = VCS_REGISTRY[config["vcs"]](
@@ -52,8 +52,10 @@ class MultipleRepositories(Repository):
             )
             self.repositories.append(repository)
             self.repositories_by_key[key] = repository
-            self._locks.append(
-                WeblateLock(
+            repository.lock.replace_lock(
+                RepositoryLock(
+                    repository,
+                    WeblateLock(
                     lock_path=os.path.dirname(
                         base_path := repository.path.rstrip("/").rstrip("\\")
                     ),
@@ -62,8 +64,10 @@ class MultipleRepositories(Repository):
                     slug=os.path.basename(base_path),
                     file_template="{slug}.lock",
                     timeout=30,
+                    ),
                 )
             )
+            self._locks.append(repository.lock)
         self.lock = MultiContextManager(*self._locks)
 
     @classmethod
@@ -356,6 +360,13 @@ class MultiContextManager:
     def __exit__(self, exc_type, exc_value, traceback):
         # Exit all context managers
         return self.stack.__exit__(exc_type, exc_value, traceback)
+
+    @contextmanager
+    def without_recovery(self):
+        with ExitStack() as stack:
+            for manager in self.managers:
+                stack.enter_context(manager.without_recovery())
+            yield
 
     @property
     def is_locked(self) -> bool:

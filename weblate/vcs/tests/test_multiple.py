@@ -36,6 +36,7 @@ class FakeRepository(Repository):
         self.configure_remote_calls = []
         self.clone_from_calls = []
         self.commit_calls = []
+        self.update_remote_locked_states = []
         self.changed_files = []
         self._last_revision = f"local-{self.key}"
         self._last_remote_revision = f"remote-{self.key}"
@@ -49,6 +50,7 @@ class FakeRepository(Repository):
         return
 
     def update_remote(self) -> None:
+        self.update_remote_locked_states.append(self.lock.is_locked)
         return
 
     def push(self, branch) -> None:
@@ -216,6 +218,43 @@ class MultipleRepositoriesTest(TestCase):
                     )
                 ],
                 FakeRepository.instances["fr"].configure_remote_calls,
+            )
+
+    def test_update_remote_holds_subrepository_locks(self) -> None:
+        with TemporaryDirectory() as tempdir, patch(
+            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        ):
+            multi = MultipleRepositories(
+                tempdir, branch="main", local=True, repo=self.create_repositories()
+            )
+
+            with multi.lock:
+                multi.update_remote()
+
+            self.assertEqual(
+                FakeRepository.instances["pl"].update_remote_locked_states, [True]
+            )
+            self.assertEqual(
+                FakeRepository.instances["fr"].update_remote_locked_states, [True]
+            )
+
+    def test_without_recovery_delegates_to_subrepository_locks(self) -> None:
+        with TemporaryDirectory() as tempdir, patch(
+            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        ):
+            multi = MultipleRepositories(
+                tempdir, branch="main", local=True, repo=self.create_repositories()
+            )
+
+            with multi.lock.without_recovery():
+                with multi.lock:
+                    multi.update_remote()
+
+            self.assertEqual(
+                FakeRepository.instances["pl"].update_remote_locked_states, [True]
+            )
+            self.assertEqual(
+                FakeRepository.instances["fr"].update_remote_locked_states, [True]
             )
 
     def test_prefixes_changed_files(self) -> None:
