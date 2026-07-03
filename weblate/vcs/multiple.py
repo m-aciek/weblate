@@ -8,7 +8,7 @@ from hashlib import sha256
 from json import loads
 from operator import attrgetter, itemgetter
 
-from django.utils.translation import gettext_lazy
+from django.utils.translation import gettext, gettext_lazy
 
 from weblate.utils.lock import WeblateLock
 from weblate.vcs.base import Repository, RepositoryError
@@ -242,12 +242,18 @@ class MultipleRepositories(Repository):
             for repository in self.repositories
         ]
         latest = max(infos, key=itemgetter("commitdate"))
+        author_date = latest["authordate"]
+        commit_date = latest["commitdate"]
+        if hasattr(author_date, "isoformat"):
+            author_date = author_date.isoformat()
+        if hasattr(commit_date, "isoformat"):
+            commit_date = commit_date.isoformat()
         return {
-            "summary": gettext_lazy("Aggregate revision for many repositories"),
+            "summary": gettext("Aggregate revision for many repositories"),
             "author": latest["author"],
-            "authordate": latest["authordate"].isoformat(),
+            "authordate": author_date,
             "commit": revision,
-            "commitdate": latest["commitdate"].isoformat(),
+            "commitdate": commit_date,
             "revision": revision,
             "shortrevision": revision[:7],
         }
@@ -278,10 +284,6 @@ class MultipleRepositories(Repository):
         _key, repository, subpath = self._repository_for_path(path)
         return repository.get_object_hash(subpath)
 
-    def configure_path(self, path):
-        key, repository, subpath = self._repository_for_path(path)
-        return key, repository, subpath
-
     def get_file(self, path, revision) -> str:
         _key, repository, subpath = self._repository_for_path(path)
         return repository.get_file(subpath, revision)
@@ -301,7 +303,9 @@ class MultipleRepositories(Repository):
 
     def list_remote_branches(self):
         return sorted(
-            set().union(*(repository.list_remote_branches() for repository in self.repositories))
+            branch
+            for repository in self.repositories
+            for branch in repository.list_remote_branches()
         )
 
     def compact(self) -> None:
