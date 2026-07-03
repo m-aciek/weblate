@@ -271,6 +271,6 @@ class MultipleRepositoriesTest(TestCase):
         ):
             with self.assertRaisesMessage(
                 RepositoryError,
-                "Repositories use different default branches",
+                "Repositories use different default branches, please configure the branch explicitly.",
             ):
                 MultipleRepositories.get_remote_branch(config)
