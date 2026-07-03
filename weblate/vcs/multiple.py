@@ -56,14 +56,14 @@ class MultipleRepositories(Repository):
                 RepositoryLock(
                     repository,
                     WeblateLock(
-                    lock_path=os.path.dirname(
-                        base_path := repository.path.rstrip("/").rstrip("\\")
-                    ),
-                    scope="repo",
-                    key=f"{os.path.basename(base_path)}:{key}",
-                    slug=os.path.basename(base_path),
-                    file_template="{slug}.lock",
-                    timeout=30,
+                        lock_path=os.path.dirname(
+                            base_path := repository.path.rstrip("/").rstrip("\\")
+                        ),
+                        scope="repo",
+                        key=f"{os.path.basename(base_path)}:{key}",
+                        slug=os.path.basename(base_path),
+                        file_template="{slug}.lock",
+                        timeout=30,
                     ),
                 )
             )
@@ -370,4 +370,4 @@ class MultiContextManager:
 
     @property
     def is_locked(self) -> bool:
-        return all(map(attrgetter('is_locked'), self.managers))
+        return all(map(attrgetter("is_locked"), self.managers))
