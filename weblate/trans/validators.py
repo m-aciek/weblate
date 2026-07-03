@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 SUGGESTION_REJECTION_REASON_LENGTH = 200
 DEFAULT_TRANSLATION_MAX_LENGTH = 10000
 
+# Shared message used for both direct validation errors and conditional filtering
+# in Component.clean_fields().
 FILEMASK_LANGUAGE_PLACEHOLDER_ERROR = gettext(
     "File mask does not contain * as a language placeholder!"
 )
