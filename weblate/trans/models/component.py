@@ -119,6 +119,7 @@ from weblate.trans.util import (
     sanitize_backend_error_message,
 )
 from weblate.trans.validators import (
+    FILEMASK_MISSING_PLACEHOLDER_CODE,
     validate_autoaccept,
     validate_check_flags,
     validate_file_format_parameters,
@@ -5708,7 +5709,8 @@ class Component(  # ruff: ignore[too-many-public-methods]
         For ``many-repositories`` components, file masks can intentionally omit the
         language placeholder. This keeps other field-level validation errors intact
         and only suppresses the dedicated missing-placeholder validation error.
-        The ``exclude`` parameter is forwarded to Django's ``clean_fields``.
+        When ``exclude`` is provided, it is passed through unchanged to Django's
+        ``clean_fields`` to preserve standard exclusion semantics.
         """
         try:
             super().clean_fields(exclude=exclude)
@@ -5721,7 +5723,7 @@ class Component(  # ruff: ignore[too-many-public-methods]
             filtered = [
                 item
                 for item in error.error_dict["filemask"]
-                if getattr(item, "code", None) != "missing-language-placeholder"
+                if getattr(item, "code", None) != FILEMASK_MISSING_PLACEHOLDER_CODE
             ]
 
             if filtered:

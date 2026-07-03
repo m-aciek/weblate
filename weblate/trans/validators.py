@@ -24,9 +24,10 @@ DEFAULT_TRANSLATION_MAX_LENGTH = 10000
 
 # Shared message used for both direct validation errors and conditional filtering
 # in Component.clean_fields().
-FILEMASK_LANGUAGE_PLACEHOLDER_ERROR = gettext(
+FILEMASK_LANGUAGE_PLACEHOLDER_ERROR_MESSAGE = gettext(
     "File mask does not contain * as a language placeholder!"
 )
+FILEMASK_MISSING_PLACEHOLDER_CODE = "missing-language-placeholder"
 
 
 def get_translation_text_max_length(unit: Unit) -> int:
@@ -51,8 +52,8 @@ def validate_filemask(val: str) -> None:
     """Validate that the filemask contains *."""
     if "*" not in val:
         raise ValidationError(
-            FILEMASK_LANGUAGE_PLACEHOLDER_ERROR,
-            code="missing-language-placeholder",
+            FILEMASK_LANGUAGE_PLACEHOLDER_ERROR_MESSAGE,
+            code=FILEMASK_MISSING_PLACEHOLDER_CODE,
         )
 
 
