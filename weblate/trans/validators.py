@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 SUGGESTION_REJECTION_REASON_LENGTH = 200
 DEFAULT_TRANSLATION_MAX_LENGTH = 10000
 
+FILEMASK_LANGUAGE_PLACEHOLDER_ERROR = gettext(
+    "File mask does not contain * as a language placeholder!"
+)
+
 
 def get_translation_text_max_length(unit: Unit) -> int:
     """Return maximum accepted translation text length for a unit."""
@@ -44,9 +48,7 @@ def validate_translation_text_length(unit: Unit, target: list[str]) -> None:
 def validate_filemask(val: str) -> None:
     """Validate that the filemask contains *."""
     if "*" not in val:
-        raise ValidationError(
-            gettext("File mask does not contain * as a language placeholder!")
-        )
+        raise ValidationError(FILEMASK_LANGUAGE_PLACEHOLDER_ERROR)
 
 
 def validate_autoaccept(val: int) -> None:
