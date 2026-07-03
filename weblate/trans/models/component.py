@@ -116,6 +116,7 @@ from weblate.trans.util import (
     sanitize_backend_error_message,
 )
 from weblate.trans.validators import (
+    FILEMASK_LANGUAGE_PLACEHOLDER_ERROR,
     validate_autoaccept,
     validate_check_flags,
     validate_file_format_parameters,
@@ -5119,13 +5120,10 @@ class Component(  # ruff: ignore[too-many-public-methods]
             if self.vcs != "many-repositories" or "filemask" not in error.error_dict:
                 raise
 
-            filemask_message = gettext(
-                "File mask does not contain * as a language placeholder!"
-            )
             filtered = [
                 item
                 for item in error.error_dict["filemask"]
-                if filemask_message not in item.messages
+                if FILEMASK_LANGUAGE_PLACEHOLDER_ERROR not in item.messages
             ]
 
             if filtered:

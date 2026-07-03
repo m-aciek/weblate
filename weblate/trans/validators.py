@@ -14,13 +14,15 @@ from weblate.checks.flags import FlagsValidator
 from weblate.lang.models import Language
 from weblate.trans.defines import LANGUAGE_CODE_LENGTH
 
+FILEMASK_LANGUAGE_PLACEHOLDER_ERROR = gettext(
+    "File mask does not contain * as a language placeholder!"
+)
+
 
 def validate_filemask(val) -> None:
     """Validate that the filemask contains *."""
     if "*" not in val:
-        raise ValidationError(
-            gettext("File mask does not contain * as a language placeholder!")
-        )
+        raise ValidationError(FILEMASK_LANGUAGE_PLACEHOLDER_ERROR)
 
 
 def validate_autoaccept(val) -> None:
