@@ -1159,6 +1159,14 @@ class Repository:
 
         from weblate.utils.validators import resolve_repo_url  # ruff: ignore[import-outside-top-level]
 
+        if url.lstrip().startswith("{"):
+            raise RepositoryValidationError(
+                0,
+                gettext_lazy(
+                    "JSON repository configuration is only supported for Many repositories VCS."
+                ),
+            )
+
         try:
             target = resolve_repo_url(
                 url,
