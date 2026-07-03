@@ -1042,3 +1042,29 @@ class RepoURLValidationTestCase(SimpleTestCase):
         ):
             validate_repo_url("git@private.example:repo.git")
         self.assertIn("internal or non-public address", str(error.exception))
+
+    @patch(
+        "weblate.utils.outbound.socket.getaddrinfo",
+        return_value=[(0, 0, 0, "", ("93.184.216.34", 443))],
+    )
+    def test_many_repositories_json_config(self, mocked_getaddrinfo) -> None:
+        """Many-repositories JSON config is validated by checking each sub-URL."""
+        with override_settings(VCS_ALLOW_SCHEMES={"https", "ssh", "git"}):
+            validate_repo_url(
+                '{"pl": {"vcs": "git", "repo": "https://github.com/python/python-docs-pl.git"},'
+                ' "fr": {"vcs": "git", "repo": "https://github.com/python/python-docs-fr.git"}}'
+            )
+        self.assertEqual(mocked_getaddrinfo.call_count, 2)
+
+    @patch(
+        "weblate.utils.outbound.socket.getaddrinfo",
+        return_value=[(0, 0, 0, "", ("93.184.216.34", 443))],
+    )
+    def test_many_repositories_json_config_string_values(self, mocked_getaddrinfo) -> None:
+        """Many-repositories JSON config with plain string values is validated."""
+        with override_settings(VCS_ALLOW_SCHEMES={"https", "ssh", "git"}):
+            validate_repo_url(
+                '{"pl": "https://github.com/python/python-docs-pl.git",'
+                ' "fr": "https://github.com/python/python-docs-fr.git"}'
+            )
+        self.assertEqual(mocked_getaddrinfo.call_count, 2)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import re
 import sys
@@ -898,6 +899,24 @@ def validate_fedora_messaging_url(value: str) -> None:
 
 
 def validate_repo_url(url: str) -> None:
+    # Handle many-repositories JSON config: {"key": {"vcs": "git", "repo": "url"}, ...}
+    # or {"key": "url", ...}
+    if url.startswith("{"):
+        try:
+            config = json.loads(url)
+        except ValueError:
+            pass
+        else:
+            if isinstance(config, dict):
+                for value in config.values():
+                    if isinstance(value, str):
+                        validate_repo_url(value)
+                    elif isinstance(value, dict):
+                        repo = value.get("repo")
+                        if isinstance(repo, str):
+                            validate_repo_url(repo)
+                return
+
     normalized_url = url
     parsed = urlparse(normalized_url)
     if not parsed.scheme:
