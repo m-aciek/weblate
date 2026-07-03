@@ -1068,3 +1068,11 @@ class RepoURLValidationTestCase(SimpleTestCase):
                 ' "fr": "https://github.com/python/python-docs-fr.git"}'
             )
         self.assertEqual(mocked_getaddrinfo.call_count, 2)
+
+    def test_many_repositories_invalid_json(self) -> None:
+        """A malformed JSON config starting with '{' raises a clear error."""
+        with (
+            override_settings(VCS_ALLOW_SCHEMES={"https", "ssh", "git"}),
+            self.assertRaisesMessage(ValidationError, "Invalid JSON in repository configuration"),
+        ):
+            validate_repo_url('{"pl": broken json')

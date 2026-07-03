@@ -904,18 +904,21 @@ def validate_repo_url(url: str) -> None:
     if url.startswith("{"):
         try:
             config = json.loads(url)
-        except ValueError:
-            pass
-        else:
-            if isinstance(config, dict):
-                for value in config.values():
-                    if isinstance(value, str):
-                        validate_repo_url(value)
-                    elif isinstance(value, dict):
-                        repo = value.get("repo")
-                        if isinstance(repo, str):
-                            validate_repo_url(repo)
-                return
+        except ValueError as error:
+            raise ValidationError(
+                gettext("Invalid JSON in repository configuration: {}").format(error)
+            ) from error
+        if isinstance(config, dict):
+            for value in config.values():
+                if isinstance(value, str):
+                    validate_repo_url(value)
+                elif isinstance(value, dict):
+                    # Dicts without a "repo" key are left to parse_repo_config
+                    # to reject with a more specific error message.
+                    repo = value.get("repo")
+                    if isinstance(repo, str):
+                        validate_repo_url(repo)
+            return
 
     normalized_url = url
     parsed = urlparse(normalized_url)
