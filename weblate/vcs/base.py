@@ -341,6 +341,7 @@ class Repository:
         branch: str | None = None,
         component: Component | None = None,
         local: bool = False,
+        repo: str | None = None,
     ) -> None:
         self.path: str = path
         if not branch:
@@ -348,6 +349,7 @@ class Repository:
         else:
             self.branch = branch
         self.component = component
+        self.repo = repo
         self.last_output = ""
         base_path = self.path.rstrip("/").rstrip("\\")
         lock = WeblateLock(
@@ -706,6 +708,8 @@ class Repository:
 
     def validate_pull_url(self, url: str | None = None) -> None:
         """Validate the pull URL in the current runtime context."""
+        if url is None:
+            url = self.repo
         if url is None and self.component is not None:
             url = self.component.repo
         if url:
@@ -713,6 +717,8 @@ class Repository:
 
     def validate_push_url(self, url: str | None = None) -> None:
         """Validate the push URL in the current runtime context."""
+        if url is None:
+            url = self.repo
         if url is None and self.component is not None:
             url = self.component.push or self.component.repo
         if url:

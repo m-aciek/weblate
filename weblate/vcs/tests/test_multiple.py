@@ -8,9 +8,10 @@ import json
 import os
 from tempfile import TemporaryDirectory
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from weblate.vcs.base import Repository, RepositoryError
+from weblate.vcs.git import GitRepository
 from weblate.vcs.multiple import MultipleRepositories
 
 
@@ -219,3 +220,40 @@ class MultipleRepositoriesTest(TestCase):
             )
             with self.assertRaises(RepositoryError):
                 multi.commit("Invalid", files=["about.po"])
+
+    def test_git_subrepositories_keep_their_own_repo_url(self) -> None:
+        config = json.dumps(
+            {
+                "pl": {"vcs": "git", "repo": "https://example.com/pl.git"},
+                "fr": {"vcs": "git", "repo": "https://example.com/fr.git"},
+            }
+        )
+        with TemporaryDirectory() as tempdir:
+            multi = MultipleRepositories(tempdir, branch="main", local=True, repo=config)
+
+        self.assertEqual(
+            [repository.repo for repository in multi.repositories],
+            ["https://example.com/pl.git", "https://example.com/fr.git"],
+        )
+
+    def test_get_remote_branch_delegates_to_subrepositories(self) -> None:
+        config = json.dumps(
+            {
+                "pl": {"vcs": "git", "repo": "https://example.com/pl.git"},
+                "fr": {"vcs": "git", "repo": "https://example.com/fr.git"},
+            }
+        )
+        with patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}), patch(
+            "weblate.vcs.git.GitRepository.get_remote_branch",
+            side_effect=["main", "main"],
+        ) as get_remote_branch:
+            branch = MultipleRepositories.get_remote_branch(config)
+
+        self.assertEqual(branch, "main")
+        self.assertEqual(
+            get_remote_branch.call_args_list,
+            [
+                call("https://example.com/pl.git"),
+                call("https://example.com/fr.git"),
+            ],
+        )

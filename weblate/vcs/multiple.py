@@ -79,6 +79,24 @@ class MultipleRepositories(Repository):
         return 1  # cannot check internal repos without instantiating the class, assuming True
 
     @classmethod
+    def get_remote_branch(cls, repo: str) -> str:
+        branches = {
+            VCS_REGISTRY[config["vcs"]].get_remote_branch(config["repo"])
+            for config in cls.parse_repo_config(repo).values()
+        }
+        branches.discard("")
+        if not branches:
+            return super().get_remote_branch(repo)
+        if len(branches) > 1:
+            raise RepositoryError(
+                0,
+                gettext(
+                    "Repositories use different default branches, please configure the branch explicitly."
+                ),
+            )
+        return next(iter(branches))
+
+    @classmethod
     def parse_repo_config(cls, config: str | None) -> dict[str, dict[str, str]]:
         if not config:
             raise RepositoryError(0, "Missing repositories configuration.")
