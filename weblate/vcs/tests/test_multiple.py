@@ -276,3 +276,20 @@ class MultipleRepositoriesTest(TestCase):
                 "Repositories use different default branches, please configure the branch explicitly.",
             ):
                 MultipleRepositories.get_remote_branch(config)
+
+    def test_get_remote_branch_reports_repository_key_on_failure(self) -> None:
+        config = json.dumps(
+            {
+                "pl": {"vcs": "git", "repo": "https://example.com/pl.git"},
+                "fr": {"vcs": "git", "repo": "https://example.com/fr.git"},
+            }
+        )
+        with patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}), patch(
+            "weblate.vcs.git.GitRepository.get_remote_branch",
+            side_effect=[RepositoryError(1, "boom"), "main"],
+        ):
+            with self.assertRaisesMessage(
+                RepositoryError,
+                "Could not determine the default branch for repository pl: boom",
+            ):
+                MultipleRepositories.get_remote_branch(config)
