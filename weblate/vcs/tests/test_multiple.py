@@ -231,6 +231,8 @@ class MultipleRepositoriesTest(TestCase):
         with TemporaryDirectory() as tempdir:
             multi = MultipleRepositories(tempdir, branch="main", local=True, repo=config)
 
+        self.assertEqual(len(multi.repositories), 2)
+        self.assertEqual(sorted(multi.repositories_by_key), ["fr", "pl"])
         self.assertEqual(
             [repository.repo for repository in multi.repositories],
             ["https://example.com/pl.git", "https://example.com/fr.git"],
