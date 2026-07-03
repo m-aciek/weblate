@@ -704,9 +704,7 @@ class Repository:
         if url.lstrip().startswith("{"):
             raise RepositoryValidationError(
                 0,
-                gettext_lazy(
-                    "JSON repository configuration is only supported for Many repositories VCS."
-                ),
+                "JSON repository configuration is only supported for Many repositories VCS.",
             )
 
         try:

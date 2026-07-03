@@ -1176,6 +1176,19 @@ class RepositoryHostKeyErrorTest(SimpleTestCase):
         self.assertTrue(should_auto_add_ssh_host_key(errormessage))
 
 
+class RepositoryURLValidationTest(SimpleTestCase):
+    def test_validate_remote_url_rejects_json_repo_config(self) -> None:
+        with self.assertRaises(RepositoryValidationError) as error:
+            GitRepository.validate_remote_url(
+                '{"pl": {"vcs": "git", "repo": "https://example.com/pl.git"}}'
+            )
+
+        self.assertIn(
+            "JSON repository configuration is only supported for Many repositories VCS.",
+            str(error.exception),
+        )
+
+
 class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
     _class: type[Repository] = GitRepository
     _vcs = "git"
@@ -1495,23 +1508,6 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
 
         mock_popen.assert_not_called()
         self.assertIn("internal or non-public address", str(error.exception))
-
-    def test_get_remote_branch_rejects_json_repo_config(self) -> None:
-        if not issubclass(self._class, GitRepository) or self._class is LocalRepository:
-            self.skipTest("Covered by backend-specific behavior")
-        with (
-            patch.object(self._class, "_popen") as mock_popen,
-            self.assertRaises(RepositoryValidationError) as error,
-        ):
-            self._class.get_remote_branch(
-                '{"pl": {"vcs": "git", "repo": "https://example.com/pl.git"}}'
-            )
-
-        mock_popen.assert_not_called()
-        self.assertIn(
-            "JSON repository configuration is only supported for Many repositories VCS.",
-            str(error.exception),
-        )
 
     def test_push_commit(self) -> None:
         self.test_commit()
