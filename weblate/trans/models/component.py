@@ -116,6 +116,7 @@ from weblate.trans.util import (
     sanitize_backend_error_message,
 )
 from weblate.trans.validators import (
+    FILEMASK_MISSING_PLACEHOLDER_CODE,
     validate_autoaccept,
     validate_check_flags,
     validate_file_format_parameters,
@@ -4590,6 +4591,9 @@ class Component(  # ruff: ignore[too-many-public-methods]
         if not matches or not matches.lastindex:
             if path == self.template:
                 return self.source_language.code
+            if self.vcs == "many-repositories" and "*" not in self.filemask:
+                # Many repositories paths are prefixed by the repository key.
+                return path.partition("/")[0]
             return ""
 
         # Use longest matched code
@@ -5111,6 +5115,37 @@ class Component(  # ruff: ignore[too-many-public-methods]
         """
         self.clean_model_settings()
         self._clean_repository_settings()
+
+    def clean_fields(self, exclude=None) -> None:
+        """Filter many-repositories filemask placeholder errors from field validation.
+
+        For ``many-repositories`` components, file masks can intentionally omit the
+        language placeholder. This keeps other field-level validation errors intact
+        and only suppresses the dedicated missing-placeholder validation error.
+        When ``exclude`` is provided, it is passed through unchanged to Django's
+        ``clean_fields`` to preserve standard exclusion semantics.
+        """
+        try:
+            super().clean_fields(exclude=exclude)
+        except ValidationError as error:
+            if self.vcs != "many-repositories":
+                raise
+            if "filemask" not in error.error_dict:
+                raise
+
+            filtered = [
+                item
+                for item in error.error_dict["filemask"]
+                if getattr(item, "code", None) != FILEMASK_MISSING_PLACEHOLDER_CODE
+            ]
+
+            if filtered:
+                error.error_dict["filemask"] = filtered
+            else:
+                error.error_dict.pop("filemask")
+
+            if error.error_dict:
+                raise
 
     def can_validate_repository_compatibility(self, old: Component | None) -> bool:
         """Check whether repository validation can avoid worktree updates."""

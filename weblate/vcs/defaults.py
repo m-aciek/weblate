@@ -19,6 +19,7 @@ DEFAULT_VCS_BACKENDS: tuple[str, ...] = (
     "weblate.vcs.git.BitbucketServerRepository",
     "weblate.vcs.git.BitbucketCloudRepository",
     "weblate.vcs.mercurial.HgRepository",
+    "weblate.vcs.multiple.MultipleRepositories",
 )
 
 DEFAULT_VCS_CLONE_DEPTH = 1

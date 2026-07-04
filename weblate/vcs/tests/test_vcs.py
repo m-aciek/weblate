@@ -1176,6 +1176,19 @@ class RepositoryHostKeyErrorTest(SimpleTestCase):
         self.assertTrue(should_auto_add_ssh_host_key(errormessage))
 
 
+class RepositoryURLValidationTest(SimpleTestCase):
+    def test_validate_remote_url_rejects_json_repo_config(self) -> None:
+        with self.assertRaises(RepositoryValidationError) as error:
+            GitRepository.validate_remote_url(
+                '{"pl": {"vcs": "git", "repo": "https://example.com/pl.git"}}'
+            )
+
+        self.assertIn(
+            "JSON repository configuration is only supported for Many repositories VCS.",
+            str(error.exception),
+        )
+
+
 class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
     _class: type[Repository] = GitRepository
     _vcs = "git"
@@ -1379,6 +1392,30 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
 
         mock_popen.assert_not_called()
         self.assertIn("internal or non-public address", str(error.exception))
+
+    def test_list_remote_branches_uses_repo_override(self) -> None:
+        if self._class is not GitRepository:
+            self.skipTest("GitRepository-specific regression test")
+
+        self.repo.component.repo = json.dumps(
+            {"pl": {"vcs": "git", "repo": "https://example.com/pl.git"}}
+        )
+        self.repo.repo = self.get_remote_repo_url()
+
+        with self.repo.lock, patch.object(
+            self.repo,
+            "execute",
+            return_value="123456\trefs/heads/main\n",
+        ) as execute:
+            self.assertEqual(["main"], self.repo.list_remote_branches())
+
+        execute.assert_called_once_with(
+            [*self.repo.get_auth_args(), "ls-remote", "--heads", "--", self.repo.repo],
+            remote_op="pull",
+            needs_lock=False,
+            environment=self.repo.get_auth_environment(),
+            merge_err=False,
+        )
 
     def test_remove_stale_branches_runtime_private_url_rejected(self) -> None:
         if self._class in {SubversionRepository, HgRepository, LocalRepository}:
