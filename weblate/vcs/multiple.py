@@ -91,7 +91,9 @@ class MultipleRepositories(Repository):
             except RepositoryError as error:
                 raise RepositoryError(
                     error.retcode,
-                    gettext("Could not determine the default branch for repository %(key)s: %(error)s")
+                    gettext(
+                        "Could not determine the default branch for repository %(key)s: %(error)s"
+                    )
                     % {"key": key, "error": error},
                 ) from error
             branches.add(branch)
@@ -114,9 +116,13 @@ class MultipleRepositories(Repository):
         try:
             parsed = loads(config)
         except ValueError as error:
-            raise RepositoryError(0, f"Invalid repositories configuration: {error}") from error
+            raise RepositoryError(
+                0, f"Invalid repositories configuration: {error}"
+            ) from error
         if not isinstance(parsed, dict):
-            raise RepositoryError(0, "Repositories configuration has to be a JSON object.")
+            raise RepositoryError(
+                0, "Repositories configuration has to be a JSON object."
+            )
         result: dict[str, dict[str, str]] = {}
         for key, value in parsed.items():
             if not isinstance(key, str):
@@ -135,7 +141,9 @@ class MultipleRepositories(Repository):
             if not vcs or not isinstance(vcs, str):
                 raise RepositoryError(0, f"Missing vcs for repository {key}.")
             if vcs not in VCS_REGISTRY:
-                raise RepositoryError(0, f"Unsupported vcs {vcs!r} for repository {key}.")
+                raise RepositoryError(
+                    0, f"Unsupported vcs {vcs!r} for repository {key}."
+                )
             if not repo or not isinstance(repo, str):
                 raise RepositoryError(0, f"Missing repo URL for repository {key}.")
             result[key] = {"vcs": vcs, "repo": repo}
@@ -146,6 +154,7 @@ class MultipleRepositories(Repository):
     def _iter_paths(self, files: list[str]) -> dict[Repository, list[str]]:
         result: dict[Repository, list[str]] = defaultdict(list)
         for filename in files:
+            filename = self._normalize_path(filename)
             key, _, subpath = filename.partition("/")
             if not subpath:
                 msg = f"File path does not include repository key: {filename}"
@@ -153,11 +162,19 @@ class MultipleRepositories(Repository):
             try:
                 repository = self.repositories_by_key[key]
             except KeyError as error:
-                raise RepositoryError(0, f"Unknown repository key in path: {filename}") from error
+                raise RepositoryError(
+                    0, f"Unknown repository key in path: {filename}"
+                ) from error
             result[repository].append(subpath)
         return result
 
+    def _normalize_path(self, path: str) -> str:
+        if os.path.isabs(path):
+            path = os.path.relpath(path, self.path)
+        return path.replace(os.sep, "/")
+
     def _repository_for_path(self, path: str) -> tuple[str, Repository, str]:
+        path = self._normalize_path(path)
         key, _, subpath = path.partition("/")
         if not subpath:
             msg = f"File path does not include repository key: {path}"
@@ -165,7 +182,9 @@ class MultipleRepositories(Repository):
         try:
             repository = self.repositories_by_key[key]
         except KeyError as error:
-            raise RepositoryError(0, f"Unknown repository key in path: {path}") from error
+            raise RepositoryError(
+                0, f"Unknown repository key in path: {path}"
+            ) from error
         return key, repository, subpath
 
     def _combined_revision(self, *, remote: bool) -> str:
@@ -268,7 +287,9 @@ class MultipleRepositories(Repository):
         return sum(repository.count_missing() for repository in self.repositories)
 
     def count_outgoing(self, branch: str | None = None):
-        return sum(repository.count_outgoing(branch) for repository in self.repositories)
+        return sum(
+            repository.count_outgoing(branch) for repository in self.repositories
+        )
 
     def _get_revision_info(self, revision):
         infos = [
@@ -305,7 +326,9 @@ class MultipleRepositories(Repository):
                 changes |= repository.commit(message, author, timestamp)
         else:
             for repository, repository_files in self._iter_paths(files).items():
-                changes |= repository.commit(message, author, timestamp, repository_files)
+                changes |= repository.commit(
+                    message, author, timestamp, repository_files
+                )
         self.clean_revision_cache()
         return changes
 
@@ -360,6 +383,10 @@ class MultiContextManager:
     def __exit__(self, exc_type, exc_value, traceback):
         stack = self._stacks.pop()
         return stack.__exit__(exc_type, exc_value, traceback)
+
+    def reacquire(self) -> None:
+        for manager in self.managers:
+            manager.reacquire()
 
     @contextmanager
     def without_recovery(self):

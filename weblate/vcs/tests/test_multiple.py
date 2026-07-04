@@ -7,8 +7,10 @@ from __future__ import annotations
 import json
 import os
 from tempfile import TemporaryDirectory
-from unittest import TestCase
+from typing import ClassVar
 from unittest.mock import call, patch
+
+from django.test import SimpleTestCase
 
 from weblate.vcs.base import Repository, RepositoryError
 from weblate.vcs.git import GitRepository
@@ -16,7 +18,7 @@ from weblate.vcs.multiple import MultipleRepositories
 
 
 class FakeRepository(Repository):
-    instances: dict[str, FakeRepository] = {}
+    instances: ClassVar[dict[str, FakeRepository]] = {}
 
     @classmethod
     def is_supported(cls):
@@ -31,7 +33,7 @@ class FakeRepository(Repository):
         return 1
 
     def __init__(self, path, **kwargs) -> None:
-        super().__init__(path, local=True, **kwargs)
+        super().__init__(path, **kwargs)
         self.key = os.path.basename(path)
         self.configure_remote_calls = []
         self.clone_from_calls = []
@@ -51,7 +53,6 @@ class FakeRepository(Repository):
 
     def update_remote(self) -> None:
         self.update_remote_locked_states.append(self.lock.is_locked)
-        return
 
     def push(self, branch) -> None:
         return
@@ -115,6 +116,9 @@ class FakeRepository(Repository):
     def get_file(self, path, revision) -> str:
         return f"{self.key}:{path}:{revision}"
 
+    def get_object_hash(self, path: str) -> str:
+        return f"{self.key}:{path}:hash"
+
     def cleanup(self) -> None:
         return
 
@@ -135,7 +139,7 @@ class FakeRepository(Repository):
         return list(self.changed_files)
 
 
-class MultipleRepositoriesTest(TestCase):
+class MultipleRepositoriesTest(SimpleTestCase):
     def setUp(self) -> None:
         super().setUp()
         FakeRepository.instances = {}
@@ -157,8 +161,9 @@ class MultipleRepositoriesTest(TestCase):
         )
 
     def test_clone_from_clones_each_subrepository(self) -> None:
-        with TemporaryDirectory() as tempdir, patch(
-            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
         ):
             multi = MultipleRepositories(
                 tempdir, branch="main", local=True, repo=self.create_repositories()
@@ -175,20 +180,49 @@ class MultipleRepositoriesTest(TestCase):
             )
 
     def test_routes_commit_files_per_repository(self) -> None:
-        with TemporaryDirectory() as tempdir, patch(
-            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
         ):
             multi = MultipleRepositories(
                 tempdir, branch="main", local=True, repo=self.create_repositories()
             )
             multi.commit("Update translations", files=["pl/about.po", "fr/about.po"])
 
-            self.assertEqual([["about.po"]], FakeRepository.instances["pl"].commit_calls)
-            self.assertEqual([["about.po"]], FakeRepository.instances["fr"].commit_calls)
+            self.assertEqual(
+                [["about.po"]], FakeRepository.instances["pl"].commit_calls
+            )
+            self.assertEqual(
+                [["about.po"]], FakeRepository.instances["fr"].commit_calls
+            )
+
+    def test_routes_absolute_commit_files_per_repository(self) -> None:
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
+        ):
+            multi = MultipleRepositories(
+                tempdir, branch="main", local=True, repo=self.create_repositories()
+            )
+            multi.commit(
+                "Update translations",
+                files=[
+                    os.path.join(tempdir, "pl", "about.po"),
+                    os.path.join(tempdir, "fr", "about.po"),
+                ],
+            )
+
+            self.assertEqual(
+                [["about.po"]], FakeRepository.instances["pl"].commit_calls
+            )
+            self.assertEqual(
+                [["about.po"]], FakeRepository.instances["fr"].commit_calls
+            )
 
     def test_configures_pull_and_push_urls_per_repository(self) -> None:
-        with TemporaryDirectory() as tempdir, patch(
-            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
         ):
             multi = MultipleRepositories(
                 tempdir, branch="main", local=True, repo=self.create_repositories()
@@ -221,8 +255,9 @@ class MultipleRepositoriesTest(TestCase):
             )
 
     def test_update_remote_holds_subrepository_locks(self) -> None:
-        with TemporaryDirectory() as tempdir, patch(
-            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
         ):
             multi = MultipleRepositories(
                 tempdir, branch="main", local=True, repo=self.create_repositories()
@@ -239,16 +274,16 @@ class MultipleRepositoriesTest(TestCase):
             )
 
     def test_without_recovery_delegates_to_subrepository_locks(self) -> None:
-        with TemporaryDirectory() as tempdir, patch(
-            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
         ):
             multi = MultipleRepositories(
                 tempdir, branch="main", local=True, repo=self.create_repositories()
             )
 
-            with multi.lock.without_recovery():
-                with multi.lock:
-                    multi.update_remote()
+            with multi.lock.without_recovery(), multi.lock:
+                multi.update_remote()
 
             self.assertEqual(
                 FakeRepository.instances["pl"].update_remote_locked_states, [True]
@@ -257,9 +292,45 @@ class MultipleRepositoriesTest(TestCase):
                 FakeRepository.instances["fr"].update_remote_locked_states, [True]
             )
 
+    def test_get_object_hash_routes_absolute_path(self) -> None:
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
+        ):
+            multi = MultipleRepositories(
+                tempdir, branch="main", local=True, repo=self.create_repositories()
+            )
+
+            result = multi.get_object_hash(os.path.join(tempdir, "pl", "about.po"))
+
+            self.assertEqual(result, "pl:about.po:hash")
+
+    def test_reacquire_delegates_to_subrepository_locks(self) -> None:
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
+        ):
+            multi = MultipleRepositories(
+                tempdir, branch="main", local=True, repo=self.create_repositories()
+            )
+
+            with (
+                patch.object(
+                    FakeRepository.instances["pl"].lock.lock_object, "reacquire"
+                ) as pl_reacquire,
+                patch.object(
+                    FakeRepository.instances["fr"].lock.lock_object, "reacquire"
+                ) as fr_reacquire,
+            ):
+                multi.lock.reacquire()
+
+            pl_reacquire.assert_called_once_with()
+            fr_reacquire.assert_called_once_with()
+
     def test_nested_lock_contexts_keep_outer_locks_active(self) -> None:
-        with TemporaryDirectory() as tempdir, patch(
-            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
         ):
             multi = MultipleRepositories(
                 tempdir, branch="main", local=True, repo=self.create_repositories()
@@ -287,8 +358,9 @@ class MultipleRepositoriesTest(TestCase):
             )
 
     def test_prefixes_changed_files(self) -> None:
-        with TemporaryDirectory() as tempdir, patch(
-            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
         ):
             multi = MultipleRepositories(
                 tempdir, branch="main", local=True, repo=self.create_repositories()
@@ -302,8 +374,9 @@ class MultipleRepositoriesTest(TestCase):
             )
 
     def test_invalid_paths_raise_error(self) -> None:
-        with TemporaryDirectory() as tempdir, patch(
-            "weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}
+        with (
+            TemporaryDirectory() as tempdir,
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"fake": FakeRepository}),
         ):
             multi = MultipleRepositories(
                 tempdir, branch="main", local=True, repo=self.create_repositories()
@@ -319,7 +392,9 @@ class MultipleRepositoriesTest(TestCase):
             }
         )
         with TemporaryDirectory() as tempdir:
-            multi = MultipleRepositories(tempdir, branch="main", local=True, repo=config)
+            multi = MultipleRepositories(
+                tempdir, branch="main", local=True, repo=config
+            )
 
         self.assertEqual(len(multi.repositories), 2)
         self.assertEqual(sorted(multi.repositories_by_key), ["fr", "pl"])
@@ -335,10 +410,13 @@ class MultipleRepositoriesTest(TestCase):
                 "fr": {"vcs": "git", "repo": "https://example.com/fr.git"},
             }
         )
-        with patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}), patch(
-            "weblate.vcs.git.GitRepository.get_remote_branch",
-            side_effect=["main", "main"],
-        ) as get_remote_branch:
+        with (
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}),
+            patch(
+                "weblate.vcs.git.GitRepository.get_remote_branch",
+                side_effect=["main", "main"],
+            ) as get_remote_branch,
+        ):
             branch = MultipleRepositories.get_remote_branch(config)
 
         self.assertEqual(branch, "main")
@@ -357,15 +435,18 @@ class MultipleRepositoriesTest(TestCase):
                 "fr": {"vcs": "git", "repo": "https://example.com/fr.git"},
             }
         )
-        with patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}), patch(
-            "weblate.vcs.git.GitRepository.get_remote_branch",
-            side_effect=["main", "master"],
-        ):
-            with self.assertRaisesMessage(
+        with (
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}),
+            patch(
+                "weblate.vcs.git.GitRepository.get_remote_branch",
+                side_effect=["main", "master"],
+            ),
+            self.assertRaisesMessage(
                 RepositoryError,
                 "Repositories use different default branches, please configure the branch explicitly.",
-            ):
-                MultipleRepositories.get_remote_branch(config)
+            ),
+        ):
+            MultipleRepositories.get_remote_branch(config)
 
     def test_get_remote_branch_reports_repository_key_on_failure(self) -> None:
         config = json.dumps(
@@ -374,12 +455,15 @@ class MultipleRepositoriesTest(TestCase):
                 "fr": {"vcs": "git", "repo": "https://example.com/fr.git"},
             }
         )
-        with patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}), patch(
-            "weblate.vcs.git.GitRepository.get_remote_branch",
-            side_effect=[RepositoryError(1, "boom"), "main"],
-        ):
-            with self.assertRaisesMessage(
+        with (
+            patch("weblate.vcs.multiple.VCS_REGISTRY", {"git": GitRepository}),
+            patch(
+                "weblate.vcs.git.GitRepository.get_remote_branch",
+                side_effect=[RepositoryError(1, "boom"), "main"],
+            ),
+            self.assertRaisesMessage(
                 RepositoryError,
                 "Could not determine the default branch for repository pl: boom",
-            ):
-                MultipleRepositories.get_remote_branch(config)
+            ),
+        ):
+            MultipleRepositories.get_remote_branch(config)
