@@ -33,18 +33,11 @@ Weblate 2026.10
 
 .. rubric:: Bug fixes
 
+* Many repositories components can now use fixed file masks without a language ``*`` placeholder.
 * Fixed MIME nesting of inline branding images in :ref:`notification e-mails <notifications>` and reduced their size without changing image quality.
 * Fixed false positives from the :ref:`consecutive duplicated words check <check-duplicate>` in South Asian languages with grammatical word repetition.
 * Fixed :ref:`Docker startup warning checks <docker-startup-warnings>` failing when the warning directory is missing or inaccessible.
 * Fixed an :ref:`upgrade <generic-upgrade-instructions>` failure when migrating dismissed component alerts from releases before 2026.8.
-* Component priority icons are no longer shown on translation listings.
-* :ref:`check-punctuation-spacing` no longer flags Markdown image markers as French punctuation and now shows which punctuation marks triggered the check.
-* :ref:`addon-weblate.fedora_messaging.publish` broker TLS validation now matches the Fedora Messaging transport when accepting non-strict CA certificate chains.
-* The :guilabel:`Things to check` panel no longer uses error highlighting for suggestions and other non-error translation states.
-* Translation workflow customization now makes it clearer when per-language workflow settings are disabled until customization is enabled.
-* Anonymous user permission caches are now isolated between requests.
-* GitHub App setup now explains that a workspace is required instead of showing a permission error when no workspace exists.
-* Many repositories components can now use fixed file masks without a language ``*`` placeholder.
 
 .. rubric:: Compatibility
 
