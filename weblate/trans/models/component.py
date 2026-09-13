@@ -5707,7 +5707,8 @@ class Component(  # ruff: ignore[too-many-public-methods]
         self._clean_repository_settings()
 
     def clean_fields(self, exclude=None) -> None:
-        """Filter many-repositories filemask placeholder errors from field validation.
+        """
+        Filter many-repositories filemask placeholder errors from field validation.
 
         For ``many-repositories`` components, file masks can intentionally omit the
         language placeholder. This keeps other field-level validation errors intact

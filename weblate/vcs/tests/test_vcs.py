@@ -2080,6 +2080,10 @@ class RepositoryURLValidationTest(SimpleTestCase):
             "JSON repository configuration is only supported for Many repositories VCS.",
             str(error.exception),
         )
+        self.assertEqual(
+            error.exception.get_stored_error(),
+            {"code": "repository_url_json_unsupported", "retcode": 0},
+        )
 
 
 class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
@@ -2295,11 +2299,14 @@ class VCSGitTest(TestCase, RepoTestMixin, TempDirMixin):
         )
         self.repo.repo = self.get_remote_repo_url()
 
-        with self.repo.lock, patch.object(
-            self.repo,
-            "execute",
-            return_value="123456\trefs/heads/main\n",
-        ) as execute:
+        with (
+            self.repo.lock,
+            patch.object(
+                self.repo,
+                "execute",
+                return_value="123456\trefs/heads/main\n",
+            ) as execute,
+        ):
             self.assertEqual(["main"], self.repo.list_remote_branches())
 
         execute.assert_called_once_with(

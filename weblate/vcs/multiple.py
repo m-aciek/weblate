@@ -1,31 +1,47 @@
 # Copyright © Maciej Olko <maciej.olko@gmail.com>
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+
+from __future__ import annotations
+
 import os
 from collections import defaultdict
 from contextlib import ExitStack, contextmanager
 from hashlib import sha256
-from json import loads
+from json import dumps, loads
 from operator import attrgetter, itemgetter
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 from django.utils.translation import gettext, gettext_lazy
 
+from weblate.utils.files import is_unsafe_path
 from weblate.utils.lock import WeblateLock
 from weblate.vcs.base import Repository, RepositoryError, RepositoryLock
 from weblate.vcs.models import VCS_REGISTRY
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from datetime import datetime
+    from types import TracebackType
+
+    from weblate.trans.models import Component
+    from weblate.vcs.base import RawCommitInfo
 
 
 class MultipleRepositories(Repository):
     name = "Many repositories"  # limit length to 20
     push_label = gettext_lazy("This will push changes to the upstream repositories.")
     identifier = "many-repositories"
+    metadata_dir_name = ".weblate-many-repositories"
 
     def __init__(
         self,
         path: str,
         *,
         branch: str | None = None,
-        component=None,
+        component: Component | None = None,
         local: bool = False,
         repo: str | None = None,
     ) -> None:
@@ -71,16 +87,16 @@ class MultipleRepositories(Repository):
         self.lock = MultiContextManager(*self._locks)
 
     @classmethod
-    def is_supported(cls):
+    def is_supported(cls) -> bool:
         return True  # cannot check internal repos without instantiating the class, assuming True
 
     @classmethod
-    def is_configured(cls):
+    def is_configured(cls) -> bool:
         return True  # cannot check internal repos without instantiating the class, assuming True
 
     @classmethod
-    def get_version(cls):
-        return 1  # cannot check internal repos without instantiating the class, assuming True
+    def get_version(cls) -> str:
+        return "1"
 
     @classmethod
     def get_remote_branch(cls, repo: str) -> str:
@@ -127,7 +143,14 @@ class MultipleRepositories(Repository):
         for key, value in parsed.items():
             if not isinstance(key, str):
                 raise RepositoryError(0, "Repository key has to be a string.")
-            if "/" in key or "\\" in key or key in {"", ".", ".."}:
+            if (
+                "/" in key
+                or "\\" in key
+                or "\0" in key
+                or is_unsafe_path(key)
+                or key in {"", ".", ".."}
+                or key.casefold() == cls.metadata_dir_name
+            ):
                 raise RepositoryError(0, f"Invalid repository key: {key}.")
             if isinstance(value, str):
                 result[key] = {"vcs": "git", "repo": value}
@@ -154,17 +177,7 @@ class MultipleRepositories(Repository):
     def _iter_paths(self, files: list[str]) -> dict[Repository, list[str]]:
         result: dict[Repository, list[str]] = defaultdict(list)
         for filename in files:
-            filename = self._normalize_path(filename)
-            key, _, subpath = filename.partition("/")
-            if not subpath:
-                msg = f"File path does not include repository key: {filename}"
-                raise RepositoryError(0, msg)
-            try:
-                repository = self.repositories_by_key[key]
-            except KeyError as error:
-                raise RepositoryError(
-                    0, f"Unknown repository key in path: {filename}"
-                ) from error
+            _key, repository, subpath = self._repository_for_path(filename)
             result[repository].append(subpath)
         return result
 
@@ -175,6 +188,8 @@ class MultipleRepositories(Repository):
 
     def _repository_for_path(self, path: str) -> tuple[str, Repository, str]:
         path = self._normalize_path(path)
+        if is_unsafe_path(path) or "\0" in path:
+            raise RepositoryError(0, f"Invalid repository path: {path}.")
         key, _, subpath = path.partition("/")
         if not subpath:
             msg = f"File path does not include repository key: {path}"
@@ -187,26 +202,105 @@ class MultipleRepositories(Repository):
             ) from error
         return key, repository, subpath
 
-    def _combined_revision(self, *, remote: bool) -> str:
-        revisions = []
+    def _child_revisions(self, *, remote: bool) -> dict[str, str]:
+        revisions = {}
         for key, repository in self.repositories_by_key.items():
             revision = (
                 repository.last_remote_revision if remote else repository.last_revision
             ).strip()
-            revisions.append((key, revision))
+            revisions[key] = revision
+        return revisions
+
+    @staticmethod
+    def _revision_hash(revisions: dict[str, str]) -> str:
         digest = sha256()
-        for key, revision in sorted(revisions):
+        for key, revision in sorted(revisions.items()):
             digest.update(f"{key}\0{revision}\0".encode())
         return digest.hexdigest()
 
-    def is_valid(self):
+    def _snapshot_path(self, revision: str) -> Path:
+        if len(revision) != 64 or any(
+            char not in "0123456789abcdef" for char in revision
+        ):
+            raise RepositoryError(0, f"Invalid aggregate revision: {revision}.")
+        metadata = Path(self.path) / self.metadata_dir_name
+        directory = metadata / "revisions"
+        path = directory / f"{revision}.json"
+        if any(location.is_symlink() for location in (metadata, directory, path)):
+            raise RepositoryError(
+                0, "Aggregate revision metadata must not use symlinks."
+            )
+        return path
+
+    def _store_revision(self, revisions: dict[str, str]) -> str:
+        revision = self._revision_hash(revisions)
+        path = self._snapshot_path(revision)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Keep the temporary file on the same filesystem for atomic replacement.
+            with TemporaryDirectory(dir=path.parent) as tempdir:
+                temporary = Path(tempdir) / path.name
+                temporary.write_text(
+                    dumps({"version": 1, "revisions": revisions}, sort_keys=True),
+                    encoding="utf-8",
+                )
+                temporary.replace(path)
+        except OSError as error:
+            raise RepositoryError(
+                0, f"Could not store aggregate revision {revision}: {error}"
+            ) from error
+        return revision
+
+    def _combined_revision(self, *, remote: bool) -> str:
+        return self._store_revision(self._child_revisions(remote=remote))
+
+    def _resolve_revision(self, revision: str) -> dict[str, str]:
+        path = self._snapshot_path(revision)
+        try:
+            snapshot = loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # Older checkouts only stored hashes. Recover only an exact known state.
+            for remote in (False, True):
+                revisions = self._child_revisions(remote=remote)
+                if self._revision_hash(revisions) == revision:
+                    self._store_revision(revisions)
+                    return revisions
+            raise RepositoryError(
+                0, f"Missing snapshot for aggregate revision {revision}."
+            ) from None
+        except (OSError, ValueError) as error:
+            raise RepositoryError(
+                0, f"Could not read aggregate revision {revision}: {error}"
+            ) from error
+        if (
+            not isinstance(snapshot, dict)
+            or not isinstance(version := snapshot.get("version"), int)
+            or isinstance(version, bool)
+            or version != 1
+            or not isinstance(snapshot_revisions := snapshot.get("revisions"), dict)
+            or snapshot_revisions.keys() != self.repositories_by_key.keys()
+            or any(
+                not isinstance(commit, str)
+                or not commit
+                or commit != commit.strip()
+                or "\0" in commit
+                for commit in snapshot_revisions.values()
+            )
+            or self._revision_hash(snapshot_revisions) != revision
+        ):
+            raise RepositoryError(
+                0, f"Invalid snapshot for aggregate revision {revision}."
+            )
+        return snapshot_revisions
+
+    def is_valid(self) -> bool:
         return all(repo.is_valid() for repo in self.repositories)
 
-    def get_last_revision(self):
+    def get_last_revision(self) -> str:
         return self._combined_revision(remote=False)
 
     @property
-    def last_remote_revision(self):
+    def last_remote_revision(self) -> str:
         return self._combined_revision(remote=True)
 
     def clone_from(self, source: str) -> None:
@@ -229,7 +323,7 @@ class MultipleRepositories(Repository):
             )
         self.clean_revision_cache()
 
-    def set_committer(self, name, mail) -> None:
+    def set_committer(self, name: str, mail: str) -> None:
         for repository in self.repositories:
             repository.set_committer(name, mail)
 
@@ -238,18 +332,18 @@ class MultipleRepositories(Repository):
             repository.update_remote()
         self.clean_revision_cache()
 
-    def configure_branch(self, branch) -> None:
+    def configure_branch(self, branch: str) -> None:
         for repository in self.repositories:
             repository.configure_branch(branch)
         self.clean_revision_cache()
 
-    def status(self):
+    def status(self) -> str:
         return "\n".join(
             f"[{key}]\n{repository.status()}"
             for key, repository in self.repositories_by_key.items()
         )
 
-    def push(self, branch) -> None:
+    def push(self, branch: str) -> None:
         for repository in self.repositories:
             repository.push(branch)
         self.clean_revision_cache()
@@ -263,6 +357,14 @@ class MultipleRepositories(Repository):
             repository.reset()
         self.clean_revision_cache()
 
+    def reset_to_revision(self, revision: str) -> None:
+        revisions = self._resolve_revision(revision)
+        try:
+            for key, repository in self.repositories_by_key.items():
+                repository.reset_to_revision(revisions[key])
+        finally:
+            self.clean_revision_cache()
+
     def merge(
         self, abort: bool = False, message: str | None = None, no_ff: bool = False
     ) -> None:
@@ -270,7 +372,7 @@ class MultipleRepositories(Repository):
             repository.merge(abort=abort, message=message, no_ff=no_ff)
         self.clean_revision_cache()
 
-    def rebase(self, abort=False) -> None:
+    def rebase(self, abort: bool = False) -> None:
         for repository in self.repositories:
             repository.rebase(abort=abort)
         self.clean_revision_cache()
@@ -283,32 +385,49 @@ class MultipleRepositories(Repository):
                 return True
         return False
 
-    def count_missing(self):
+    def count_missing(self) -> int:
         return sum(repository.count_missing() for repository in self.repositories)
 
-    def count_outgoing(self, branch: str | None = None):
+    def count_outgoing(self, branch: str | None = None) -> int:
         return sum(
             repository.count_outgoing(branch) for repository in self.repositories
         )
 
-    def _get_revision_info(self, revision):
+    def get_outgoing_revisions(self, branch: str | None = None) -> list[str]:
+        return [
+            f"{key}/{revision}"
+            for key, repository in self.repositories_by_key.items()
+            for revision in repository.get_outgoing_revisions(branch)
+        ]
+
+    def get_tracked_outgoing_revisions(self) -> list[str]:
+        return [
+            f"{key}/{revision}"
+            for key, repository in self.repositories_by_key.items()
+            for revision in repository.get_tracked_outgoing_revisions()
+        ]
+
+    def get_push_revisions(self, branch: str | None = None) -> list[str]:
+        return [
+            f"{key}/{revision}"
+            for key, repository in self.repositories_by_key.items()
+            for revision in repository.get_push_revisions(branch)
+        ]
+
+    def _get_revision_info(self, revision: str) -> RawCommitInfo:
+        revisions = self._resolve_revision(revision)
         infos = [
-            repository.get_revision_info(repository.last_revision)
-            for repository in self.repositories
+            repository.get_revision_info(revisions[key])
+            for key, repository in self.repositories_by_key.items()
         ]
         latest = max(infos, key=itemgetter("commitdate"))
-        author_date = latest["authordate"]
-        commit_date = latest["commitdate"]
-        if hasattr(author_date, "isoformat"):
-            author_date = author_date.isoformat()
-        if hasattr(commit_date, "isoformat"):
-            commit_date = commit_date.isoformat()
         return {
             "summary": gettext("Aggregate revision for many repositories"),
+            "message": gettext("Aggregate revision for many repositories"),
             "author": latest["author"],
-            "authordate": author_date,
+            "authordate": latest["authordate"].isoformat(),
             "commit": revision,
-            "commitdate": commit_date,
+            "commitdate": latest["commitdate"].isoformat(),
             "revision": revision,
             "shortrevision": revision[:7],
         }
@@ -317,7 +436,7 @@ class MultipleRepositories(Repository):
         self,
         message: str,
         author: str | None = None,
-        timestamp=None,
+        timestamp: datetime | None = None,
         files: list[str] | None = None,
     ) -> bool:
         changes = False
@@ -337,28 +456,34 @@ class MultipleRepositories(Repository):
             repository.remove(repository_files, message, author)
         self.clean_revision_cache()
 
-    def get_object_hash(self, path):
+    def get_object_hash(self, path: str) -> str:
         _key, repository, subpath = self._repository_for_path(path)
         return repository.get_object_hash(subpath)
 
-    def get_file(self, path, revision) -> str:
-        _key, repository, subpath = self._repository_for_path(path)
-        return repository.get_file(subpath, revision)
+    def get_file(self, path: str, revision: str) -> str:
+        key, repository, subpath = self._repository_for_path(path)
+        revisions = self._resolve_revision(revision)
+        return repository.get_file(subpath, revisions[key])
 
     def cleanup(self) -> None:
         for repository in self.repositories:
             repository.cleanup()
 
-    def get_changed_files(self, compare_to: str | None = None):
-        files = []
+    def get_changed_files(self, compare_to: str | None = None) -> list[str]:
+        revisions = (
+            self._resolve_revision(compare_to) if compare_to is not None else None
+        )
+        files: list[str] = []
         for key, repository in self.repositories_by_key.items():
             files.extend(
                 f"{key}/{filename}"
-                for filename in repository.get_changed_files(compare_to)
+                for filename in repository.get_changed_files(
+                    revisions[key] if revisions is not None else None
+                )
             )
         return files
 
-    def list_remote_branches(self):
+    def list_remote_branches(self) -> list[str]:
         return sorted(
             branch
             for repository in self.repositories
@@ -371,16 +496,26 @@ class MultipleRepositories(Repository):
 
 
 class MultiContextManager:
-    def __init__(self, *managers):
+    def __init__(self, *managers: RepositoryLock) -> None:
         self.managers = managers
         self._stacks: list[ExitStack] = []
 
-    def __enter__(self):
+    def __enter__(self) -> list[None]:
         stack = ExitStack()
+        try:
+            result = [stack.enter_context(manager) for manager in self.managers]
+        except BaseException:
+            stack.close()
+            raise
         self._stacks.append(stack)
-        return [stack.enter_context(manager) for manager in self.managers]
+        return result
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
         stack = self._stacks.pop()
         return stack.__exit__(exc_type, exc_value, traceback)
 
@@ -389,7 +524,7 @@ class MultiContextManager:
             manager.reacquire()
 
     @contextmanager
-    def without_recovery(self):
+    def without_recovery(self) -> Generator[None]:
         with ExitStack() as stack:
             for manager in self.managers:
                 stack.enter_context(manager.without_recovery())

@@ -212,10 +212,19 @@ repository state, background tasks, outbound requests, and rendered UI.
        work. *(documented)* (source: :doc:`/admin/install`)
    * - Weblate to local VCS repositories
      - Project configuration and repository content drive filesystem and VCS
-       operations. *(documented)* (source: :doc:`/admin/continuous`)
+       operations. The :ref:`Many repositories backend <vcs-many-repositories>`
+       routes paths through validated child keys and retains aggregate revision
+       metadata outside child checkouts. Metadata is local application state:
+       child repository content must not select or overwrite it. Snapshot reads
+       validate the version, configured keys, and aggregate hash before
+       dispatching child commits. *(documented)* (source:
+       :doc:`/admin/continuous`, :ref:`vcs-many-repositories`)
    * - Weblate to external services
      - Configured URLs, credentials, and provider settings drive outbound
-       network connections. *(documented)* (source: :doc:`/admin/code-hosting`,
+       network connections. Combining repositories does not create an outbound
+       policy exception: each child backend validates its own destinations and
+       applies its transport restrictions. *(documented)* (source:
+       :ref:`vcs-many-repositories`, :doc:`/admin/code-hosting`,
        :doc:`/admin/config`)
    * - Project backup archives and Weblate filesystem
      - Uploaded ZIP members and metadata become restored project state;

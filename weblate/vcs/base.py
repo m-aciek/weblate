@@ -194,6 +194,7 @@ type RepositoryErrorCode = Literal[
     "repository_url_backend_unsupported",
     "repository_url_host_not_allowed",
     "repository_url_invalid",
+    "repository_url_json_unsupported",
     "repository_url_parse_invalid",
     "repository_url_parse_failed",
     "repository_url_private_target",
@@ -372,6 +373,9 @@ REPOSITORY_ERROR_MESSAGES: dict[RepositoryErrorCode, str] = {
         "Fetching VCS repository from %(hostname)s is not allowed."
     ),
     "repository_url_invalid": gettext_noop("Enter a valid URL."),
+    "repository_url_json_unsupported": gettext_noop(
+        "JSON repository configuration is only supported for Many repositories VCS."
+    ),
     "repository_url_parse_invalid": gettext_noop("Could not parse URL."),
     "repository_url_parse_failed": gettext_noop("Could not parse URL: %(error)s"),
     "repository_url_private_target": gettext_noop(
@@ -1162,7 +1166,7 @@ class Repository:
         if url.lstrip().startswith("{"):
             raise RepositoryValidationError(
                 0,
-                "JSON repository configuration is only supported for Many repositories VCS.",
+                "repository_url_json_unsupported",
             )
 
         try:

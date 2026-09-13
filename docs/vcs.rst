@@ -556,6 +556,52 @@ environment variable set to the :setting:`DATA_DIR`:
     :setting:`DATA_DIR`
 
 
+.. _vcs-many-repositories:
+
+Many repositories
+-----------------
+
+Select :guilabel:`Many repositories` to combine several repositories in one
+component. Set :ref:`component-repo` to a JSON object mapping repository keys to
+repository URLs or objects with ``vcs`` and ``repo`` fields:
+
+.. code-block:: json
+
+   {
+     "pl": "https://example.com/pl.git",
+     "fr": {"vcs": "git", "repo": "https://example.com/fr.git"}
+   }
+
+String values use Git. In object values, ``vcs`` is the backend identifier,
+such as ``git`` or ``mercurial``. Each repository is checked out into a directory
+named after its key. Keys must be nonempty directory names without path
+separators, parent traversal, or drive prefixes. The name
+``.weblate-many-repositories`` is reserved, including case variants.
+
+The component branch applies to every child repository. If their default branches
+differ, configure the branch explicitly. Set :ref:`component-push` to another
+JSON object using the same keys to configure separate push URLs; omitted keys
+use their pull URLs. Each child backend retains its own push-branch behavior
+and repository URL restrictions.
+
+File paths are prefixed with repository keys, for example ``pl/about.po``.
+The file mask can omit the language ``*`` placeholder when filenames are fixed;
+the repository key then identifies the language.
+
+Weblate identifies the combined state with a SHA-256 hash of the sorted
+repository keys and child commits. It stores the corresponding versioned JSON
+snapshots in :file:`.weblate-many-repositories/revisions/<hash>.json` at the root
+of the combined checkout, outside the child repositories. Snapshots are written
+atomically and checked against the requested hash and configured keys when read.
+Keep this directory for the lifetime of the checkout so comparisons, historical
+file reads, revision details, and resets can resolve the recorded child commits.
+Ordinary child cleanup does not remove it, and metadata paths cannot be symlinks.
+
+For older checkouts without snapshots, Weblate can reconstruct a mapping only
+when its hash matches the current local or remote state. Other missing or invalid
+snapshots cause a repository error; an aggregate hash cannot be used as a child
+commit. The stored revision-hash format is unchanged.
+
 .. _vcs-local:
 
 Local files

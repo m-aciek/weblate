@@ -1879,13 +1879,15 @@ class ComponentValidationTest(RepoTestCase):
         self.component.vcs = "many-repositories"
         self.component.repo = json.dumps({"cs": repo, "fr": repo})
         self.component.push = ""
-        self.component.filemask = "po/cs.po"
+        self.component.filemask = "cs/missing.po"
         with self.assertRaisesMessage(
             ValidationError, "The file mask did not match any files."
         ):
             self.component.full_clean()
 
-    def test_filemask_without_language_placeholder_many_repositories_match(self) -> None:
+    def test_filemask_without_language_placeholder_many_repositories_match(
+        self,
+    ) -> None:
         """Allow fixed masks when the repository key provides language code."""
         repo = self.format_local_path(self.git_repo_path)
         self.component.vcs = "many-repositories"

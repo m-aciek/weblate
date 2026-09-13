@@ -1238,7 +1238,7 @@ class RepoURLValidationTestCase(SimpleTestCase):
         "weblate.utils.outbound.socket.getaddrinfo",
         return_value=[(0, 0, 0, "", ("93.184.216.34", 443))],
     )
-    def test_many_repositories_json_config(self, mocked_getaddrinfo) -> None:
+    def test_many_repositories_json_config(self, mocked_getaddrinfo: MagicMock) -> None:
         """Many-repositories JSON config is validated by checking each sub-URL."""
         with override_settings(VCS_ALLOW_SCHEMES={"https", "ssh", "git"}):
             validate_repo_url(
@@ -1251,7 +1251,9 @@ class RepoURLValidationTestCase(SimpleTestCase):
         "weblate.utils.outbound.socket.getaddrinfo",
         return_value=[(0, 0, 0, "", ("93.184.216.34", 443))],
     )
-    def test_many_repositories_json_config_string_values(self, mocked_getaddrinfo) -> None:
+    def test_many_repositories_json_config_string_values(
+        self, mocked_getaddrinfo: MagicMock
+    ) -> None:
         """Many-repositories JSON config with plain string values is validated."""
         with override_settings(VCS_ALLOW_SCHEMES={"https", "ssh", "git"}):
             validate_repo_url(
@@ -1264,6 +1266,8 @@ class RepoURLValidationTestCase(SimpleTestCase):
         """A malformed JSON config starting with '{' raises a clear error."""
         with (
             override_settings(VCS_ALLOW_SCHEMES={"https", "ssh", "git"}),
-            self.assertRaisesMessage(ValidationError, "Invalid JSON in repository configuration"),
+            self.assertRaisesMessage(
+                ValidationError, "Invalid JSON in repository configuration"
+            ),
         ):
             validate_repo_url('{"pl": broken json')
