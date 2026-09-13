@@ -421,7 +421,7 @@ class MultipleRepositories(Repository):
             for key, repository in self.repositories_by_key.items()
         ]
         latest = max(infos, key=itemgetter("commitdate"))
-        return {
+        result: RawCommitInfo = {
             "summary": gettext("Aggregate revision for many repositories"),
             "message": gettext("Aggregate revision for many repositories"),
             "author": latest["author"],
@@ -431,6 +431,10 @@ class MultipleRepositories(Repository):
             "revision": revision,
             "shortrevision": revision[:7],
         }
+        for field in ("author_name", "author_email"):
+            if field in latest:
+                result[field] = latest[field]
+        return result
 
     def commit(
         self,
